@@ -2,6 +2,8 @@
 
 A mixture-of-experts re-parameterization of the LoRA up-projection. Each adapted `Linear` gets a **shared** `lora_down`, **$E$ parallel `lora_up` heads**, and a **layer-local** router that reads the rank-$r$ bottleneck activation and emits a per-sample softmax over those $E$ heads. The effective up-matrix becomes sample-dependent, so distinct clusters of training samples (e.g. different artists, different styles) can push different heads in different directions without collapsing into a single shared subspace.
 
+> We published paper about this! read [paper](https://arxiv.org/abs/2605.03252) if interested.
+
 Recap from `lora.md`: every target `Linear` $W_0$ is adapted by $y = W_0 x + m \cdot s \cdot B A x$, with $A \in \mathbb{R}^{r \times d_\text{in}}$ (down, shared) and $B \in \mathbb{R}^{d_\text{out} \times r}$ (up). HydraLoRA keeps $A$ exactly as before and replaces the single $B$ with $E$ stacked copies plus a routing module that mixes them per sample.
 
 ![HydraLoRA layer-local MoE](../structure_images/hydralora.png)

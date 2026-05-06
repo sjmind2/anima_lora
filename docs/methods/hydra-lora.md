@@ -2,6 +2,8 @@
 
 MoE-style multi-head LoRA with per-module routing. Targets multi-artist training in a single LoRA without style bleed — a standard LoRA trained on multiple artists blends all styles into one shared low-rank subspace, so distinct fingerprints are lost. HydraLoRA attaches several `lora_up` heads per adapted `Linear` and lets a learned router pick a per-sample mixture.
 
+> We published paper about this! read [paper](https://arxiv.org/abs/2605.03252) if interested.
+
 > **For the structural walkthrough** (architecture, forward pass, why RMS-over-rank-R, load-balancing formula, orthogonalized experts and the cold-start deadlock, composition matrix), see **`docs/structure/hydralora.md`**. This doc is the usage / ops / decision-log reference.
 
 ## File format
