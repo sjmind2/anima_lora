@@ -229,9 +229,11 @@ class CachedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         latent_path, te_path = self.samples[idx]
         latents, _res, _h, _w = load_cached_latents(latent_path)  # (16, H, W)
-        crossattn_emb, pooled_text = load_cached_text_features(
-            te_path, variant="random"
-        )
+        # Fixed variant=0: distill-mod targets a deterministic teacher mapping,
+        # and the teacher cache keys on (sample_idx, sigma_idx) only — drawing
+        # a random variant per visit would let cache hits return a teacher pred
+        # computed under a different caption than the student is conditioned on.
+        crossattn_emb, pooled_text = load_cached_text_features(te_path, variant=0)
         return idx, latents, crossattn_emb, pooled_text
 
 
@@ -479,7 +481,7 @@ def main():
     parser.add_argument(
         "--teacher_cache_K",
         type=int,
-        default=8,
+        default=4,
         help="Number of pre-sampled sigma bins for the teacher prediction cache. "
         "Each sample sees K distinct (sigma, noise) pairs over the run. "
         "Higher K = more diversity but slower cache fill / larger RAM.",
