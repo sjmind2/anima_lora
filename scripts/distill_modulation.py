@@ -237,6 +237,45 @@ class CachedDataset(torch.utils.data.Dataset):
         return idx, latents, crossattn_emb, pooled_text
 
 
+class ValTeacherCache:
+    """In-RAM cache of validation-time teacher predictions keyed by
+    ``(batch_idx, sigma_idx)``.
+
+    Validation is fully deterministic across calls — DiT body is frozen,
+    val dataloader runs ``shuffle=False, drop_last=True``, ``validation_sigmas``
+    is a fixed list, and the noise generator is reseeded with
+    ``validation_seed`` at the top of every pass and advanced in iteration
+    order. So the teacher prediction at ``(batch_idx, sigma_idx)`` is invariant
+    across calls. The first val pass fills the cache; every subsequent pass
+    hits and skips the teacher forward entirely.
+
+    Stored tensors are bf16 on CPU. RAM cost is
+    ``n_val_batches * len(sigmas) * batch_bytes`` — typically tens of MB for
+    a 5% val split at 4096-token bucket size.
+    """
+
+    def __init__(self):
+        self._store: dict[tuple[int, int], torch.Tensor] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, batch_idx: int, sigma_idx: int):
+        v = self._store.get((int(batch_idx), int(sigma_idx)))
+        if v is not None:
+            self.hits += 1
+            return v
+        self.misses += 1
+        return None
+
+    def put(self, batch_idx: int, sigma_idx: int, teacher_pred):
+        self._store[(int(batch_idx), int(sigma_idx))] = (
+            teacher_pred.detach().to(dtype=torch.bfloat16, device="cpu")
+        )
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+
 @torch.no_grad()
 def run_validation(
     model,
@@ -247,11 +286,16 @@ def run_validation(
     sigmas: list[float],
     max_steps: int | None,
     seed: int,
+    teacher_cache: ValTeacherCache | None = None,
 ):
     """Compute teacher↔student MSE on the val set at fixed sigmas.
 
     Returns (per_sigma_mean, overall_mean). Noise is drawn from a fixed-seed
     generator so val loss is comparable across runs.
+
+    If ``teacher_cache`` is provided, teacher predictions are memoized by
+    ``(batch_idx, sigma_idx)`` — the first pass fills the cache, every
+    subsequent pass skips the teacher forward.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     per_sigma: dict[float, list[float]] = {s: [] for s in sigmas}
@@ -273,22 +317,30 @@ def run_validation(
         )
         uncond = torch.zeros_like(crossattn_emb)
 
-        for sigma in sigmas:
+        for s_idx, sigma in enumerate(sigmas):
             sig_b = torch.full((B,), float(sigma), device=device, dtype=latents.dtype)
             sig_e = sig_b.view(B, 1, 1, 1)
             noisy = (1.0 - sig_e) * latents + sig_e * noise
             noisy = noisy.unsqueeze(2)
 
-            if model.blocks_to_swap:
-                model.prepare_block_swap_before_forward()
-            with torch.autocast("cuda", dtype=dtype):
-                teacher_pred = model.forward_mini_train_dit(
-                    noisy,
-                    sig_b,
-                    crossattn_emb,
-                    padding_mask=padding_mask,
-                    skip_pooled_text_proj=True,
-                )
+            cached = (
+                teacher_cache.get(i, s_idx) if teacher_cache is not None else None
+            )
+            if cached is not None:
+                teacher_pred = cached.to(device, dtype=dtype, non_blocking=True)
+            else:
+                if model.blocks_to_swap:
+                    model.prepare_block_swap_before_forward()
+                with torch.autocast("cuda", dtype=dtype):
+                    teacher_pred = model.forward_mini_train_dit(
+                        noisy,
+                        sig_b,
+                        crossattn_emb,
+                        padding_mask=padding_mask,
+                        skip_pooled_text_proj=True,
+                    )
+                if teacher_cache is not None:
+                    teacher_cache.put(i, s_idx, teacher_pred)
 
             if model.blocks_to_swap:
                 model.prepare_block_swap_before_forward()
@@ -504,6 +556,14 @@ def main():
         action="store_true",
         help="Eagerly run teacher predictions for every (sample, sigma_idx) before training. "
         "Adds ~K * N * t_teacher up front but eliminates teacher forwards during training.",
+    )
+    parser.add_argument(
+        "--no_val_teacher_cache",
+        action="store_true",
+        help="Disable validation-time teacher prediction caching (re-runs the teacher "
+        "forward on every val pass). Default is enabled — val is deterministic across "
+        "calls, so the first pass fills a (batch_idx, sigma_idx) cache and every "
+        "subsequent pass skips teacher forwards entirely.",
     )
     args = parser.parse_args()
 
@@ -768,6 +828,9 @@ def main():
 
     val_enabled = val_dataloader is not None and args.validate_every_n_steps > 0
     best_val_loss = float("inf")
+    val_teacher_cache = (
+        ValTeacherCache() if val_enabled and not args.no_val_teacher_cache else None
+    )
 
     progress = tqdm(range(args.iterations), desc="distill")
     accum_loss_t = torch.zeros((), device=device)
@@ -945,6 +1008,7 @@ def main():
                 sigmas=args.validation_sigmas,
                 max_steps=args.max_validation_steps,
                 seed=args.validation_seed,
+                teacher_cache=val_teacher_cache,
             )
             sigma_str = ", ".join(
                 f"σ={s:.2f}:{v:.4e}" for s, v in per_sigma_mean.items()
@@ -956,6 +1020,17 @@ def main():
                 writer.add_scalar("val/loss", overall_mean, step + 1)
                 for s, v in per_sigma_mean.items():
                     writer.add_scalar(f"val/loss_sigma_{s:.2f}", v, step + 1)
+                if val_teacher_cache is not None:
+                    vc_total = val_teacher_cache.hits + val_teacher_cache.misses
+                    vc_hit_rate = (
+                        val_teacher_cache.hits / vc_total if vc_total else 0.0
+                    )
+                    writer.add_scalar(
+                        "val_teacher_cache/hit_rate", vc_hit_rate, step + 1
+                    )
+                    writer.add_scalar(
+                        "val_teacher_cache/size", len(val_teacher_cache), step + 1
+                    )
             if overall_mean < best_val_loss:
                 best_val_loss = overall_mean
                 improved = True
@@ -995,6 +1070,15 @@ def main():
             f"Teacher cache final: {len(teacher_cache)} entries, "
             f"{teacher_cache.hits} hits / {teacher_cache.misses} misses "
             f"({hit_rate:.1f}% hit rate)"
+        )
+
+    if val_teacher_cache is not None:
+        vc_total = val_teacher_cache.hits + val_teacher_cache.misses
+        vc_hit_rate = (val_teacher_cache.hits / vc_total * 100) if vc_total else 0.0
+        logger.info(
+            f"Val teacher cache final: {len(val_teacher_cache)} entries, "
+            f"{val_teacher_cache.hits} hits / {val_teacher_cache.misses} misses "
+            f"({vc_hit_rate:.1f}% hit rate)"
         )
 
     if writer is not None:

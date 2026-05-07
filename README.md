@@ -4,11 +4,12 @@
 
 LoRA / T-LoRA training and inference engine for the [Anima](https://huggingface.co/circlestone-labs/Anima) diffusion model (DiT-based, flow-matching).
 
-Three things this repo aims to do well:
+Four things this repo aims to do well:
 
 1. **Fast LoRA training** on consumer GPUs — full-model `torch.compile` with CUDAGraph capture, end to end.
-2. **Verified merge-compatible variants** — LoRA, OrthoLoRA, and T-LoRA stack together and bake into a standalone DiT checkpoint.
-3. **A broad experimental surface** — HydraLoRA, ReFT, APEX distillation, postfix/prefix tuning, embedding inversion, img2emb, Spectrum inference, mod guidance.
+2. **Solid conventional implementations** — LoRA, OrthoLoRA, and T-LoRA stack together and bake losslessly into a standalone DiT checkpoint.
+3. **Recent methods, engineered for Anima** — Spectrum inference, DCW calibrator, OrthoHydraLoRA, and modulation guidance, each implemented end-to-end against Anima's compile/CUDAGraph contract rather than dropped in as a toy port.
+4. **A broad experimental surface** — APEX distillation, ReFT, postfix/prefix tuning, IP-Adapter, EasyControl, embedding inversion, img2emb, GRAFT.
 
 > **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, ReFT, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
 
@@ -31,7 +32,7 @@ Compile pipeline details in [docs/optimizations/for_compile.md](docs/optimizatio
 
 ---
 
-## 2. Verified merge-compatible variants
+## 2. Solid conventional implementations
 
 The default training config stacks **LoRA + OrthoLoRA + T-LoRA** together. All three fold losslessly into a standalone DiT checkpoint via thin-SVD export at save time, so you can ship ComfyUI-compatible `*_merged.safetensors` with no adapter loader dependency.
 
@@ -71,20 +72,32 @@ Refuses non-linear-delta variants (ReFT / HydraLoRA `_moe` / postfix / prefix) b
 
 ---
 
-## 3. Experimental features
+## 3. Recent methods, engineered for Anima
+
+Four recent papers picked up, implemented against Anima end-to-end, and shipped with the engineering they need to be actually usable — not toy reimplementations.
+
+| Method | What it is | Engineering notes | Doc |
+|---|---|---|---|
+| **Spectrum inference** | Training-free ~3.75× speedup via Chebyshev polynomial feature forecasting (Han et al., CVPR 2026). On cached steps every transformer block is skipped — only `t_embedder` + `final_layer` + `unpatchify` run. | `register_forward_pre_hook` on `final_layer` captures block outputs without monkey-patching the model; adaptive window schedule concentrates real forwards on early high-noise steps. Stable ComfyUI node in a separate repo: [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler). | [spectrum.md](docs/methods/spectrum.md) |
+| **DCW calibrator** | Sampler-level SNR-t bias correction (Yu et al., CVPR 2026) — mixes each Euler step's `prev_sample` toward the model's `x0_pred` along the LL Haar band. Two modes: scalar `λ` (offline-tuned) and **v4 learnable** per-prompt calibrator with online observation. | v4 head conditions on `(aspect, prompt, observed prefix gap)` and fires after `k=7` warmup steps. Bias direction characterized as **(CFG × aspect)-dependent** on Anima — paper-direction at CFG=4 non-square, paper-opposite at CFG=1 / 1024². Trained per-checkpoint via `make dcw`. | [dcw.md](docs/methods/dcw.md) |
+| **OrthoHydraLoRA** | MoE-style multi-head LoRA with orthogonalized experts and layer-local routing — shared `lora_down`, per-expert `lora_up_i`, learned per-sample router. Targets multi-style training without the cross-style bleed a single low-rank subspace produces. Original paper: [arXiv:2605.03252](https://arxiv.org/abs/2605.03252). | Saves two side-by-side files: `anima_hydra.safetensors` (baked-down LoRA, ComfyUI drop-in) and `anima_hydra_moe.safetensors` (full multi-head). Live routing in ComfyUI via the bundled **Anima Adapter Loader** node (`custom_nodes/comfyui-hydralora/`), which installs per-Linear forward hooks reproducing `HydraLoRAModule.forward`. | [hydra-lora.md](docs/methods/hydra-lora.md) |
+| **Modulation guidance** | Distill a `pooled_text_proj` MLP that steers AdaLN modulation coefficients toward quality-positive directions (Starodubcev et al., ICLR 2026). Teacher sees real cross-attention; student sees zeroed cross-attention but receives pooled text through modulation. | Trained with `make distill-mod` against the frozen DiT. Inference applies the projection at AdaLN time so it composes with any LoRA variant; `make test-mod` runs a sample with it enabled. | [mod-guidance.md](docs/methods/mod-guidance.md) |
+
+---
+
+## 4. Experimental surface
 
 Each ships with a doc — see the link for usage, flags, and caveats.
 
 | Feature | What it is | Doc |
 |---|---|---|
-| **HydraLoRA** | MoE-style multi-head routing: shared `lora_down`, per-expert `lora_up_i`, layer-local router. Needs the `AnimaAdapterLoader` ComfyUI node. | [hydra-lora.md](docs/methods/hydra-lora.md) |
-| **ReFT** | Block-level residual-stream intervention (LoReFT, NeurIPS 2024). Composes with any LoRA variant. | [reft.md](docs/methods/reft.md) |
 | **APEX** | Self-adversarial 1–4 NFE distillation via learned condition shift; no discriminator, no teacher. | [apex.md](docs/experimental/apex.md) |
+| **ReFT** | Block-level residual-stream intervention (LoReFT, NeurIPS 2024). Composes with any LoRA variant. | [reft.md](docs/methods/reft.md) |
 | **Postfix / prefix tuning** | Continuous vectors appended (postfix) or prepended (prefix) to adapter cross-attention. Five postfix variants. | [postfix-sigma.md](docs/experimental/postfix-sigma.md), [prefix-tuning.md](docs/experimental/prefix-tuning.md) |
+| **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT frozen; trains Perceiver resampler + per-block `to_k_ip`/`to_v_ip`. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
+| **EasyControl** | Extended self-attention image conditioning. DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **Embedding inversion** | Optimize a text embedding to match a target image through the frozen DiT. | [invert.md](docs/methods/invert.md) |
 | **img2emb resampler** | Learn a reference-image → embedding mapping via TIPSv2-L/14 features + anchor injection. | [archive/img2emb/README.md](archive/img2emb/README.md) |
-| **Spectrum inference** | Training-free ~3.75× speedup via Chebyshev feature forecasting (Han et al., CVPR 2026). Stable ComfyUI node in a separate repo: [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler). | [spectrum.md](docs/methods/spectrum.md) |
-| **Modulation guidance** | Distill a `pooled_text_proj` MLP that steers AdaLN coefficients (Starodubcev et al., ICLR 2026). | [mod-guidance.md](docs/methods/mod-guidance.md) |
 | **GRAFT** | Rejection-sampling fine-tuning — train, generate, curate survivors, retrain. | [graft-guideline.md](docs/guidelines/graft-guideline.md) |
 
 > **Want to contribute?** Two areas where outside help would have outsized impact: **IP-Adapter productionization** (tests, public reference checkpoint, lighter vision encoder) and **EasyControl adapters** (canny / depth / pose / … — each control type is one self-contained PR). See [CONTRIBUTING.md → Priority areas](CONTRIBUTING.md#priority-areas).

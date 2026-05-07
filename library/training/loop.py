@@ -573,8 +573,15 @@ def _log_step(
 ) -> None:
     args = state.args
     log_every = max(1, int(getattr(args, "log_every_n_steps", 1) or 1))
-    should_log_step = (state.global_step % log_every == 0) or (
-        state.global_step >= args.max_train_steps
+    # Gate on sync_gradients: with gradient_accumulation_steps > 1 the
+    # dataloader fires this hook once per micro-batch but global_step only
+    # advances on sync. Without the gate, log_every_n_steps decides the same
+    # answer for every micro-batch in an accumulation cycle, producing bursts
+    # of N back-to-back tracker writes followed by N silent ones (exactly the
+    # "sometimes honored, sometimes ignored" pattern).
+    should_log_step = state.accelerator.sync_gradients and (
+        (state.global_step % log_every == 0)
+        or (state.global_step >= args.max_train_steps)
     )
 
     current_loss = loss.detach().item()

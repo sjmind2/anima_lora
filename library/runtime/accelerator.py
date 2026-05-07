@@ -79,23 +79,39 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
     accelerator.load_state(dirname)
 
 
-def prepare_accelerator(args: argparse.Namespace):
+def resolve_run_log_dir(args: argparse.Namespace) -> Optional[str]:
+    """Return the timestamped run-specific log directory for this invocation.
+
+    Builds ``{args.logging_dir}/{log_prefix}{YYYYMMDD-HHMM}`` once and caches it
+    on ``args._resolved_run_log_dir`` so the config-snapshot writer (which runs
+    before ``prepare_accelerator``) and the accelerator setup land in the same
+    dir even when they're a minute apart on the wall clock. Returns ``None``
+    when ``--logging_dir`` is unset.
+    """
     if args.logging_dir is None:
-        logging_dir = None
+        return None
+    cached = getattr(args, "_resolved_run_log_dir", None)
+    if cached is not None:
+        return cached
+    if args.log_prefix is not None:
+        log_prefix = args.log_prefix
     else:
-        if args.log_prefix is not None:
-            log_prefix = args.log_prefix
-        else:
-            method = getattr(args, "method", None)
-            preset = getattr(args, "preset", None)
-            parts = [p for p in (method, preset) if p]
-            log_prefix = ("_".join(parts) + "_") if parts else ""
-        logging_dir = (
-            args.logging_dir
-            + "/"
-            + log_prefix
-            + time.strftime("%Y%m%d-%H%M", time.localtime())
-        )
+        method = getattr(args, "method", None)
+        preset = getattr(args, "preset", None)
+        parts = [p for p in (method, preset) if p]
+        log_prefix = ("_".join(parts) + "_") if parts else ""
+    resolved = (
+        args.logging_dir
+        + "/"
+        + log_prefix
+        + time.strftime("%Y%m%d-%H%M", time.localtime())
+    )
+    args._resolved_run_log_dir = resolved
+    return resolved
+
+
+def prepare_accelerator(args: argparse.Namespace):
+    logging_dir = resolve_run_log_dir(args)
 
     if args.log_with is None:
         if logging_dir is not None:

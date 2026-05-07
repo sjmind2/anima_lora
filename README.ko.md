@@ -6,11 +6,12 @@
 
 > 처음 사용하시나요? [**가이드북**](docs/guidelines/가이드북.md)이 CUDA 설치 → 데이터셋 준비 → 학습 → ComfyUI 배포까지 전 과정을 Windows 초보자 관점에서 안내합니다.
 
-이 저장소가 지향하는 세 가지:
+이 저장소가 지향하는 네 가지:
 
 1. **빠른 LoRA 학습** — 풀 모델 `torch.compile` + CUDAGraph 캡처를 엔드-투-엔드로 적용하여 소비자용 GPU에서 동작.
-2. **검증된 머지 호환 변형** — LoRA, OrthoLoRA, T-LoRA가 한 세트로 스택되고, 독립형 DiT 체크포인트로 그대로 구워넣을 수 있음.
-3. **넓은 실험적 기능 표면** — HydraLoRA, ReFT, APEX distillation, postfix/prefix tuning, 임베딩 인버전, img2emb, Spectrum 추론, modulation guidance.
+2. **견고한 정통 구현** — LoRA, OrthoLoRA, T-LoRA가 한 세트로 스택되고, 독립형 DiT 체크포인트로 무손실 병합되어 그대로 배포 가능.
+3. **Anima에 맞춰 엔지니어링한 최신 기법** — Spectrum 추론, DCW 캘리브레이터, OrthoHydraLoRA, modulation guidance. 토이 포팅이 아니라 Anima의 컴파일 / CUDAGraph 계약에 맞춰 엔드-투-엔드로 구현.
+4. **넓은 실험적 기능 표면** — APEX distillation, ReFT, postfix/prefix tuning, IP-Adapter, EasyControl, 임베딩 인버전, img2emb, GRAFT.
 
 > **한눈에 보는 구조도** (DiT 내부, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, ReFT, Spectrum, modulation, 컴파일 최적화)는 [`docs/structure_images_korean/`](docs/structure_images_korean/)에 있습니다. 글로 된 해설은 [`docs/structure/`](docs/structure/) 참고.
 
@@ -34,7 +35,7 @@
 
 ---
 
-## 2. 검증된 머지 호환 변형
+## 2. 견고한 정통 구현
 
 기본 학습 설정은 **LoRA + OrthoLoRA + T-LoRA**를 함께 스택합니다. 세 변형 모두 저장 시점의 thin-SVD 내보내기를 통해 독립형 DiT 체크포인트로 무손실 병합되므로, 별도 어댑터 로더 없이 ComfyUI 호환 `*_merged.safetensors`를 그대로 배포할 수 있습니다.
 
@@ -74,20 +75,32 @@ Linear 가중치 델타가 아닌 변형(ReFT / HydraLoRA `_moe` / postfix / pre
 
 ---
 
-## 3. 실험적 기능
+## 3. Anima에 맞춰 엔지니어링한 최신 기법
+
+최근 논문 네 편을 골라 Anima에 엔드-투-엔드로 구현하고, 실제로 쓸 수 있도록 필요한 엔지니어링까지 함께 출고 — 토이 재현이 아닙니다.
+
+| 기법 | 설명 | 엔지니어링 노트 | 문서 |
+|---|---|---|---|
+| **Spectrum 추론** | Chebyshev 다항식 특성 예측으로 학습 없이 약 3.75× 가속 (Han et al., CVPR 2026). 캐시된 스텝에서는 모든 트랜스포머 블록을 건너뛰고 `t_embedder` + `final_layer` + `unpatchify`만 실행. | `register_forward_pre_hook`을 `final_layer`에 걸어 모델을 monkey-patch하지 않고 블록 출력을 캡처. 적응형 윈도우 스케줄로 실제 forward를 초반 고노이즈 스텝에 집중. 별도 안정판 ComfyUI 노드: [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler). | [spectrum.md](docs/methods/spectrum.md) |
+| **DCW 캘리브레이터** | 샘플러 단계의 SNR-t 편향 보정 (Yu et al., CVPR 2026) — 매 Euler 스텝의 `prev_sample`을 모델의 `x0_pred`로 LL Haar 밴드 방향으로 혼합. 두 모드: 스칼라 `λ` (오프라인 튜닝)와 **v4 학습형** 프롬프트별 캘리브레이터. | v4 헤드는 `(aspect, prompt, 관측된 prefix gap)` 조건부이며 `k=7` 워밍업 후 발화. Anima에서 편향 방향은 **(CFG × aspect) 의존적** — CFG=4 비정사각에서 paper-direction, CFG=1 / 1024²에서 paper-opposite. `make dcw`로 체크포인트별 학습. | [dcw.md](docs/methods/dcw.md) |
+| **OrthoHydraLoRA** | MoE 스타일 멀티헤드 LoRA — 직교화된 전문가들과 레이어 로컬 라우터. 공유 `lora_down`, 전문가별 `lora_up_i`, 학습된 per-sample 라우터. 단일 저랭크 부공간이 만들어내는 다중 스타일 cross-bleed를 회피. 원논문: [arXiv:2605.03252](https://arxiv.org/abs/2605.03252). | 두 파일을 나란히 저장: `anima_hydra.safetensors` (베이크다운 LoRA, ComfyUI 드롭인)와 `anima_hydra_moe.safetensors` (풀 멀티헤드). ComfyUI 라이브 라우팅은 동봉된 **Anima Adapter Loader** 노드 (`custom_nodes/comfyui-hydralora/`)로, per-Linear forward hook이 `HydraLoRAModule.forward`를 그대로 재현. | [hydra-lora.md](docs/methods/hydra-lora.md) |
+| **Modulation guidance** | AdaLN 변조 계수를 품질-양성 방향으로 조향하는 `pooled_text_proj` MLP를 distillation (Starodubcev et al., ICLR 2026). 교사는 실제 cross-attention을 보고, 학생은 cross-attention이 0이지만 풀드 텍스트가 변조 경로로 들어옴. | `make distill-mod`로 frozen DiT에 대해 학습. 추론 시점에 AdaLN 단계에서 적용되므로 어떤 LoRA 변형과도 조합 가능. `make test-mod`로 적용 샘플을 즉시 확인. | [mod-guidance.md](docs/methods/mod-guidance.md) |
+
+---
+
+## 4. 실험적 기능 표면
 
 각 항목마다 전용 문서가 있습니다 — 사용법, 플래그, 주의사항은 링크 참고.
 
 | 기능 | 설명 | 문서 |
 |---|---|---|
-| **HydraLoRA** | MoE 스타일 멀티헤드 라우팅: 공유 `lora_down`, 전문가별 `lora_up_i`, 레이어 로컬 라우터. `AnimaAdapterLoader` ComfyUI 노드 필요. | [hydra-lora.md](docs/methods/hydra-lora.md) |
-| **ReFT** | 블록 단위 residual-stream intervention (LoReFT, NeurIPS 2024). 어떤 LoRA 변형과도 조합 가능. | [reft.md](docs/methods/reft.md) |
 | **APEX** | 학습된 condition shift를 활용한 self-adversarial 1–4 NFE distillation. 판별자 · 외부 teacher 불필요. | [apex.md](docs/experimental/apex.md) |
+| **ReFT** | 블록 단위 residual-stream intervention (LoReFT, NeurIPS 2024). 어떤 LoRA 변형과도 조합 가능. | [reft.md](docs/methods/reft.md) |
 | **Postfix / prefix tuning** | 어댑터 cross-attention에 연속 벡터를 뒤에(postfix) 또는 앞에(prefix) 붙임. postfix 변형 5종. | [postfix-sigma.md](docs/experimental/postfix-sigma.md), [prefix-tuning.md](docs/experimental/prefix-tuning.md) |
+| **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT는 frozen, Perceiver 리샘플러와 블록별 `to_k_ip`/`to_v_ip`만 학습. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
+| **EasyControl** | 확장 self-attention 이미지 조건화. DiT는 frozen, 블록별 cond LoRA(self-attn + FFN)와 스칼라 `b_cond` 게이트만 학습. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **임베딩 인버전** | frozen DiT를 통과시켜 타깃 이미지에 맞도록 텍스트 임베딩을 최적화. | [invert.md](docs/methods/invert.md) |
 | **img2emb 리샘플러** | TIPSv2-L/14 features + anchor injection을 이용한 참조 이미지 → 임베딩 매핑 학습. | [archive/img2emb/README.md](archive/img2emb/README.md) |
-| **Spectrum 추론** | Chebyshev 특성 예측으로 학습 없이 약 3.75× 가속 (Han et al., CVPR 2026). 별도 안정판 ComfyUI 노드: [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler). | [spectrum.md](docs/methods/spectrum.md) |
-| **Modulation guidance** | AdaLN 계수를 조향하는 `pooled_text_proj` MLP distillation (Starodubcev et al., ICLR 2026). | [mod-guidance.md](docs/methods/mod-guidance.md) |
 | **GRAFT** | 리젝션 샘플링 파인튜닝 — 학습 → 생성 → survivor 큐레이션 → 재학습 루프. | [graft-guideline.md](docs/guidelines/graft-guideline.md) |
 
 > **기여하고 싶으신가요?** 외부 기여가 특히 큰 임팩트를 낼 수 있는 두 영역: **IP-Adapter 프로덕션화** (테스트, 공개 레퍼런스 체크포인트, 더 가벼운 비전 인코더) 와 **EasyControl 어댑터** (canny / depth / pose / … — 컨트롤 타입 하나가 곧 자체 완결 PR 한 건). 자세한 내용은 [CONTRIBUTING.md → Priority areas](CONTRIBUTING.md#priority-areas).

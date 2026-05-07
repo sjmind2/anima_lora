@@ -445,6 +445,34 @@ def _write_config_snapshot(
         logger.warning(f"Could not write config snapshot to {path}: {e}")
         return None
     logger.info(f"Config snapshot written: {path}")
+
+    # Mirror into the run's TB log dir so the timestamped run dir becomes a
+    # self-contained record of "this run + the config that produced it". The
+    # canonical copy at output_dir/<output_name>.snapshot.toml stays
+    # load-bearing — apex inference reads it by stem to recover warm-start
+    # config — so a failure here is logged but not fatal.
+    if getattr(args, "logging_dir", None):
+        try:
+            from library.runtime.accelerator import resolve_run_log_dir
+
+            run_log_dir = resolve_run_log_dir(args)
+        except ImportError as e:
+            logger.warning(f"Could not resolve run log dir for snapshot mirror: {e}")
+            run_log_dir = None
+        if run_log_dir:
+            mirror_path = os.path.join(
+                run_log_dir, f"{output_name}{_SNAPSHOT_SUFFIX}"
+            )
+            try:
+                os.makedirs(run_log_dir, exist_ok=True)
+                with open(mirror_path, "w", encoding="utf-8") as f:
+                    f.write(rendered)
+                logger.info(f"Config snapshot mirrored: {mirror_path}")
+            except OSError as e:
+                logger.warning(
+                    f"Could not mirror config snapshot to {mirror_path}: {e}"
+                )
+
     return path
 
 
