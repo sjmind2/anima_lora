@@ -1,0 +1,436 @@
+"""DirectEdit CLI — image editing via flow inversion + ψ_tar resampling.
+
+Two prompts in (``--prompt_src``, ``--prompt_tar``), one edited image out.
+The source prompt feeds the inversion pass; the target prompt drives the
+edit forward pass anchored to per-step inversion residuals (DirectEdit,
+Yang & Ye arXiv:2605.02417v1).
+
+Usage:
+    python scripts/edit.py \
+        --image path/to/source.png \
+        --prompt_src "1girl, smile, school_uniform" \
+        --prompt_tar "1girl, smile, school_uniform, double peace" \
+        --dit models/diffusion_models/anima-preview3-base.safetensors \
+        --text_encoder models/text_encoders/qwen_3_06b_base.safetensors \
+        --vae models/vae/qwen_image_vae.safetensors \
+        --save_path output/tests/directedit/
+
+Wired by ``scripts/experimental_tasks/inference.py::cmd_test_directedit``
+under ``make exp-test-directedit`` — that task picks a random source image,
+runs the wd-tagger to seed ``--prompt_src``, and forms ``--prompt_tar`` from
+``PROMPT`` env (the user's edit instruction).
+
+v1 caveats (left as TODO hooks in ``library/inference/directedit.py``):
+  * No V-injection — ``--t_inj`` reserved but inactive.
+  * No mask blending — ``--mask`` reserved but inactive.
+  * Inversion runs at ``--invert_guidance 1.0`` (no CFG); the edit pass uses
+    the user's ``--guidance_scale`` (default 4.0, Anima preview3 standard).
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from PIL import Image
+from torchvision import transforms
+
+# Make ``anima_lora/`` importable when this script is invoked as
+# ``python scripts/edit.py``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from library.anima import strategy as strategy_anima, text_strategies  # noqa: E402
+from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS  # noqa: E402
+from library.inference import directedit, sampling as inference_utils  # noqa: E402
+from library.inference.models import load_dit_model, load_text_encoder  # noqa: E402
+from library.inference.output import save_images  # noqa: E402
+from library.inference.text import prepare_text_inputs  # noqa: E402
+from library.log import setup_logging  # noqa: E402
+from library.models import qwen_vae as qwen_image_autoencoder_kl  # noqa: E402
+from library.runtime.device import clean_memory_on_device  # noqa: E402
+
+setup_logging()
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="DirectEdit image editing for Anima")
+
+    # Model paths (mirror inference.py defaults so the make target passes the
+    # same trio it always does).
+    p.add_argument("--dit", required=True)
+    p.add_argument("--text_encoder", required=True)
+    p.add_argument("--vae", required=True)
+    p.add_argument("--attn_mode", default="flash")
+
+    # Editing inputs.
+    p.add_argument("--image", required=True, help="Source image path")
+    p.add_argument(
+        "--prompt_src",
+        default="",
+        help="Source caption (for inversion). Typically wd-tagger output for "
+        "external images, or the recorded prompt for self-generated images. "
+        "Ignored when --cached_embed is set.",
+    )
+    p.add_argument(
+        "--prompt_tar",
+        default="",
+        help="Target caption (for the edit pass). Usually `prompt_src + edit`. "
+        "Ignored when --cached_embed is set.",
+    )
+    p.add_argument(
+        "--cached_embed",
+        default=None,
+        help="Sanity-check mode: load a preprocessed `_anima_te.safetensors` "
+        "cache (the file `cache_text_embeddings.py` writes — same format the "
+        "trainer consumes) and run one invert + edit pass per stored variant "
+        "with ψ_tar == ψ_src. With `--caption_shuffle_variants N` caches, "
+        "this sweeps v0..v{N-1} (pristine + tag-shuffled re-encodings); "
+        "single-variant caches collapse to one pass. Skips the text encoder "
+        "entirely. Mismatched reconstruction across variants flags numeric "
+        "drift in invert/edit_forward.",
+    )
+    p.add_argument(
+        "--negative_prompt",
+        default="",
+        help="Negative prompt for CFG on the edit pass (default empty).",
+    )
+    p.add_argument(
+        "--mask",
+        default=None,
+        help="Reserved — background-lock mask path (v2). Currently ignored.",
+    )
+
+    # Sampling knobs.
+    p.add_argument("--infer_steps", type=int, default=28)
+    p.add_argument("--flow_shift", type=float, default=1.0)
+    p.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=4.0,
+        help="CFG scale for the edit (target) pass.",
+    )
+    p.add_argument(
+        "--invert_guidance",
+        type=float,
+        default=1.0,
+        help="CFG scale during inversion. Default 1.0 (no CFG); raise only if "
+        "you need the inverted noise to match a high-CFG generation seed.",
+    )
+    p.add_argument(
+        "--t_inj",
+        type=int,
+        default=0,
+        help="Reserved — V-injection step count (v2). Currently ignored.",
+    )
+    p.add_argument(
+        "--image_size",
+        type=int,
+        nargs=2,
+        default=None,
+        help="Override image size (H W). Default: snap to closest "
+        "CONSTANT_TOKEN_BUCKETS bucket for the source aspect ratio.",
+    )
+    p.add_argument("--seed", type=int, default=42)
+
+    # I/O.
+    p.add_argument("--save_path", required=True)
+
+    # Plumbing flags inference.py exposes that downstream code reads — keep
+    # passthroughs so generation-side accessors don't trip.
+    p.add_argument("--vae_chunk_size", type=int, default=64)
+    p.add_argument("--vae_disable_cache", action="store_true", default=True)
+    p.add_argument("--text_encoder_cpu", action="store_true")
+    p.add_argument("--device", default=None)
+    p.add_argument("--no_metadata", action="store_true")
+    p.add_argument("--lora_weight", nargs="*", default=None)
+    p.add_argument("--lora_multiplier", nargs="*", type=float, default=1.0)
+    p.add_argument("--lycoris", action="store_true")
+
+    args = p.parse_args()
+    args.fp8 = False
+    args.compile = False
+    return args
+
+
+def _pick_bucket(img: Image.Image) -> tuple[int, int]:
+    """Return (H, W) from CONSTANT_TOKEN_BUCKETS closest to the source aspect."""
+    rw, rh = img.size
+    target = rw / rh
+    best = min(CONSTANT_TOKEN_BUCKETS, key=lambda wh: abs(wh[0] / wh[1] - target))
+    return best[1], best[0]  # bucket is (W, H); we return (H, W)
+
+
+def _load_cached_embed_variants(
+    cache_path: str, anima, device: torch.device
+) -> list[tuple[str, torch.Tensor]]:
+    """Load preprocessed crossattn embeds from a `_anima_te.safetensors` cache.
+
+    Returns a list of `(variant_label, crossattn_emb)` ready to feed
+    DirectEdit. Mirrors `AnimaTextEncoderOutputsCachingStrategy.load_outputs_npz`
+    but emits *all* variants instead of stochastically sampling one — this is
+    a sweep, not training.
+
+    Behavior:
+      * Multi-variant caches (`num_variants` key present): yields v0..v{N-1}.
+        v0 is the pristine caption; v1..v{N-1} are tag-shuffled re-encodings.
+      * Single-variant caches: yields one pass.
+      * Pre-baked `crossattn_emb*` (cached when training was preprocessed
+        with `cache_llm_adapter_outputs=True`) is used directly. Otherwise
+        we run `anima._preprocess_text_embeds` ourselves so the cache stays
+        usable regardless of how it was preprocessed.
+
+    Fails loud if the file is missing or shape-mismatched.
+    """
+    from safetensors import safe_open
+
+    if not os.path.isfile(cache_path):
+        raise FileNotFoundError(
+            f"--cached_embed file not found: {cache_path}\n"
+            "Run `make preprocess-te` (with --caption_shuffle_variants N to "
+            "get a multi-variant cache) before running the dry test."
+        )
+
+    out: list[tuple[str, torch.Tensor]] = []
+    with safe_open(cache_path, framework="pt") as f:
+        keys = set(f.keys())
+        has_variants = "num_variants" in keys
+        if has_variants:
+            n = int(f.get_tensor("num_variants"))
+            indices = [(f"v{i}", f"_v{i}") for i in range(n)]
+        else:
+            indices = [("v0", "")]
+
+        for label, suf in indices:
+            crossattn_key = f"crossattn_emb{suf}"
+            if crossattn_key in keys:
+                crossattn_emb = f.get_tensor(crossattn_key).to(
+                    device, dtype=torch.bfloat16
+                )
+                # Cache stores per-sample tensors unbatched, e.g. (512, 1024).
+                # The DiT expects (B, N, D) — add the batch dim.
+                if crossattn_emb.dim() == 2:
+                    crossattn_emb = crossattn_emb.unsqueeze(0)
+                # Pre-baked from training preprocess — already adapter-projected.
+            else:
+                # Run llm_adapter ourselves on the raw Qwen3 prompt_embeds.
+                prompt_embeds = f.get_tensor(f"prompt_embeds{suf}").to(device)
+                attn_mask = f.get_tensor(f"attn_mask{suf}").to(device)
+                t5_input_ids = f.get_tensor(f"t5_input_ids{suf}").to(device)
+                t5_attn_mask = f.get_tensor(f"t5_attn_mask{suf}").to(device)
+                # Cached tensors are unbatched (shape [N, D] etc.); the
+                # adapter expects a batch dim — add it for everything.
+                if prompt_embeds.dim() == 2:
+                    prompt_embeds = prompt_embeds.unsqueeze(0)
+                if attn_mask.dim() == 1:
+                    attn_mask = attn_mask.unsqueeze(0)
+                if t5_input_ids.dim() == 1:
+                    t5_input_ids = t5_input_ids.unsqueeze(0)
+                if t5_attn_mask.dim() == 1:
+                    t5_attn_mask = t5_attn_mask.unsqueeze(0)
+                crossattn_emb, _ = anima._preprocess_text_embeds(
+                    source_hidden_states=prompt_embeds,
+                    target_input_ids=t5_input_ids,
+                    target_attention_mask=t5_attn_mask,
+                    source_attention_mask=attn_mask,
+                )
+                crossattn_emb[~t5_attn_mask.bool()] = 0
+                crossattn_emb = crossattn_emb.to(torch.bfloat16)
+            out.append((label, crossattn_emb))
+    return out
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.t_inj:
+        logger.warning(
+            "--t_inj %d ignored: V-injection is a v2 feature (see "
+            "library/inference/directedit.py docstring).",
+            args.t_inj,
+        )
+    if args.mask:
+        logger.warning("--mask ignored: background-lock blending is v2.")
+
+    device = torch.device(
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    args.device = device
+
+    # 1. Load source image, pick bucket if --image_size unset.
+    src_pil = Image.open(args.image).convert("RGB")
+    if args.image_size is None:
+        h_pix, w_pix = _pick_bucket(src_pil)
+        args.image_size = [h_pix, w_pix]
+        logger.info(
+            "Image size auto-picked from source aspect %.3f -> %dx%d (HxW)",
+            src_pil.size[0] / src_pil.size[1],
+            h_pix,
+            w_pix,
+        )
+    h_pix, w_pix = args.image_size
+    src_pil = src_pil.resize((w_pix, h_pix), Image.LANCZOS)
+
+    # 2. Tokenize strategies (matches inference.py main()).
+    tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
+        qwen3_path=args.text_encoder,
+        t5_tokenizer_path=None,
+        qwen3_max_length=512,
+        t5_max_length=512,
+    )
+    text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
+    text_strategies.TextEncodingStrategy.set_strategy(
+        strategy_anima.AnimaTextEncodingStrategy()
+    )
+
+    # 3. Load DiT first (needed by prepare_text_inputs's _preprocess_text_embeds).
+    logger.info("Loading DiT model...")
+    anima = load_dit_model(args, device, dit_weight_dtype=torch.bfloat16)
+
+    # 4. Encode source + target text — or, in --cached_embed mode, load
+    #    preprocessed crossattn variants from the TE cache file (one pass per
+    #    stored vN; ψ_tar == ψ_src so each pass reconstructs the source).
+    cached_variants: list[tuple[str, torch.Tensor]] | None = None
+    if args.cached_embed is not None:
+        cached_variants = _load_cached_embed_variants(
+            args.cached_embed, anima, device
+        )
+        embed_src = embed_tar = None  # filled per-variant below
+        embed_neg = None  # No real negative concept; CFG silently disabled in _v_pred.
+        logger.info(
+            "DirectEdit dry: loaded %d variant(s) from %s; CFG silently "
+            "disabled (embed_neg=None).",
+            len(cached_variants),
+            args.cached_embed,
+        )
+    else:
+        args_src = SimpleNamespace(**vars(args))
+        args_src.prompt = args.prompt_src
+        args_src.negative_prompt = args.negative_prompt
+
+        args_tar = SimpleNamespace(**vars(args))
+        args_tar.prompt = args.prompt_tar
+        args_tar.negative_prompt = args.negative_prompt
+
+        logger.info("Encoding prompts...")
+        # Share the text-encoder instance across both prompt encodings.
+        te_dtype = torch.bfloat16
+        te_device = torch.device("cpu") if args.text_encoder_cpu else device
+        text_encoder = load_text_encoder(args, dtype=te_dtype, device=te_device)
+        shared = {"text_encoder": text_encoder, "conds_cache": {}}
+
+        ctx_src, ctx_neg = prepare_text_inputs(args_src, device, anima, shared)
+        ctx_tar, _ = prepare_text_inputs(args_tar, device, anima, shared)
+
+        # Drop TE; conds_cache hands us bare tensors.
+        text_encoder.to("cpu")
+        del text_encoder, shared
+        clean_memory_on_device(device)
+
+        embed_src = ctx_src["embed"][0].to(device, dtype=torch.bfloat16)
+        embed_tar = ctx_tar["embed"][0].to(device, dtype=torch.bfloat16)
+        embed_neg = ctx_neg["embed"][0].to(device, dtype=torch.bfloat16)
+
+    # 5. VAE-encode the source image -> clean latent (5D, frame=1).
+    logger.info("Loading VAE for source encode...")
+    vae = qwen_image_autoencoder_kl.load_vae(
+        args.vae,
+        device="cpu",
+        disable_mmap=True,
+        spatial_chunk_size=args.vae_chunk_size,
+        disable_cache=args.vae_disable_cache,
+    )
+    vae.to(torch.bfloat16).eval().to(device)
+
+    tfm = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
+    )
+    # 5D [B, C, T=1, H, W] — qwen_vae preserves input rank, and the DiT
+    # expects 5D latents (it concats a per-frame padding mask along dim=1).
+    img_t = (
+        tfm(src_pil).unsqueeze(0).unsqueeze(2).to(device, dtype=torch.bfloat16)
+    )  # [1, 3, 1, H, W] in [-1,1]
+
+    with torch.no_grad():
+        z_clean = vae.encode_pixels_to_latents(img_t)  # [1, C, 1, H/8, W/8]
+    logger.info("Encoded source latent: %s", tuple(z_clean.shape))
+
+    # Move VAE off-device for the DiT loop, bring it back for decode.
+    vae.to("cpu")
+    clean_memory_on_device(device)
+
+    # 6. Sigma schedule. timesteps in generate_body are sigmas/1000-shifted,
+    #    but invert/edit_forward consume sigmas directly.
+    timesteps, sigmas = inference_utils.get_timesteps_sigmas(
+        args.infer_steps, args.flow_shift, device
+    )
+    sigmas = sigmas.to(device)
+
+    # 7. Build variant pass list. Real-text mode: one pass with the encoded
+    #    src/tar pair. --cached_embed mode: one pass per stored variant in the
+    #    cache file, each using ψ_tar == ψ_src for the reconstruction check.
+    if cached_variants is not None:
+        variant_passes = [(label, e, e) for label, e in cached_variants]
+    else:
+        variant_passes = [(None, embed_src, embed_tar)]
+
+    # 8. Inversion -> editing per variant. Hold all z_edits before re-mounting
+    #    the VAE so we only do one DiT-off / VAE-on swap.
+    z_edits: list[tuple[Optional[str], torch.Tensor]] = []
+    for variant, e_src, e_tar in variant_passes:
+        tag = f"variant={variant}, " if variant else ""
+        logger.info(
+            "DirectEdit: %sinversion (T=%d, src_guidance=%.2f) -> edit "
+            "(tar_guidance=%.2f, t_inj=%d)",
+            tag,
+            args.infer_steps,
+            args.invert_guidance,
+            args.guidance_scale,
+            args.t_inj,
+        )
+        z_inv, delta_z = directedit.invert(
+            anima=anima,
+            z_clean=z_clean,
+            embed_src=e_src,
+            embed_neg=embed_neg if args.invert_guidance != 1.0 else None,
+            sigmas=sigmas,
+            guidance_scale=args.invert_guidance,
+        )
+        z_edit = directedit.edit_forward(
+            anima=anima,
+            z_init=z_inv[0],
+            delta_z=delta_z,
+            embed_tar=e_tar,
+            embed_neg=embed_neg,
+            sigmas=sigmas,
+            guidance_scale=args.guidance_scale,
+        )
+        z_edits.append((variant, z_edit))
+
+    # 9. Decode + save (one VAE re-mount for all variants).
+    del anima
+    clean_memory_on_device(device)
+    vae.to(device)
+    os.makedirs(args.save_path, exist_ok=True)
+    src_stem = Path(args.image).stem
+    for variant, z_edit in z_edits:
+        with torch.no_grad():
+            pixels = vae.decode_to_pixels(z_edit.to(device, dtype=vae.dtype))
+        if pixels.ndim == 5:
+            pixels = pixels.squeeze(2)
+        pixels = pixels[0].to("cpu", dtype=torch.float32)
+        base = f"{src_stem}_{variant}" if variant else src_stem
+        # save_images reads args.seed + args.save_path + args.no_metadata.
+        saved = save_images(pixels, args, original_base_name=base)
+        logger.info("DirectEdit done -> %s.png", saved)
+
+
+if __name__ == "__main__":
+    main()

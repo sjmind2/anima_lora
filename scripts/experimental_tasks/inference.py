@@ -219,6 +219,229 @@ def cmd_test_ip(extra):
         print(f"  > Ref pasted: {ref_dst}")
 
 
+def cmd_test_directedit(extra):
+    """DirectEdit on a random source image, seeded by wd-swinv2-tagger-v3.
+
+    Pipeline:
+      1. Pick source image (REF_IMAGE env, first positional arg, or random
+         from ``post_image_dataset/resized/``).
+      2. Run wd-swinv2-tagger-v3 on the source -> ``src_tags`` caption
+         (downloaded on first use to ``models/captioners/wd-swinv2-tagger-v3/``).
+      3. Build edit prompts:
+            prompt_src = src_tags
+            prompt_tar = src_tags + ", " + PROMPT
+         (PROMPT env or ``--prompt`` extra arg supplies the edit instruction.
+         Defaults to ``"double peace"``.)
+      4. Call ``scripts/edit.py`` (DirectEdit invert + edit) using the same
+         DiT/VAE/TE trio as the other inference targets.
+      5. Save under ``output/tests/directedit/`` and copy the source image
+         alongside as ``<name>_src.png``.
+
+    Examples:
+      make exp-test-directedit PROMPT='double peace'
+      REF_IMAGE=foo.png make exp-test-directedit PROMPT='glasses'
+      python tasks.py exp-test-directedit foo.png --prompt 'smile'
+    """
+    # 1. Resolve source image — same logic as cmd_test_ip / cmd_test_easycontrol.
+    ref_image = os.environ.get("REF_IMAGE", "").strip()
+    if not ref_image and extra and not extra[0].startswith("-"):
+        ref_image = extra[0]
+        extra = extra[1:]
+    if not ref_image:
+        ref_image = _random_ref_image(ROOT / "post_image_dataset" / "resized") or ""
+    if not ref_image:
+        print(
+            "Usage: python tasks.py exp-test-directedit [<ref_image>] [extra...]\n"
+            "   or: REF_IMAGE=path/to/ref.png python tasks.py exp-test-directedit\n"
+            "   (no ref given and post_image_dataset/resized/ is empty)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # 2. Pull the user-supplied edit instruction. PROMPT env wins; fall back
+    #    to a ``--prompt`` flag in extra; final default = "double peace".
+    edit_prompt = os.environ.get("PROMPT", "").strip()
+    cleaned_extra: list[str] = []
+    skip_next = False
+    for j, tok in enumerate(extra):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--prompt" and j + 1 < len(extra):
+            if not edit_prompt:
+                edit_prompt = extra[j + 1]
+            skip_next = True
+            continue
+        cleaned_extra.append(tok)
+    extra = cleaned_extra
+    if not edit_prompt:
+        edit_prompt = "double peace"
+
+    # 3. Run wd-tagger on the source.
+    sys.path.insert(0, str(ROOT))
+    from PIL import Image  # noqa: PLC0415
+    from library.captioning.wd_tagger import WDTagger  # noqa: PLC0415
+
+    print(f"  > tagging source: {ref_image}")
+    tagger = WDTagger()
+    src_caption = tagger.predict_caption(Image.open(ref_image))
+    if not src_caption:
+        print(
+            "  ! wd-tagger produced no tags above threshold; using empty source "
+            "prompt — DirectEdit reconstruction will be weaker than usual.",
+            file=sys.stderr,
+        )
+    print(f"  > src caption: {src_caption[:120]}{'...' if len(src_caption) > 120 else ''}")
+
+    tar_caption = (
+        f"{src_caption}, {edit_prompt}" if src_caption else edit_prompt
+    )
+
+    # 4. Save dir + edit.py invocation. Reuse INFERENCE_BASE for the model
+    #    path trio (--dit / --text_encoder / --vae) so this stays in sync with
+    #    the other test commands automatically.
+    save_dir = ROOT / "output" / "tests" / "directedit"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    base_iter = iter(INFERENCE_BASE)
+    py = next(base_iter)
+    next(base_iter)  # drop "inference.py"
+    leftover_base = list(base_iter)
+    args = [py, "scripts/edit.py", *_filter_inference_base_for_edit(leftover_base)]
+    args += [
+        "--image", str(ref_image),
+        "--prompt_src", src_caption,
+        "--prompt_tar", tar_caption,
+        "--save_path", str(save_dir),
+    ]
+    args += list(extra)
+    run(args)
+
+    # 5. Copy the source alongside the edited output for side-by-side review.
+    pngs = sorted(
+        (p for p in save_dir.glob("*.png") if not p.name.endswith("_src.png")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if pngs:
+        src_dst = pngs[0].with_name(pngs[0].stem + "_src.png")
+        shutil.copy(ref_image, src_dst)
+        print(f"  > Source pasted: {src_dst}")
+
+
+def cmd_test_directedit_dry(extra):
+    """DirectEdit functional sanity check using preprocessed cross-emb variants.
+
+    Bypasses wd-tagger and the text encoder. Auto-resolves the source image's
+    `_anima_te.safetensors` cache (the file `cache_text_embeddings.py` writes
+    — same format the trainer consumes) and runs one invert + edit pass per
+    stored variant with ψ_tar == ψ_src. With `--caption_shuffle_variants N`
+    caches, this sweeps v0 (pristine) + v1..v{N-1} (tag-shuffled). Each pass
+    should reconstruct the source; divergence flags numeric drift in
+    invert/edit_forward against that variant's cross-emb representation.
+
+    Examples:
+      make exp-test-directedit-dry
+      REF_IMAGE=foo.png make exp-test-directedit-dry
+      python tasks.py exp-test-directedit-dry foo.png --seed 7
+    """
+    ref_image = os.environ.get("REF_IMAGE", "").strip()
+    if not ref_image and extra and not extra[0].startswith("-"):
+        ref_image = extra[0]
+        extra = extra[1:]
+    if not ref_image:
+        ref_image = _random_ref_image(ROOT / "post_image_dataset" / "resized") or ""
+    if not ref_image:
+        print(
+            "Usage: python tasks.py exp-test-directedit-dry [<ref_image>] [extra...]\n"
+            "   or: REF_IMAGE=path/to/ref.png python tasks.py exp-test-directedit-dry\n"
+            "   (no ref given and post_image_dataset/resized/ is empty)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Auto-resolve the matching TE cache file. Try the standard cache_dir
+    # location first (post_image_dataset/lora/ — what configs/base.toml's
+    # subset cache_dir points at), then the legacy sidecar location next to
+    # the source image.
+    stem = Path(ref_image).stem
+    suffix = "_anima_te.safetensors"
+    candidates = [
+        ROOT / "post_image_dataset" / "lora" / f"{stem}{suffix}",
+        Path(ref_image).parent / f"{stem}{suffix}",
+    ]
+    cache_path = next((p for p in candidates if p.is_file()), None)
+    if cache_path is None:
+        print(
+            f"  ! No TE cache found for {ref_image}.\n"
+            f"    Looked in: {candidates[0]}\n"
+            f"           and: {candidates[1]}\n"
+            "    Run `make preprocess-te` first (with --caption_shuffle_variants N "
+            "to get a multi-variant cache).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"  > TE cache: {cache_path}")
+
+    save_dir = ROOT / "output" / "tests" / "directedit_dry"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    base_iter = iter(INFERENCE_BASE)
+    py = next(base_iter)
+    next(base_iter)  # drop "inference.py"
+    leftover_base = list(base_iter)
+    args = [py, "scripts/edit.py", *_filter_inference_base_for_edit(leftover_base)]
+    args += [
+        "--image", str(ref_image),
+        "--cached_embed", str(cache_path),
+        "--save_path", str(save_dir),
+    ]
+    args += list(extra)
+    run(args)
+
+    # Copy the source alongside the reconstruction for side-by-side review.
+    pngs = sorted(
+        (p for p in save_dir.glob("*.png") if not p.name.endswith("_src.png")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if pngs:
+        src_dst = pngs[0].with_name(pngs[0].stem + "_src.png")
+        shutil.copy(ref_image, src_dst)
+        print(f"  > Source pasted: {src_dst}")
+
+
+def _filter_inference_base_for_edit(args: list[str]) -> list[str]:
+    """Drop INFERENCE_BASE flags that ``scripts/edit.py`` doesn't accept.
+
+    INFERENCE_BASE bundles plenty of generation-only flags (--prompt, --seed,
+    --image_size, --infer_steps, --sampler, etc.) that overlap with or
+    conflict with edit.py's own. Keep only the model/path flags we actually
+    want to forward; let edit.py supply its own defaults for the rest.
+    """
+    keep_flags = {
+        "--dit",
+        "--text_encoder",
+        "--vae",
+        "--vae_chunk_size",
+        "--attn_mode",
+    }
+    boolean_flags = {"--vae_disable_cache"}
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in keep_flags and i + 1 < len(args):
+            out.extend([tok, args[i + 1]])
+            i += 2
+        elif tok in boolean_flags:
+            out.append(tok)
+            i += 1
+        else:
+            i += 1
+    return out
+
+
 def cmd_test_easycontrol(extra):
     """Inference with latest EasyControl weight.
 

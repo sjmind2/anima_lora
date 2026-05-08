@@ -81,6 +81,8 @@ make exp-test-postfix-func     # Test with postfix tuning (func variant)
 make exp-test-ip REF_IMAGE=... # IP-Adapter inference (image-conditioned)
 make exp-test-easycontrol REF_IMAGE=...  # EasyControl inference (image-conditioned)
 make exp-test-ref              # Inference with a learned prefix-slot weight (--prefix_weight)
+make exp-test-directedit PROMPT='double peace'  # DirectEdit on random source image
+                                                # (wd-tagger seeds prompt_src; PROMPT becomes the edit)
 
 # GUI (PySide6 — config editing, IP-Adapter / EasyControl preprocess+train, dataset browsing)
 make gui

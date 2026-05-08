@@ -232,6 +232,18 @@ COMMANDS = {
         exp_inference.cmd_test_easycontrol,
         "[experimental] Inference with latest EasyControl weight. Usage: exp-test-easycontrol <ref_image> [--prompt ... --easycontrol_scale ...]",
     ),
+    "exp-test-directedit": (
+        exp_inference.cmd_test_directedit,
+        "[experimental] DirectEdit on a random source image. PROMPT='...' supplies the edit "
+        "instruction (appended to the wd-tagger source caption). REF_IMAGE=path overrides the "
+        "random pick. Usage: exp-test-directedit [ref_image] [extra...]",
+    ),
+    "exp-test-directedit-dry": (
+        exp_inference.cmd_test_directedit_dry,
+        "[experimental] DirectEdit functional check: random source image + random crossattn "
+        "embed (no TE, no captioner); ψ_tar == ψ_src so output should reconstruct the source. "
+        "REF_IMAGE=path overrides the random pick. Usage: exp-test-directedit-dry [ref_image] [extra...]",
+    ),
 }
 
 
