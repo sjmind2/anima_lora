@@ -164,9 +164,18 @@ COMMANDS = {
         exp_training.cmd_apex,
         "[experimental] APEX distillation (condition-shift self-adversarial)",
     ),
+    "exp-apex-combined": (
+        exp_training.cmd_apex_combined,
+        "[experimental] APEX combined-3F (c-shift + t-shift, Δt=-0.05). "
+        "See docs/experimental/apex-0508.md.",
+    ),
     "exp-postfix": (
         exp_training.cmd_postfix,
         "[experimental] Postfix/prefix tuning (mode selected in configs/methods/postfix.toml)",
+    ),
+    "exp-soft-tokens": (
+        exp_training.cmd_soft_tokens,
+        "[experimental] SoftREPA-style per-layer × per-t soft tokens (training-only v1)",
     ),
     "exp-ip-adapter": (
         exp_training.cmd_ip_adapter,

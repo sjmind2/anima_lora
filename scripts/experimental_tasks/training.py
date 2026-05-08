@@ -17,8 +17,24 @@ def cmd_apex(extra):
     train("apex", extra)
 
 
+def cmd_apex_combined(extra):
+    """APEX combined-3F: shipped APEX + Forward 2 t-shift (Δt = -0.05).
+
+    Selects ``configs/methods/apex_combined.toml``. The adapter dispatch in
+    ``library/training/method_adapter.py`` matches both ``method == "apex"``
+    and ``method.startswith("apex_")``, so ``ApexMethodAdapter`` is picked
+    up automatically; ``apex_dt`` from the toml flows through to Forward 2
+    via the standard merge chain.
+    """
+    train("apex_combined", extra)
+
+
 def cmd_postfix(extra):
     train("postfix", extra)
+
+
+def cmd_soft_tokens(extra):
+    train("soft_tokens", extra)
 
 
 def cmd_ip_adapter(extra):

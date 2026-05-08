@@ -364,6 +364,25 @@ def _condition_shift_loss(ctx: LossContext) -> torch.Tensor:
     return ctx.model_pred.new_zeros(())
 
 
+def _soft_tokens_contrastive_loss(ctx: LossContext) -> torch.Tensor:
+    """SoftREPA-style InfoNCE on diffusion-loss logits (paper §3.1).
+
+    The adapter (`networks/methods/soft_tokens.py::SoftTokensMethodAdapter`)
+    runs the k extra DiT forwards with rolled text and produces a scalar
+    contrastive loss that we just multiply by the user-set weight here. This
+    is a regularizer added to plain FM, not a replacement — the paper's pure
+    contrastive objective regressed FID on SD3 even while improving
+    ImageReward, so we keep matched FM intact and add the contrastive term
+    on top with a small weight.
+    """
+    weight = float(getattr(ctx.network, "contrastive_weight", 0.0) or 0.0)
+    aux = ctx.aux.get("soft_tokens") or {}
+    loss = aux.get("contrastive_loss")
+    if weight <= 0.0 or loss is None:
+        return ctx.model_pred.new_zeros(())
+    return weight * loss.float()
+
+
 def _repa_loss(ctx: LossContext) -> torch.Tensor:
     """REPA-style alignment loss (cosine, scalar-broadcast).
 
@@ -418,6 +437,7 @@ LOSS_REGISTRY: dict[str, LossFn] = {
     "multiscale": _multiscale_loss,
     "postfix_contrastive": _postfix_contrastive_loss,
     "postfix_sigma_budget": _postfix_sigma_budget_loss,
+    "soft_tokens_contrastive": _soft_tokens_contrastive_loss,
     "repa": _repa_loss,
 }
 
@@ -431,6 +451,7 @@ _STAGE_SCALAR_BROADCAST = (
     "condition_shift",
     "postfix_contrastive",
     "postfix_sigma_budget",
+    "soft_tokens_contrastive",
     "repa",
 )
 _STAGE_SCALAR_POST = ("multiscale",)
@@ -595,8 +616,19 @@ def build_loss_composer(args: argparse.Namespace, network: object) -> LossCompos
         active.append("functional")
     if float(getattr(args, "multiscale_loss_weight", 0.0) or 0.0) > 0.0:
         active.append("multiscale")
-    if float(getattr(network, "contrastive_weight", 0.0) or 0.0) > 0.0:
+    # contrastive_weight is shared between postfix and soft_tokens; the
+    # method gate distinguishes them so a single network never has both
+    # active at once.
+    is_soft_tokens = method == "soft_tokens"
+    if (
+        float(getattr(network, "contrastive_weight", 0.0) or 0.0) > 0.0
+        and not is_soft_tokens
+    ):
         active.append("postfix_contrastive")
+    if is_soft_tokens and float(
+        getattr(network, "contrastive_weight", 0.0) or 0.0
+    ) > 0.0:
+        active.append("soft_tokens_contrastive")
     if float(getattr(network, "sigma_budget_weight", 0.0) or 0.0) > 0.0:
         active.append("postfix_sigma_budget")
     if (

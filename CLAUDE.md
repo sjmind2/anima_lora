@@ -25,13 +25,14 @@ Both `make` (Unix) and `python tasks.py` (cross-platform) are supported. The exa
 # Each training invocation selects a method + hardware preset. Method settings win
 # over preset settings on overlap (e.g. postfix forces blocks_to_swap=0).
 # Method files in configs/methods/: lora.toml, postfix.toml, apex.toml,
-# ip_adapter.toml, easycontrol.toml. Variants are toggle blocks
-# inside them — uncomment the target block to switch:
+# ip_adapter.toml, easycontrol.toml, soft_tokens.toml. Variants are toggle
+# blocks inside them — uncomment the target block to switch:
 #   lora.toml         — classic LoRA / OrthoLoRA / T-LoRA / HydraLoRA / ReFT
 #                       (default stacks LoRA + OrthoLoRA + T-LoRA + ReFT)
 #   postfix.toml      — postfix / postfix_exp / postfix_func / postfix_sigma / prefix
 #   ip_adapter.toml   — decoupled image cross-attention (PE-Core resampler)
 #   easycontrol.toml  — extended self-attn image conditioning (per-block cond LoRA)
+#   soft_tokens.toml  — SoftREPA-style per-layer × per-t soft text tokens (frozen DiT)
 make lora                   # LoRA family (methods/lora.toml + presets.toml[default])
 python tasks.py lora        # Same, works on Windows too
 make lora PRESET=low_vram   # Override preset: methods/lora.toml + presets.toml[low_vram]
@@ -48,6 +49,7 @@ make exp-ip-adapter-preprocess  # Alias for `make preprocess` + `make preprocess
 make exp-easycontrol            # EasyControl image conditioning (methods/easycontrol.toml)
                                 # Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/
 make exp-easycontrol-preprocess # Resize + VAE + text caches into post_image_dataset/easycontrol/
+make exp-soft-tokens            # SoftREPA-style per-layer × per-t soft tokens (training-only v1)
 
 # GUI-friendly per-variant path (configs/gui-methods/<variant>.toml — clean,
 # self-contained, no toggle blocks). Intended for basic users who don't want
@@ -135,7 +137,7 @@ On Windows, use `python tasks.py <command>` instead of `make <command>`. Extra a
 | `scripts/tasks/` | Per-domain task implementations (`training`, `inference`, `preprocess`, `masking`, `gui`, `downloads`, `utilities`) — where command bodies actually live; `_common.py` holds shared helpers. |
 | `scripts/experimental_tasks/` | Bodies for the `exp-*` commands (apex, postfix, ip-adapter, easycontrol training + their `exp-test-*` inference). Reuses helpers from `scripts/tasks/_common.py`. |
 
-Deep-dives in `docs/methods/` (shipped): `dcw.md`, `hydra-lora.md`, `invert.md`, `mod-guidance.md`, `psoft-integrated-ortholora.md`, `reft.md`, `spectrum.md`, `timestep_mask.md`. Experimental method docs live under `docs/experimental/`: `apex.md`, `easycontrol.md`, `ip-adapter.md`, `postfix-sigma.md`, `prefix-tuning.md`.
+Deep-dives in `docs/methods/` (shipped): `dcw.md`, `hydra-lora.md`, `invert.md`, `mod-guidance.md`, `psoft-integrated-ortholora.md`, `reft.md`, `spectrum.md`, `timestep_mask.md`. Experimental method docs live under `docs/experimental/`: `apex.md`, `easycontrol.md`, `ip-adapter.md`, `postfix-sigma.md`, `prefix-tuning.md`, `soft_tokens.md`.
 
 ## Config flow
 
@@ -144,12 +146,13 @@ Training is config-driven via a three-layer chain: `base.toml → presets.toml[<
 Layout:
 - `configs/base.toml` — shared infrastructure (model paths, optimizer, compile flags, etc.) AND the default LoRA dataset blueprint (`[general]` + `[[datasets]]` + `[[datasets.subsets]]`). LoRA reads resized images from `post_image_dataset/resized/` with caches redirected to `post_image_dataset/lora/` via `cache_dir`. Captions live in `image_dataset/` (master) — TE caching reads `.txt` from there, training reads only the cached prompt embeddings. The dataset sections are consumed by `BlueprintGenerator` and skipped by the flat method+preset merge chain (see `_DATASET_CONFIG_SECTIONS` in `library/train_util.py`). Override with `--dataset_config <path>` when you need a different blueprint.
 - `configs/presets.toml` — all hardware profiles in one file as TOML sections: `[default]`, `[fast_16gb]`, `[low_vram]` (also serves as Windows 8GB), `[half]` (experiment preset — sets `sample_ratio=0.5` for every subset via the global `--sample_ratio` override). Holds `blocks_to_swap`, `gradient_checkpointing`, `unsloth_offload_checkpointing`, etc.
-- `configs/methods/` — one file per algorithm family. Holds rank, method flags (`use_hydra`, `add_reft`, …), and the method's opinionated learning rate / epochs / output_name. Five files:
+- `configs/methods/` — one file per algorithm family. Holds rank, method flags (`use_hydra`, `add_reft`, …), and the method's opinionated learning rate / epochs / output_name. Six files:
   - `lora.toml` — LoRA / OrthoLoRA / T-LoRA / HydraLoRA / ReFT. Variants are toggle blocks; default stacks classic LoRA + OrthoLoRA + T-LoRA + ReFT.
   - `postfix.toml` — postfix / postfix_exp / postfix_func / postfix_sigma / prefix. Toggle blocks.
   - `apex.toml` — APEX self-adversarial distillation (arXiv:2604.12322). Warm-starts from a prior LoRA via `network_weights` + `dim_from_weights`.
   - `ip_adapter.toml` — IP-Adapter image cross-attention (DiT frozen; trains resampler + per-block `to_k_ip`/`to_v_ip`). Reuses the LoRA pipeline's data layout (`post_image_dataset/resized/` + `post_image_dataset/lora/`). Defaults to PRE-CACHED PE features (`make preprocess-pe`).
   - `easycontrol.toml` — EasyControl image conditioning (DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate). Source: `easycontrol-dataset/`. Caches: `post_image_dataset/easycontrol/`. Reuses cached VAE latents — no new sidecar.
+  - `soft_tokens.toml` — SoftREPA-style per-layer × per-t soft text tokens (DiT frozen; per-block `Block.forward` monkey-patch splices `s^(k,t)` into `crossattn_emb`). ~1M params. Training-only v1 — inference path not wired.
 - `configs/gui-methods/` — GUI-friendly parallel tree. One self-contained TOML per **variant** instead of per family (`lora`, `lora-8gb`, `lora_longer`, `lora_repa`, `ortholora`, `tlora`, `tlora_ortho`, `tlora_ortho_reft`, `reft`, `hydralora_experimental`, `hydralora_sigma`, `postfix`, `postfix_exp`, `postfix_func`, `postfix_sigma`, `prefix`, `ip_adapter`, `easycontrol`, plus a copy of `apex`). No toggle blocks — what you see is what runs. Selected via `train.py --methods_subdir gui-methods` (wrapped by `make lora-gui GUI_PRESETS=<variant>` / `python tasks.py lora-gui <variant>`). Intended for basic users and as the eventual source of truth for the GUI's variant picker. Run `ls configs/gui-methods/` for the live list — variants get added/renamed.
 
 Subsets accept an optional `cache_dir` key — when set, all VAE / text-encoder / PE caches are written to (and read from) that directory using stem-mirrored filenames, instead of sitting next to the source image. IP-Adapter and EasyControl method configs use this to keep `ip-adapter-dataset/` and `easycontrol-dataset/` purely user-facing source dirs while caches live under `post_image_dataset/`.
@@ -213,6 +216,10 @@ Decoupled image cross-attention (Ye et al. 2023). DiT is frozen; trains only the
 ## EasyControl
 
 Extended self-attention image conditioning. DiT is frozen; trains per-block cond LoRA on self-attn (q/k/v/o) + FFN (layer1/layer2) plus a per-block scalar logit-bias `b_cond` (init `-10`) that gates cond-position softmax mass. Reference is VAE-encoded and patch-embedded by the DiT's frozen `x_embedder` into condition tokens that flow through every block alongside the target stream; target self-attention attends to a key set extended with the cond stream's keys/values. Training uses a **two-stream block forward** (target + cond in one scope, no deferred-backward dance); inference prefills a per-block `(K_c, V_c)` cache once at setup and reuses it across every denoising step and every CFG branch (cond is deterministic — `cond_temb = t_embedder(0)`). Source images live in `easycontrol-dataset/`; caches go to `post_image_dataset/easycontrol/` via subset `cache_dir`. Reuses cached VAE latents — no new sidecar. See `docs/experimental/easycontrol.md`.
+
+## Soft Tokens (SoftREPA parameterization)
+
+Per-layer time-indexed soft text tokens (Lee et al., arXiv:2503.08250, NeurIPS 2025). DiT frozen; trains a `(n_layers, K, D)` token bank + `(n_t_buckets, n_layers, D)` t-offsets — ~1M params at default. For each of the first `n_layers` blocks, a `(layer, t-bucket)`-specific token slice is spliced into `crossattn_emb` via a per-block `Block.forward` monkey-patch (ReFT-pattern); end-of-sequence overwrite of zero-padding tail (or `front_of_padding` scatter) keeps `_run_blocks` torch.compile shape-static. Anima's cross-attention (not joint-stream MM-DiT) means each block independently sees a different `crossattn_emb` — no strip/re-prepend dance. Adopts only the parameterization from the SoftREPA paper; the contrastive InfoNCE objective is intentionally skipped (caused SD3 FID regression). Training-only v1: `inference.py` will refuse to load these checkpoints until per-step block hooks are wired into the denoising loop. See `docs/experimental/soft_tokens.md`.
 
 ## Embedding inversion
 

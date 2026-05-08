@@ -192,11 +192,23 @@ class ApexMethodAdapter(MethodAdapter):
         # TB layer can plot warmup/rampup live. Updated in extra_forwards.
         self._last_lam_inner_eff: float = 0.0
         self._last_lam_f_eff: float = 0.0
+        # Realized anchor fraction this step (per-element lam_inner=0 mask).
+        # Differs from args.apex_anchor_ratio when B*ratio doesn't round
+        # cleanly or the schedule is still in warmup (lam_inner_eff=0 → no
+        # anchor needed). Surfaced via metrics so anchor_ratio's effect is
+        # visible end-to-end.
+        self._last_anchor_frac: float = 0.0
         # MSE(v_fake_sg, F_real) — key degeneracy detector. Near-zero means the
         # shifted condition produces the same DiT output as the unshifted one,
         # so L_mix collapses to the trivial self-consistency fixed point and
         # the adversarial signal vanishes. None until the first train step.
         self._last_v_fake_divergence: float | None = None
+        # Fraction of Forward 2 t-shifted timesteps that hit the [0.02, 0.98]
+        # clamp this step. Only meaningful when --apex_dt != 0; surfaced via
+        # metrics() so the combined-3F lane can verify Δt = −0.05 stays well
+        # below the upper-clamp threshold (the artifact that degenerated ~5%
+        # of probe steps at +Δt). None for shipped APEX (apex_dt = 0).
+        self._last_dt_clamp_frac: float | None = None
         # Cumulative-since-start moving averages for the noisy adapter scalars
         # — point-in-time loss_mix / loss_fake / v_fake_divergence are jittery
         # under typical batch sizes (per-step CV ~50%), and the cumulative avg
@@ -295,10 +307,27 @@ class ApexMethodAdapter(MethodAdapter):
         #     L_mix. Paper §3.2: "v_fake := sg(F_theta(x_t, t, c_fake))". Under
         #     no_grad so the fake call doesn't contribute to the real-branch
         #     gradient path.
+        #
+        # combined-3F: when --apex_dt != 0, perturb t too (anima(x_t, t+Δt, c_fake))
+        # — c-shift and t-shift are roughly orthogonal in output-delta space (see
+        # docs/experimental/apex-0508.md), so combining adds non-redundant
+        # supervision at the same compute. Forward 1 and Forward 3 keep their
+        # original timesteps. Clamp keeps t_eff in the sampler's training range
+        # and avoids the t=0.98 upper-edge artifact.
+        apex_dt = float(getattr(args, "apex_dt", 0.0) or 0.0)
+        if apex_dt != 0.0:
+            t_shifted = (timesteps.float() + apex_dt).clamp(0.02, 0.98)
+            self._last_dt_clamp_frac = float(
+                ((t_shifted == 0.02) | (t_shifted == 0.98)).float().mean().item()
+            )
+            t_eff = t_shifted.to(timesteps.dtype)
+        else:
+            self._last_dt_clamp_frac = None
+            t_eff = timesteps
         with torch.no_grad():
             v_fake_sg = anima(
                 noisy_model_input,
-                timesteps,
+                t_eff,
                 c_fake.detach(),
                 padding_mask=padding_mask,
                 **kw,
@@ -339,13 +368,48 @@ class ApexMethodAdapter(MethodAdapter):
         self._last_lam_inner_eff = float(lam_inner_eff)
         self._last_lam_f_eff = float(lam_f_eff)
 
+        # Per-element anchor mask: a fraction of the batch gets lam_inner=0
+        # (T_mix = v_data → pure FM). EMF Theorem 4.3's validity condition
+        # ‖u_{t->t} − u_t‖ → 0 must hold *throughout* training, not just at
+        # init — a permanent anchor keeps the FM signal alive past rampup at
+        # zero extra forwards. Off (anchor_ratio=0.0) by default.
+        B = noisy_model_input.shape[0]
+        anchor_ratio = float(getattr(args, "apex_anchor_ratio", 0.0) or 0.0)
+        if anchor_ratio > 0.0 and lam_inner_eff > 0.0:
+            n_anchor = int(round(B * anchor_ratio))
+            n_anchor = max(0, min(B, n_anchor))
+            if n_anchor > 0:
+                # Random subset: avoids correlating anchor identity with batch
+                # position (which would interact with bucket ordering).
+                perm = torch.randperm(B, device=noisy_model_input.device)
+                anchor_idx = perm[:n_anchor]
+                anchor_mask_b = torch.zeros(
+                    B, device=noisy_model_input.device, dtype=model_pred.dtype
+                )
+                anchor_mask_b[anchor_idx] = 1.0  # 1 = anchored (lam=0)
+            else:
+                anchor_mask_b = torch.zeros(
+                    B, device=noisy_model_input.device, dtype=model_pred.dtype
+                )
+        else:
+            anchor_mask_b = torch.zeros(
+                B, device=noisy_model_input.device, dtype=model_pred.dtype
+            )
+        # Per-element effective lam_inner: lam_inner_eff for non-anchor,
+        # 0 for anchor. Broadcast to T_mix_v's [B,C,1,H,W] layout.
+        lam_inner_per = (
+            lam_inner_eff * (1.0 - anchor_mask_b)
+        ).view(-1, 1, 1, 1, 1)
+        anchor_frac = float(anchor_mask_b.mean().item())
+        self._last_anchor_frac = anchor_frac
+
         # T_mix_v in velocity space (Eq. 23 after Prop. 3 conversion):
         #   T_mix_v = (1-lam_inner)*v_data + lam_inner*v_fake_sg
-        # At lam_inner=0 (warmup), T_mix_v == v_data, so L_mix collapses to
-        # pure FM — the bootstrap signal that L_sup used to provide.
+        # At lam_inner=0 (warmup or anchor), T_mix_v == v_data, so L_mix
+        # collapses to pure FM — the bootstrap / permanent-anchor signal.
         v_data_5d = (primary.noise - primary.latents).unsqueeze(2)  # [B,C,1,H,W]
         T_mix_v = (
-            (1.0 - lam_inner_eff) * v_data_5d + lam_inner_eff * v_fake_sg
+            (1.0 - lam_inner_per) * v_data_5d + lam_inner_per * v_fake_sg
         ).detach()
 
         # Stash everything ``extra_forwards_fake`` needs to run forward 3 after
@@ -425,6 +489,7 @@ class ApexMethodAdapter(MethodAdapter):
         out: dict[str, float] = {
             "apex/lam_inner_eff": float(self._last_lam_inner_eff),
             "apex/lam_f_eff": float(self._last_lam_f_eff),
+            "apex/anchor_frac": float(self._last_anchor_frac),
         }
         if self._last_v_fake_divergence is not None:
             out["apex/v_fake_divergence"] = float(self._last_v_fake_divergence)
@@ -432,6 +497,8 @@ class ApexMethodAdapter(MethodAdapter):
             out["apex/v_fake_divergence_avg"] = float(
                 self._v_fake_div_recorder.moving_average
             )
+        if self._last_dt_clamp_frac is not None:
+            out["apex/dt_clamp_frac"] = float(self._last_dt_clamp_frac)
 
         network = ctx.network
         mix_v = getattr(network, "_last_apex_mix_value", None)

@@ -88,6 +88,8 @@ All fields in `configs/methods/apex.toml`:
 | `apex_condition_shift_init_a` | `-0.5` | Table 7 peak GenEval cell (a=-0.5, b=1.0 → 0.81). |
 | `apex_condition_shift_init_b` | `1.0` | Same. |
 | `apex_shift_lr_scale` | `0.1` | LR multiplier on `(a, b)` vs. LoRA params. Keeps the shift off the unstable Table 7 corner. |
+| `apex_anchor_ratio` | `0.0` | Fraction of each batch where `lam_inner` is forced to 0 (T_mix = v_data → pure FM for that element). EMF Theorem 4.3 / Li & He 2025: the surrogate is only valid while `u_{t→t}` stays close to `u_t`, which isn't guaranteed once rampup completes. A small permanent anchor (~0.05–0.1) keeps an FM signal alive past rampup at zero extra forwards. Default `0.0` (off — paper-faithful). Realized fraction logged as `apex/anchor_frac`. |
+| `weighting_scheme = "apex_x1_omega"` | (alt) | EMF / Li & He's "x-pred & u-loss" reweighting transported into velocity space: `(t/(1-t))²` (clamped at `(1-t) ≥ 0.02`). Tilts loss heavily onto high-noise (t→1) steps. Drop-in alternative to `apex_omega`; expect bigger gradient on high-`t` samples and a corresponding LR retune. |
 | `blocks_to_swap` | **`0` (forced)** | Multi-forward pattern breaks block swap — see below. |
 
 ## Warm-start is mandatory

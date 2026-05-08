@@ -506,6 +506,31 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="APEX: LR multiplier for ConditionShift params vs. LoRA params. "
         "0.1x is conservative — keeps (a, b) from drifting into the unstable Table 7 corner.",
     )
+    parser.add_argument(
+        "--apex_anchor_ratio",
+        type=float,
+        default=0.0,
+        help="APEX: fraction of each batch where inner lambda is forced to 0 "
+        "(T_mix = v_data → L_mix is pure FM). EMF Theorem 4.3 / Li & He 2025: "
+        "the surrogate is only valid while u_{t->t} stays close to u_t, which "
+        "isn't guaranteed once the rampup hits its target. A small anchor "
+        "(~0.05–0.1) keeps a permanent FM signal alive past rampup at zero "
+        "extra forwards. Default 0.0 (off — paper-faithful behavior).",
+    )
+    parser.add_argument(
+        "--apex_dt",
+        type=float,
+        default=0.0,
+        help="APEX combined-3F: temporal shift Δt added to Forward 2's t when "
+        "querying v_fake_sg = anima(x_t, t+Δt, c_fake). EMF (arXiv:2602.02571) "
+        "perturbs t instead of c; cross-strategy cosine measurement showed "
+        "c-shift and t-shift are roughly orthogonal in output-delta space "
+        "(median cos ≈ 0 for `cond_diag × dt_neg_small`), so combining them "
+        "adds non-redundant supervision at the same compute. Recommended "
+        "value: -0.05. The result is clamped to [0.02, 0.98] to avoid the "
+        "upper-edge artifact at t=0.98. Default 0.0 (off — shipped APEX "
+        "behavior, bit-equivalent). See docs/experimental/apex-0508.md.",
+    )
 
 
 # Loss weighting
@@ -529,6 +554,20 @@ def compute_loss_weighting_for_anima(
         # This is the Anima velocity-space equivalent of Eq. 24's 1/omega(t).
         t = sigmas.float()
         weighting = (t * (1.0 - t)).clamp(min=1e-6)
+    elif weighting_scheme == "apex_x1_omega":
+        # EMF / Li & He 2025 "x-pred & u-loss" reweighting, transported into
+        # velocity space. The original (in x1-prediction loss) is:
+        #   1/(1-t)^2 * ||x_pred - x_data||^2
+        # With the endpoint predictor x_pred = x_t - t*v_pred and OT
+        # interpolation x_t = (1-t)*x_data + t*z, we have
+        # ||x_pred - x_data||^2 = t^2 * ||v_pred - v_target||^2,
+        # so the equivalent v-space weight is (t/(1-t))^2. Tilts the loss
+        # heavily onto high-noise (t→1) steps where APEX's adversarial
+        # signal currently struggles. (1-t) clamped at 0.02 per the EMF
+        # paper's numerical-stability prescription.
+        t = sigmas.float()
+        one_minus_t = (1.0 - t).clamp(min=0.02)
+        weighting = (t / one_minus_t) ** 2
     elif weighting_scheme == "none" or weighting_scheme is None:
         weighting = torch.ones_like(sigmas)
     else:

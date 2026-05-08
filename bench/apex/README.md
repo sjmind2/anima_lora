@@ -43,6 +43,33 @@ the keys and values move in a way attention can see.
 
 ## Scripts
 
+### ``probe_temporal_shift.py``
+
+A characterization probe (no PASS/FAIL gate) for an alternative
+adversarial-signal lever inspired by EMF (arXiv:2602.02571): instead of
+shifting the *condition* (``c_fake = A·c + b``), shift the *timestep*
+(``t_fake = t ± Δt``) and use the second forward as the L_mix target.
+Compares MSE / cosine / SNR of ``v_fake`` vs ``v_real`` across:
+
+  - ``identity`` (sanity floor, ~0)
+  - ``cond_diag`` (shipped APEX baseline, diag init at the live (a,b))
+  - ``cond_signflip`` (scalar a=-0.5, b=0)
+  - ``dt_pos_small`` / ``dt_neg_small`` (Δt = ±0.05)
+  - ``dt_pos_big`` / ``dt_neg_big`` (Δt = ±0.20)
+
+Decision rule (informal):
+
+  - ``dt_*`` median MSE ≈ ``cond_diag`` median MSE  → temporal shift is
+    a comparable supervision lever; worth a training-side trial.
+  - ``dt_*`` ≪ ``cond_diag`` → too weak, kill the idea.
+  - ``dt_*`` ≫ ``cond_diag`` → target may be too noisy; investigate
+    before training.
+
+```bash
+python bench/apex/probe_temporal_shift.py \
+    --warmstart output/ckpt/anima-tlora-0507-12.safetensors
+```
+
 ### ``probe_attention_visibility.py``
 
 Per cross-attn block, runs ``c`` and ``c_fake = ConditionShift(c)``

@@ -42,20 +42,21 @@ dim_from_weights = true
 # signal to take effect after warmup. Adjust upward if the loss is still
 # trending down at end of training.
 learning_rate = 1e-4
-max_train_epochs = 6
-save_every_n_epochs = 6
-checkpointing_epochs = 6
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.0
 
 # APEX velocity-space loss weighting (Eq. 24 after Prop. 3 conversion).
-weighting_scheme = "apex_omega"
+weighting_scheme = "apex_omega" # | apex_x1_omega
+apex_anchor_ratio = 0.05 
 
 # APEX hyperparameters (paper Eq. 25: L_APEX = lam_p*L_fake + lam_c*L_mix) ----
 apex_lambda = 0.5           # target inner T_mix coefficient (Eq. 23) — ramps 0 → this
-apex_lambda_c = 2.0         # outer L_mix weight, paper lam_c (constant)
+apex_lambda_c = 1.0         # outer L_mix weight, paper lam_c (constant)
 apex_lambda_p = 1.0         # target outer L_fake weight, paper lam_p — ramps 0 → this
 apex_loss_form = "mix"      # 'mix' (primary) | 'gapex' (debug fallback)
 
@@ -72,7 +73,7 @@ apex_loss_form = "mix"      # 'mix' (primary) | 'gapex' (debug fallback)
 # wastes ~20% of the budget AND pays the 3× forward cost during the wasted
 # window. Keeping a 10% rampup as a soft on-ramp into the adversarial regime.
 apex_warmup_ratio = 0.0     # warm-start makes the cold-start guard redundant
-apex_rampup_ratio = 0.05    # linear ramp of inner lambda + L_fake from step 0
+apex_rampup_ratio = 0.10    # linear ramp of inner lambda + L_fake from step 0
 
 # ConditionShift (c_fake = A*c + b, Eq. 9).
 # Anima cross-attn is bias-free kv_proj(c) → split → RMSNorm(k) → softmax.
