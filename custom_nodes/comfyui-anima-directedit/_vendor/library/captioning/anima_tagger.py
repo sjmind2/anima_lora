@@ -4,7 +4,7 @@ Drop-in replacement for :class:`WDTagger` when feeding ψ_src to DirectEdit.
 Mirrors the same public surface (``predict``, ``predict_caption``) so existing
 callers swap by changing only the import.
 
-Checkpoint layout (produced by ``scripts/train_anima_tagger.py``):
+Checkpoint layout (produced by ``python -m scripts.anima_tagger.cli``):
 
 ::
 
@@ -19,7 +19,7 @@ Checkpoint layout (produced by ``scripts/train_anima_tagger.py``):
 
 If ``config.json`` has ``pe_lora: true`` and ``pe_lora.safetensors`` exists,
 the wrapper injects PE-LoRA on the encoder's trailing blocks and loads the
-delta weights — same code path as ``scripts/train_anima_tagger.py``.
+delta weights — same code path as ``python -m scripts.anima_tagger.cli``.
 
 When ``groups.yaml`` is present, prediction is group-aware: ``softmax`` and
 ``softmax_when_solo`` (the latter gated on solo + no-escape) groups emit
@@ -98,7 +98,7 @@ def _underscore_to_space(s: str) -> str:
 def _load_thresholds(path: Path, n_tags: int, default: float = 0.5) -> torch.Tensor:
     """Load per-tag thresholds; missing → uniform default."""
     if not path.exists():
-        logger.warning("no thresholds.safetensors at %s — using default=%.2f", path, default)
+        logger.warning("no thresholds.safetensors at %s - using default=%.2f", path, default)
         return torch.full((n_tags,), default)
     d = st_load(str(path))
     t = d["thresholds"]
@@ -251,7 +251,7 @@ class AnimaTagger:
         pe_lora_path = self.ckpt_dir / "pe_lora.safetensors"
         if not pe_lora_path.exists():
             logger.warning(
-                "config.pe_lora=true but %s is missing — encoder will run frozen "
+                "config.pe_lora=true but %s is missing - encoder will run frozen "
                 "without the trained delta",
                 pe_lora_path,
             )

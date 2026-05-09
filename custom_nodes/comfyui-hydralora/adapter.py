@@ -46,7 +46,7 @@ def _parse_reft(weights_sd: Dict[str, torch.Tensor]) -> Optional[Dict[int, dict]
         if "rotate_layer.weight" not in d or "learned_source.weight" not in d:
             logger.warning(
                 f"ReFT block {idx} is missing rotate_layer.weight or "
-                f"learned_source.weight — skipping."
+                f"learned_source.weight -- skipping."
             )
             continue
         rotate = d["rotate_layer.weight"]
@@ -188,7 +188,7 @@ def load_adapter(file_path: str) -> dict:
             logger.warning(
                 f"{file_path}: σ-band metadata declares num_sigma_buckets="
                 f"{num_buckets} but num_experts={hydra['num_experts']} is not "
-                "divisible — disabling band partition."
+                "divisible -- disabling band partition."
             )
             band_on = False
             num_buckets = 0
@@ -535,7 +535,7 @@ def _apply_hydra_live_to_model(
         if sigma_feature_dim < 0:
             skipped.append(
                 f"{prefix}: router input {router_in} < rank {rank} "
-                f"(shape {tuple(mod['router_w'].shape)}) — checkpoint malformed"
+                f"(shape {tuple(mod['router_w'].shape)}) -- checkpoint malformed"
             )
             continue
         alpha_t = mod.get("alpha")

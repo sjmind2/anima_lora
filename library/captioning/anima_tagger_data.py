@@ -300,7 +300,7 @@ class CachedFeatureDataset(Dataset):
         if n_missing:
             logger.warning(
                 "CachedFeatureDataset: %d stems missing from cache (out of %d "
-                "requested) — they will not contribute to training",
+                "requested) - they will not contribute to training",
                 n_missing,
                 len(stems_subset),
             )
@@ -467,7 +467,7 @@ class CachedImageDataset(Dataset):
         if n_missing:
             logger.warning(
                 "CachedImageDataset: %d stems missing from cache (out of %d "
-                "requested) — they will not contribute to training",
+                "requested) - they will not contribute to training",
                 n_missing,
                 len(stems_subset),
             )

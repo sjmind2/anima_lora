@@ -20,7 +20,7 @@ class AnimaAdapterLoader:
     """Apply an Anima adapter (LoRA / Hydra / ReFT) and/or a postfix.
 
     Each section is gated by a boolean toggle. When a toggle is off, that
-    file dropdown and its strength inputs are ignored — there is no need
+    file dropdown and its strength inputs are ignored -- there is no need
     for a None sentinel in the dropdown.
     """
 
@@ -97,8 +97,8 @@ class AnimaAdapterLoader:
         "Anima adapter loader. Toggle adapter (LoRA / Hydra / ReFT) and "
         "postfix sections independently. HydraLoRA installs per-Linear "
         "forward hooks that compute the trained per-sample router gate from "
-        "each Linear's input and blend per-expert lora_up heads — full live "
-        "routing including σ-conditional bias. ReFT installs per-block "
+        "each Linear's input and blend per-expert lora_up heads -- full live "
+        "routing including sigma-conditional bias. ReFT installs per-block "
         "forward hooks. Postfix wraps diffusion_model.forward to splice "
         "learned vectors after the LLM adapter; positive-batch rows only "
         "(CFG-safe)."

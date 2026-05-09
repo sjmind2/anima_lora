@@ -98,7 +98,7 @@ def _underscore_to_space(s: str) -> str:
 def _load_thresholds(path: Path, n_tags: int, default: float = 0.5) -> torch.Tensor:
     """Load per-tag thresholds; missing → uniform default."""
     if not path.exists():
-        logger.warning("no thresholds.safetensors at %s — using default=%.2f", path, default)
+        logger.warning("no thresholds.safetensors at %s - using default=%.2f", path, default)
         return torch.full((n_tags,), default)
     d = st_load(str(path))
     t = d["thresholds"]
@@ -251,7 +251,7 @@ class AnimaTagger:
         pe_lora_path = self.ckpt_dir / "pe_lora.safetensors"
         if not pe_lora_path.exists():
             logger.warning(
-                "config.pe_lora=true but %s is missing — encoder will run frozen "
+                "config.pe_lora=true but %s is missing - encoder will run frozen "
                 "without the trained delta",
                 pe_lora_path,
             )

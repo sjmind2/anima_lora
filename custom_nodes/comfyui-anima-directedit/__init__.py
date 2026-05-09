@@ -2,7 +2,7 @@
 
 One node:
 
-* ``AnimaDirectEdit`` — takes an image, an "edit text" (tags to add), and
+* ``AnimaDirectEdit`` - takes an image, an "edit text" (tags to add), and
   optionally a tagger socket; runs the tagger to derive ``psi_src``
   (or uses ``prompt_src_override``), forms
   ``psi_tar = psi_src + ", " + edit_text``, then invokes the DirectEdit
@@ -12,8 +12,8 @@ One node:
   naturally upstream.
 
 The ``ANIMA_TAGGER`` socket is produced by ``AnimaTaggerLoader`` in the
-sibling ``comfyui-anima-tagger`` package — install both for image-driven
-ψ_src derivation, or supply ψ_src as a string via ``prompt_src_override``
+sibling ``comfyui-anima-tagger`` package - install both for image-driven
+psi_src derivation, or supply psi_src as a string via ``prompt_src_override``
 to skip the tagger entirely.
 """
 

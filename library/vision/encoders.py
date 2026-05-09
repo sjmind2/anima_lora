@@ -111,7 +111,7 @@ def _load_pe_encoder(device: torch.device, model_id: str) -> _PEEncoder:
                 f"or install huggingface_hub."
             ) from e
         logger.info(
-            f"PE checkpoint missing at {ckpt_path} — fetching "
+            f"PE checkpoint missing at {ckpt_path} - fetching "
             f"facebook/PE-Core-L14-336/PE-Core-L14-336.pt (one-time)."
         )
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)

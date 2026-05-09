@@ -345,7 +345,7 @@ def edit_forward(
     if len(delta_z) != T:
         raise ValueError(
             f"delta_z has length {len(delta_z)} but sigmas implies T={T} steps "
-            "— inversion and editing must use the same sigma schedule."
+            "- inversion and editing must use the same sigma schedule."
         )
     if t_inj < 0:
         raise ValueError(f"t_inj must be >= 0, got {t_inj}.")
