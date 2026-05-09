@@ -497,6 +497,20 @@ def main() -> None:
         embed_tar = ctx_tar["embed"][0].to(device, dtype=torch.bfloat16)
         embed_neg = ctx_neg["embed"][0].to(device, dtype=torch.bfloat16)
 
+        with torch.no_grad():
+            d_st = (embed_src.float() - embed_tar.float()).abs().mean().item()
+            d_sn = (embed_src.float() - embed_neg.float()).abs().mean().item()
+            d_tn = (embed_tar.float() - embed_neg.float()).abs().mean().item()
+        logger.info(
+            "DirectEdit embed diffs (abs mean): "
+            "|src-tar|=%.6f  |src-neg|=%.6f  |tar-neg|=%.6f  "
+            "(src.norm=%.3f tar.norm=%.3f shape=%s)",
+            d_st, d_sn, d_tn,
+            embed_src.float().norm().item(),
+            embed_tar.float().norm().item(),
+            tuple(embed_src.shape),
+        )
+
     # 5. VAE-encode the source image -> clean latent (5D, frame=1).
     logger.info("Loading VAE for source encode...")
     vae = qwen_image_autoencoder_kl.load_vae(

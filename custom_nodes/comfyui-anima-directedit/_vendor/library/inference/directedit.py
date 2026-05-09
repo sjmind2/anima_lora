@@ -63,11 +63,7 @@ def _v_pred(
     padding_mask: torch.Tensor,
 ) -> torch.Tensor:
     """One model forward (with optional CFG). Returns velocity prediction."""
-    # Anima's t_embedder was trained on timesteps in [0, 1000] (= sigma * num_train_timesteps);
-    # see library/runtime/noise.py and library/inference/sampling.py::get_timesteps_sigmas.
-    # Passing raw sigma in [0, 1] gives near-constant AdaLN across the schedule, which keeps
-    # the residual-anchored Euler step on the source manifold and kills edit leverage at t_inj=0.
-    t_expand = (sigma * 1000.0).expand(latents.shape[0]).to(latents.device, dtype=torch.bfloat16)
+    t_expand = sigma.expand(latents.shape[0]).to(latents.device, dtype=torch.bfloat16)
     noise_pred = anima(latents, t_expand, embed, padding_mask=padding_mask)
     if guidance_scale != 1.0 and embed_neg is not None:
         uncond = anima(latents, t_expand, embed_neg, padding_mask=padding_mask)

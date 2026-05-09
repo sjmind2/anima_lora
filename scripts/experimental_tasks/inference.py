@@ -275,7 +275,7 @@ def cmd_test_directedit(extra):
         cleaned_extra.append(tok)
     extra = cleaned_extra
     if not edit_prompt:
-        edit_prompt = "double peace"
+        edit_prompt = "double peace, v v. She is showing double peace"
 
     # 3. Run a tagger on the source. ``TAGGER`` env picks the backend
     #    (``anima`` / ``wd``); default is auto — Anima if the checkpoint

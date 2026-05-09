@@ -1,6 +1,6 @@
 """Anima DirectEdit node.
 
-Image in, edited image out. Consumes ComfyUI's stock ``MODEL`` / ``CLIP`` /
+Image in, edited LATENT out. Consumes ComfyUI's stock ``MODEL`` / ``CLIP`` /
 ``VAE`` sockets — pipe in the same loaders you'd use for a normal Anima
 KSampler workflow (``UNETLoader``/``CLIPLoader``/``VAELoader`` or
 ``CheckpointLoaderSimple``). The tagger socket comes from the
@@ -18,10 +18,10 @@ Pipeline mirrors ``scripts/edit.py``:
   bucket pick from source aspect ratio
   CLIP.tokenize / encode_from_tokens(return_dict=True) for psi_src/tar/neg
   diffusion_model.preprocess_text_embeds -> 512-padded crossattn embeds
-  VAE.encode source -> z_clean
-  invert(z_clean, embed_src) -> z_inv, delta_z
-  edit_forward(z_inv[0], delta_z, embed_tar) -> z_edit
-  VAE.decode z_edit -> ComfyUI IMAGE [1,H,W,3] in [0,1]
+  VAE.encode + process_latent_in       -> standardized z_clean (DiT input space)
+  invert(z_clean, embed_src)           -> z_inv, delta_z
+  edit_forward(z_inv[0], delta_z, ...) -> z_edit (still standardized)
+  process_latent_out                   -> raw VAE-space LATENT (comfy convention)
 """
 
 from __future__ import annotations
@@ -128,13 +128,11 @@ def _encode_prompt_comfy(
 ) -> torch.Tensor:
     """Tokenize + encode + LLMAdapter preprocess via the comfy CLIP socket.
 
-    Mirrors ``model_base.Anima.extra_conds`` exactly: comfy's path passes
-    only ``t5xxl_weights`` to ``preprocess_text_embeds`` (no Qwen3 source
-    mask, no T5 attention mask), so the LLMAdapter's cross-attention sees
-    every Qwen3 padding embedding. That divergence from the library path
-    (which masks both sides + zeros source padding before the adapter) is
-    the leading suspect when the node reconstructs the source instead of
-    applying the edit. Use ``_encode_prompt_library`` to A/B test.
+    Mirrors ``model_base.Anima.extra_conds``: tokenize through the comfy
+    Anima tokenizer, encode Qwen3 hidden states + collect t5xxl ids/weights,
+    then run the DiT's ``preprocess_text_embeds`` (LLMAdapter + 512 pad)
+    once. Verified to produce embeddings within numerical noise of the
+    library's ``prepare_text_inputs`` for the prompts we feed DirectEdit.
     """
     tokens = clip.tokenize(text)
     out = clip.encode_from_tokens(tokens, return_pooled=False, return_dict=True)
@@ -149,60 +147,6 @@ def _encode_prompt_comfy(
 
     embed = unet.preprocess_text_embeds(cond, t5xxl_ids, t5xxl_weights=t5xxl_weights)
     return embed
-
-
-def _encode_prompt_library(
-    library_te,
-    library_tokenize,
-    unet,
-    text: str,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Replicate ``library.inference.text.prepare_text_inputs`` end-to-end.
-
-    1. Tokenize with the library's ``AnimaTokenizeStrategy`` (Qwen3 + T5,
-       both padded to 512).
-    2. Encode Qwen3 ids through the loaded library text encoder; zero out
-       Qwen3 padding embeddings (the library's encoder strategy does this
-       at line 137 of library/anima/strategy.py — comfy's path doesn't).
-    3. Run ``unet.llm_adapter`` with BOTH source + target attention masks
-       (comfy's ``preprocess_text_embeds`` skips both — paper-validated
-       inputs come from the masked path).
-    4. Zero out T5 padding positions in the adapter output, pad to 512.
-
-    The resulting ``[1, 512, 1024]`` matches what the CLI's
-    ``prepare_text_inputs`` feeds DirectEdit. Lets us A/B against the
-    comfy CLIP path when the node reconstructs the source.
-    """
-    qwen_ids, qwen_mask, t5_ids, t5_mask = library_tokenize.tokenize(text)
-    qwen_ids = qwen_ids.to(library_te.device)
-    qwen_mask = qwen_mask.to(library_te.device)
-    with torch.no_grad():
-        prompt_embeds = library_te(
-            input_ids=qwen_ids, attention_mask=qwen_mask
-        ).last_hidden_state
-        prompt_embeds[~qwen_mask.bool()] = 0  # zero Qwen3 padding (line 137)
-
-        prompt_embeds = prompt_embeds.to(device, dtype=dtype)
-        t5_ids = t5_ids.to(device)
-        t5_mask = t5_mask.to(device)
-        qwen_mask_d = qwen_mask.to(device)
-
-        # `unet` is the comfy Anima DiT — its `llm_adapter` accepts the same
-        # mask-aware kwargs as the library Anima's adapter.
-        crossattn = unet.llm_adapter(
-            prompt_embeds,
-            t5_ids,
-            target_attention_mask=t5_mask,
-            source_attention_mask=qwen_mask_d,
-        )
-        crossattn[~t5_mask.bool()] = 0
-        if crossattn.shape[1] < 512:
-            crossattn = torch.nn.functional.pad(
-                crossattn, (0, 0, 0, 512 - crossattn.shape[1])
-            )
-    return crossattn.to(device, dtype=dtype)
 
 
 class AnimaDirectEdit:
@@ -306,26 +250,6 @@ class AnimaDirectEdit:
                         ),
                     },
                 ),
-                "library_text_encoder_path": (
-                    "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "tooltip": (
-                            "Optional: path to the library's Qwen3 text "
-                            "encoder safetensors (e.g. "
-                            "`models/text_encoders/qwen_3_06b_base.safetensors`). "
-                            "If set, bypasses the comfy CLIP socket and "
-                            "encodes through `library.inference.text."
-                            "prepare_text_inputs` — same path the working "
-                            "CLI (`scripts/edit.py`) uses. Required when the "
-                            "node returns a source-equivalent result while "
-                            "the CLI works: the comfy CLIP path skips the "
-                            "Qwen3 source mask + T5 attention mask in "
-                            "LLMAdapter, which can collapse ψ_tar onto ψ_src."
-                        ),
-                    },
-                ),
             },
         }
 
@@ -338,9 +262,8 @@ class AnimaDirectEdit:
         "AnimaTagger on the source image to derive psi_src, appends edit_text "
         "to form psi_tar, then performs flow inversion + delta_z-anchored "
         "resampling on the MODEL/CLIP/VAE sockets you wire in. Returns the "
-        "edited LATENT — wire it into VAEDecode (or any latent-consuming node) "
-        "to render. Returning latent (not image) keeps decode shape handling "
-        "with the stock node and lets you compare z_edit against z_clean."
+        "edited LATENT in the comfy convention (raw VAE space) — wire it "
+        "into VAEDecode to render."
     )
 
     def edit(
@@ -359,7 +282,6 @@ class AnimaDirectEdit:
         t_inj: int = 0,
         tagger: AnimaTagger | None = None,
         prompt_src_override: str = "",
-        library_text_encoder_path: str = "",
     ):
         device = comfy.model_management.get_torch_device()
         dtype = torch.bfloat16
@@ -400,46 +322,10 @@ class AnimaDirectEdit:
 
         torch.manual_seed(seed)
 
-        if library_text_encoder_path.strip():
-            logger.info(
-                "DirectEdit: encoding prompts via library TE (%s) — "
-                "bypassing comfy CLIP socket",
-                library_text_encoder_path,
-            )
-            from library.anima import strategy as _strat
-            from library.inference.models import load_text_encoder as _load_te
-            from types import SimpleNamespace as _NS
-
-            te_args = _NS(
-                text_encoder=library_text_encoder_path.strip(),
-                lora_weight=None,
-                lora_multiplier=1.0,
-            )
-            library_te = _load_te(te_args, dtype=dtype, device=device)
-            library_tokenize = _strat.AnimaTokenizeStrategy(
-                qwen3_path=library_text_encoder_path.strip(),
-                t5_tokenizer_path=None,
-                qwen3_max_length=512,
-                t5_max_length=512,
-            )
-            with torch.no_grad():
-                embed_src = _encode_prompt_library(
-                    library_te, library_tokenize, unet, psi_src, device, dtype
-                )
-                embed_tar = _encode_prompt_library(
-                    library_te, library_tokenize, unet, psi_tar, device, dtype
-                )
-                embed_neg = _encode_prompt_library(
-                    library_te, library_tokenize, unet, negative_prompt, device, dtype
-                )
-            del library_te, library_tokenize
-            comfy.model_management.soft_empty_cache()
-        else:
-            logger.info("DirectEdit: encoding prompts via comfy CLIP socket")
-            with torch.no_grad():
-                embed_src = _encode_prompt_comfy(clip, unet, psi_src, device, dtype)
-                embed_tar = _encode_prompt_comfy(clip, unet, psi_tar, device, dtype)
-                embed_neg = _encode_prompt_comfy(clip, unet, negative_prompt, device, dtype)
+        with torch.no_grad():
+            embed_src = _encode_prompt_comfy(clip, unet, psi_src, device, dtype)
+            embed_tar = _encode_prompt_comfy(clip, unet, psi_tar, device, dtype)
+            embed_neg = _encode_prompt_comfy(clip, unet, negative_prompt, device, dtype)
 
         # Diagnostic: if ψ_src and ψ_tar collapse to the same embedding, the
         # edit pass will reconstruct the source by design (Δz anchors + same
@@ -462,13 +348,19 @@ class AnimaDirectEdit:
             logger.warning(
                 "DirectEdit: |src-tar| < 1e-4 — embeddings are effectively "
                 "identical, edit pass will reconstruct the source. Check "
-                "psi_src/psi_tar strings (logged above) and try setting "
-                "library_text_encoder_path to bypass the comfy CLIP."
+                "psi_src/psi_tar strings (logged above) — likely the tagger "
+                "produced an empty/identical caption to edit_text."
             )
 
         logger.info("DirectEdit: encoding source image via VAE")
         img_in = _pil_to_comfy_image(pil_src_resized)
-        z_clean = vae.encode(img_in)  # [1, C_lat, T=1, H/8, W/8]
+        z_clean = vae.encode(img_in)  # [1, C_lat, T=1, H/8, W/8]  RAW VAE latent
+        # Anima DiT was trained on standardized latents (per-channel (z - mean) / std);
+        # comfy's KSampler applies this via samplers.py::process_latent_in, but we call
+        # the diffusion_model directly and must do it ourselves. Without this the model
+        # sees out-of-distribution inputs and emits ~zero velocity, so the Δz-anchored
+        # Euler step reconstructs the source regardless of t_inj / guidance_scale.
+        z_clean = model.model.process_latent_in(z_clean)
         z_clean = z_clean.to(device, dtype=dtype)
         logger.info("DirectEdit: encoded source latent %s", tuple(z_clean.shape))
 
@@ -507,11 +399,12 @@ class AnimaDirectEdit:
             step_callback=lambda step, total: pbar.update_absolute(infer_steps + step),
         )
 
-        # Return the edited LATENT — caller wires VAEDecode. Anima's latent
-        # is 5D [B, C, T=1, H/8, W/8]; the stock LATENT dict format uses
-        # `samples` and tolerates 5D for video VAEs.
-        logger.info("DirectEdit: returning edited latent %s", tuple(z_edit.shape))
-        return ({"samples": z_edit.to(dtype=dtype).cpu()}, psi_src, psi_tar)
+        # Return a LATENT in raw VAE space to match the comfy convention
+        # (samplers.py::process_latent_out is the equivalent step in the
+        # KSampler pipeline). Wire into VAEDecode to render.
+        z_edit_raw = model.model.process_latent_out(z_edit.to(dtype=dtype))
+        logger.info("DirectEdit: returning edited latent %s", tuple(z_edit_raw.shape))
+        return ({"samples": z_edit_raw.cpu()}, psi_src, psi_tar)
 
 
 NODE_CLASS_MAPPINGS = {
