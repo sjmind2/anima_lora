@@ -95,6 +95,23 @@ def _underscore_to_space(s: str) -> str:
     return s.replace("_", " ")
 
 
+def _fix_artist_category(category: str, name: str) -> str:
+    """Retype legacy mis-categorized "artist" entries shipped in vocab.json.
+
+    Older vocab builds typed any ``@``-prefixed tag as ``artist``, which
+    swept up booru emoticons like ``@_@`` (stored space-form as ``@ @``).
+    The corrected rule (see ``scripts/anima_tagger/vocab.categorize``)
+    requires ``@`` followed by non-whitespace; anything else falls back
+    to ``general``. We patch loaded vocab here so existing checkpoints
+    don't need to be rebuilt — the model's tag-level sigmoid is unchanged.
+    """
+    if category != "artist":
+        return category
+    if len(name) >= 2 and name[0] == "@" and not name[1].isspace():
+        return "artist"
+    return "general"
+
+
 def _load_thresholds(path: Path, n_tags: int, default: float = 0.5) -> torch.Tensor:
     """Load per-tag thresholds; missing → uniform default."""
     if not path.exists():
@@ -117,6 +134,7 @@ class AnimaTagger:
         dtype: torch.dtype = torch.bfloat16,
         pe_ckpt: str | Path | None = None,
         character_floor: float = 0.5,
+        pe_lora_path: str | Path | None = None,
     ):
         self.ckpt_dir = Path(ckpt_dir)
         if device is None:
@@ -124,6 +142,12 @@ class AnimaTagger:
         self.device = torch.device(device)
         self.dtype = dtype
         self.pe_ckpt = Path(pe_ckpt) if pe_ckpt else None
+        # Optional override for the PE-LoRA sidecar location. Empty / None →
+        # fall back to ``ckpt_dir / pe_lora.safetensors`` (the colocated default
+        # produced by ``train-pe-lora``). Useful when the user keeps the LoRA
+        # delta outside the tagger checkpoint (e.g. swapping between several
+        # PE-LoRA variants against the same base head).
+        self._pe_lora_path_override = Path(pe_lora_path) if pe_lora_path else None
         # Absolute confidence floor for character predictions. Sits *above*
         # the per-tag F1-optimal threshold for the low-confidence end of the
         # character vocab (some F1 thresholds are as low as 0.05 — chasing
@@ -150,7 +174,7 @@ class AnimaTagger:
             _TagEntry(
                 name=t["name"],
                 index=int(t["index"]),
-                category=str(t["category"]),
+                category=_fix_artist_category(str(t["category"]), t["name"]),
                 median_pos=float(t.get("median_pos", 0.0)),
             )
             for t in vocab["tags"]
@@ -248,7 +272,10 @@ class AnimaTagger:
         cfg_d = self._cfg_d
         if not cfg_d.get("pe_lora", False):
             return
-        pe_lora_path = self.ckpt_dir / "pe_lora.safetensors"
+        if self._pe_lora_path_override is not None:
+            pe_lora_path = self._pe_lora_path_override
+        else:
+            pe_lora_path = self.ckpt_dir / "pe_lora.safetensors"
         if not pe_lora_path.exists():
             logger.warning(
                 "config.pe_lora=true but %s is missing - encoder will run frozen "

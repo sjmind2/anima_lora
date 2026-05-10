@@ -161,6 +161,24 @@ class AnimaTaggerLoader:
                         ),
                     },
                 ),
+                "pe_lora_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Optional override for the PE-LoRA sidecar "
+                            "(safetensors). Leave empty to use "
+                            "<tagger_dir>/pe_lora.safetensors (the default "
+                            "shipped / auto-fetched by train-pe-lora). When "
+                            "set, this file is loaded instead. Relative "
+                            "paths resolve against the anima_lora/ root; "
+                            "absolute paths used as-is. Has no effect "
+                            "unless config.json in tagger_dir has "
+                            "'pe_lora: true' (rank / alpha / target layers "
+                            "all come from that config)."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -177,19 +195,34 @@ class AnimaTaggerLoader:
         "auto-downloaded if their paths don't exist yet."
     )
 
-    def load(self, tagger_dir: str, pe_ckpt: str):
+    def load(self, tagger_dir: str, pe_ckpt: str, pe_lora_path: str = ""):
         tdir = Path(tagger_dir)
         if not tdir.is_absolute():
             tdir = ANIMA_LORA / tdir
         pe_path = Path(pe_ckpt)
         if not pe_path.is_absolute():
             pe_path = ANIMA_LORA / pe_path
+        pe_lora_resolved: Path | None = None
+        if pe_lora_path.strip():
+            pl = Path(pe_lora_path.strip())
+            if not pl.is_absolute():
+                pl = ANIMA_LORA / pl
+            pe_lora_resolved = pl
         _ensure_tagger_dir(tdir)
         device = comfy.model_management.get_torch_device()
         logger.info(
-            "AnimaTaggerLoader: loading %s on %s (pe=%s)", tdir, device, pe_path
+            "AnimaTaggerLoader: loading %s on %s (pe=%s, pe_lora=%s)",
+            tdir,
+            device,
+            pe_path,
+            pe_lora_resolved,
         )
-        tagger = AnimaTagger(ckpt_dir=tdir, device=device, pe_ckpt=pe_path)
+        tagger = AnimaTagger(
+            ckpt_dir=tdir,
+            device=device,
+            pe_ckpt=pe_path,
+            pe_lora_path=pe_lora_resolved,
+        )
         return (tagger,)
 
 

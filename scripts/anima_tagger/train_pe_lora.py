@@ -40,6 +40,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
     """End-to-end PE-LoRA path: PE encoder is unfrozen on its trailing N
     blocks via ``inject_pe_lora``; trainer reads pre-resized images and
     runs encoder + mean-pool + head per step."""
+    from safetensors.torch import load_file as st_load_file
     from safetensors.torch import save_file as st_save
 
     from library.captioning.anima_tagger_data import (
@@ -104,6 +105,28 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         dropout=args.dropout,
     )
     model = AnimaTaggerHead(cfg).to(device)
+
+    # Optional warm-start from a Stage-1 cached-feature run. Loads strict —
+    # any key mismatch (different vocab / hidden dim) errors out instead of
+    # silently dropping params. Optimizer state is intentionally NOT loaded;
+    # Stage 2 re-builds Adam from scratch since the param groups (head + LoRA)
+    # and the LR schedule both differ from Stage 1.
+    if getattr(args, "init_head_from", None):
+        init_path = Path(args.init_head_from)
+        if not init_path.exists():
+            raise SystemExit(f"--init_head_from: {init_path} does not exist")
+        head_state = st_load_file(str(init_path))
+        missing, unexpected = model.load_state_dict(head_state, strict=False)
+        if missing or unexpected:
+            raise SystemExit(
+                f"--init_head_from: state_dict mismatch against current "
+                f"AnimaTaggerHead config "
+                f"(d_in={cfg.d_in}, n_tags={cfg.n_tags}, n_ratings={cfg.n_ratings}, "
+                f"d_hidden={cfg.d_hidden}). "
+                f"missing={list(missing)[:5]}{'...' if len(missing) > 5 else ''}  "
+                f"unexpected={list(unexpected)[:5]}{'...' if len(unexpected) > 5 else ''}"
+            )
+        logger.info("warm-started head from %s", init_path)
 
     # Frozen encoder + LoRA on the trailing blocks.
     bundle = load_pe_encoder(device, name=args.encoder, dtype=torch.bfloat16)
@@ -196,13 +219,19 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
 
     from tqdm import tqdm as _tqdm
 
+    # Sync-defer cadence for the tqdm postfix. Every per-step .item() forces
+    # a host-device sync; accumulating losses as GPU tensors and reading them
+    # only every N steps cuts the sync count ~Nx without losing precision in
+    # the epoch-end average (tensors are summed on-device, .item() once).
+    postfix_every = max(1, int(getattr(args, "postfix_every", 10)))
+
     for epoch in range(args.epochs):
         train_sampler.set_epoch(epoch)
         model.train()
         pe_lora.train()
-        ep_loss = 0.0
-        ep_tag_loss = 0.0
-        ep_rate_loss = 0.0
+        ep_loss = torch.zeros((), device=device)
+        ep_tag_loss = torch.zeros((), device=device)
+        ep_rate_loss = torch.zeros((), device=device)
         n_batches = 0
         bar = _tqdm(
             train_loader,
@@ -210,30 +239,33 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
             leave=False,
             unit="step",
         )
-        for images_u8, mh_cpu, rate_cpu, _bucket in bar:
+        for step, (images_u8, mh_cpu, rate_cpu, _bucket) in enumerate(bar):
             mh = mh_cpu.to(device, non_blocking=True)
             rate = rate_cpu.to(device, non_blocking=True)
-            feat = _forward_pool(images_u8)
-            tag_logits, rating_logits = model(feat)
-            l_tag, _per_group = compute_grouped_loss(tag_logits, mh, router)
-            l_rate = ce(rating_logits, rate)
-            loss = l_tag + args.lambda_rating * l_rate
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                feat = _forward_pool(images_u8)
+                tag_logits, rating_logits = model(feat)
+                l_tag, _per_group = compute_grouped_loss(tag_logits, mh, router)
+                l_rate = ce(rating_logits, rate)
+                loss = l_tag + args.lambda_rating * l_rate
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            ep_loss += loss.item()
-            ep_tag_loss += l_tag.item()
-            ep_rate_loss += l_rate.item()
+            ep_loss += loss.detach()
+            ep_tag_loss += l_tag.detach()
+            ep_rate_loss += l_rate.detach()
             n_batches += 1
-            bar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                tag=f"{l_tag.item():.4f}",
-                rate=f"{l_rate.item():.4f}",
-            )
+            if step % postfix_every == 0:
+                bar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    tag=f"{l_tag.item():.4f}",
+                    rate=f"{l_rate.item():.4f}",
+                )
         sched.step()
-        avg_loss = ep_loss / max(n_batches, 1)
-        avg_tag = ep_tag_loss / max(n_batches, 1)
-        avg_rate = ep_rate_loss / max(n_batches, 1)
+        denom = max(n_batches, 1)
+        avg_loss = (ep_loss / denom).item()
+        avg_tag = (ep_tag_loss / denom).item()
+        avg_rate = (ep_rate_loss / denom).item()
 
         # Eval — collect logits over val in mini-batches, then reuse the
         # existing macro-F1 helper. Threshold sweep happens at calibrate.
@@ -243,12 +275,12 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         val_rating_logits: List[torch.Tensor] = []
         val_mh_chunks: List[torch.Tensor] = []
         val_rate_chunks: List[torch.Tensor] = []
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
             for images_u8, mh_cpu, rate_cpu, _bucket in val_loader:
                 feat = _forward_pool(images_u8)
                 tl, rl = model(feat)
-                val_tag_logits.append(tl)
-                val_rating_logits.append(rl)
+                val_tag_logits.append(tl.float())
+                val_rating_logits.append(rl.float())
                 val_mh_chunks.append(mh_cpu.to(device, non_blocking=True))
                 val_rate_chunks.append(rate_cpu.to(device, non_blocking=True))
         tag_logits_all = torch.cat(val_tag_logits, dim=0)
@@ -376,6 +408,9 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
                 "pe_lora_qkv": args.pe_lora_qkv,
                 "pe_lora_attn_out": args.pe_lora_attn_out,
                 "pe_lora_mlp": args.pe_lora_mlp,
+                "init_head_from": (
+                    str(args.init_head_from) if args.init_head_from else None
+                ),
             },
             f,
             indent=2,

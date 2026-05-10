@@ -130,9 +130,12 @@ def categorize(
     1. Rating literals (``general``/``sensitive``/``explicit``) → ``rating``.
        Note ``general`` is *both* a rating value and a category name, so
        rating-tag membership is checked before any category lookup.
-    2. ``@``-prefixed tags → ``artist``. Anima's caption format prefixes
-       artists with ``@``; the underlying tag-cache key drops the ``@``,
-       so cache lookups need the bare name.
+    2. ``@<non-space>...`` tags → ``artist``. Anima's caption format
+       prefixes artists with ``@`` directly followed by the name (e.g.
+       ``@sincos``, ``@sumiyao (amam)``); the underlying tag-cache key
+       drops the ``@``, so cache lookups need the bare name. Emoticons
+       like ``@ @`` (booru ``@_@`` after ``_``→`` `` normalization) fall
+       through to the cache so they get their real category (``general``).
     3. Count-tag regex → ``count`` (overrides ``general`` typing for
        ``1girl`` etc.).
     4. ``category_overrides`` lookup (curator-supplied via tag_rules.yaml).
@@ -147,7 +150,7 @@ def categorize(
     # separate corpus field, not the tag system).
     if tag in RATINGS:
         return "rating"
-    if tag.startswith("@"):
+    if len(tag) >= 2 and tag[0] == "@" and not tag[1].isspace():
         return "artist"
     if is_count_tag(tag):
         return "count"
@@ -385,9 +388,10 @@ def scan_cache_coverage(
             if ignore_subs and any(sub in tag for sub in ignore_subs):
                 continue
             seen[tag] += 1
-            bare = tag[1:] if tag.startswith("@") else tag
+            is_artist = len(tag) >= 2 and tag[0] == "@" and not tag[1].isspace()
+            bare = tag[1:] if is_artist else tag
             if (
-                tag.startswith("@")
+                is_artist
                 or is_count_tag(tag)
                 or bare in tag_cache
                 or tag in overrides

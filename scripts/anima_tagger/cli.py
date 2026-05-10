@@ -128,13 +128,21 @@ def parse_args() -> argparse.Namespace:
         "Optional — pass empty / unset to build a flat-vocab checkpoint. "
         "Default: $CAPTION_CORPUS_DIR/tag_groups.yaml.",
     )
-    p.add_argument("--min_freq", type=int, default=5)
+    p.add_argument("--min_freq", type=int, default=4)
     p.add_argument("--val_frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
 
     # Train-mode knobs.
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch_size", type=int, default=64)
+    p.add_argument(
+        "--postfix_every",
+        type=int,
+        default=2,
+        help="PE-LoRA training: refresh the tqdm postfix (and force a "
+        "host-device sync) every N steps. Higher = fewer syncs / faster "
+        "training; lower = more responsive progress bar (default: 10).",
+    )
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--d_hidden", type=int, default=1024)
@@ -169,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--pe_lora_layers",
         type=int,
-        default=4,
+        default=2,
         help="Number of trailing PE resblocks to adapt with LoRA. Mapped to "
         "inject_pe_lora's layer_from arg.",
     )
@@ -196,6 +204,15 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Adapt MLP c_fc / c_proj (default: on).",
+    )
+    p.add_argument(
+        "--init_head_from",
+        default=None,
+        help="PE-LoRA training: warm-start the head from a Stage-1 "
+        "checkpoint (path to model.safetensors). The head state_dict layout "
+        "must match the new run's AnimaTaggerHead config (same n_tags, "
+        "n_ratings, d_hidden, d_in). Optimizer state is NOT loaded — "
+        "Stage 2 re-builds Adam from scratch.",
     )
 
     # Predict mode: single-image debug entry.
