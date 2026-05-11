@@ -154,7 +154,8 @@ network_module = "networks.methods.postfix"
 #
 network_dim = 32
 network_args = [
-    "mode=postfix",
+    "mode=cond",
+    "cond_hidden_dim=256",
     "splice_position=front_of_padding",
     "ortho=true",
     "ortho_basis=svd_te",
@@ -164,13 +165,15 @@ network_args = [
 ]
 output_name = "anima_postfix_ortho_v2"
 learning_rate = 1e-3
-max_train_epochs = 2
-save_every_n_epochs = 1
-checkpointing_epochs = 1
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 blocks_to_swap = 0
 compile_mode="full"
+compile_inductor_mode = "reduce-overhead"
+
 # # Cold-start: v1 (per-slot lambda_slot) checkpoints are NOT loadable here —
 # # `create_network_from_weights` raises on legacy `ortho_lambda` keys.
 # # See docs/proposal/orthogonal_postfix.md §D.

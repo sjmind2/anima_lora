@@ -78,11 +78,7 @@ _FAMILY_VARIANTS: dict[str, list[str]] = {
         "tlora_ortho_reft",
     ],
     "postfix": [
-        "postfix",
-        "postfix_exp",
-        "postfix_func",
-        "postfix_sigma",
-        "prefix",
+        "postfix_ortho_cond",
     ],
     "apex": ["apex"],
     "ip_adapter": ["ip_adapter"],
