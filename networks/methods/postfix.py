@@ -188,16 +188,20 @@ def create_network_from_weights(
     sigma_hidden_dim = int(metadata_sigma_hidden) if metadata_sigma_hidden else 256
 
     if mode in ("cond", "cond-timestep"):
-        # Infer shapes from MLP weights
-        # cond_mlp.0.weight: [hidden, embed_dim]
-        # Legacy: cond_mlp.2.weight: [K * embed_dim, hidden]
-        # cond+ortho (C1): cond_mlp.2.weight: [K(K-1)/2 + 1, hidden] — K comes
-        #                   from ortho_basis.shape[0].
-        w0 = weights_sd.get("cond_mlp.0.weight")
-        w2 = weights_sd.get("cond_mlp.2.weight")
+        # Infer shapes from MLP weights. Architecture varies by ortho flag:
+        #   legacy cond/cond-timestep: Linear(0) → GELU(1) → Linear(2)
+        #     - first Linear at cond_mlp.0; last Linear at cond_mlp.2 outputs K*D
+        #   cond+ortho (C1): LayerNorm(0) → Linear(1) → GELU(2) → Linear(3)
+        #     - first Linear at cond_mlp.1; last Linear at cond_mlp.3 outputs
+        #       K(K-1)/2 + 1 (K comes from ortho_basis.shape[0])
+        first_linear_key = "cond_mlp.1.weight" if ortho else "cond_mlp.0.weight"
+        last_linear_key = "cond_mlp.3.weight" if ortho else "cond_mlp.2.weight"
+        w0 = weights_sd.get(first_linear_key)
+        w2 = weights_sd.get(last_linear_key)
         if w0 is None or w2 is None:
             raise ValueError(
-                f"{mode} mode requires cond_mlp.0.weight and cond_mlp.2.weight (got keys: "
+                f"{mode}{'+ortho' if ortho else ''} mode requires {first_linear_key} "
+                f"and {last_linear_key} (got keys: "
                 f"{[k for k in weights_sd.keys() if 'cond_mlp' in k]})"
             )
         cond_hidden_dim = w0.shape[0]
@@ -476,7 +480,7 @@ class PostfixNetwork(nn.Module):
             )
         elif mode in ("cond", "cond-timestep") and self.ortho:
             # Caption-conditional + structurally orthogonal (C1, cond v1):
-            #   cond_mlp: D_pooled → hidden → K(K-1)/2 + 1 scalars per caption
+            #   cond_mlp: LN(D_pooled) → hidden → K(K-1)/2 + 1 scalars per caption
             #     - first K(K-1)/2 outputs → strict upper-tri of S(c) ∈ R^{K×K}
             #     - last 1 output → λ(c) (per-caption magnitude)
             #   postfix(c) = Cayley(S(c) − S(c).T) @ basis · λ(c)   (K, D)
@@ -484,6 +488,16 @@ class PostfixNetwork(nn.Module):
             # Cond-timestep+ortho is intentionally not wired (raised above);
             # under C1, σ-residuals would route into S(c)/λ(c) (NOT into the
             # postfix tensor — additive σ_residual breaks orthogonality).
+            #
+            # Pre-norm on the pooled input: mean-pooled T5 outputs sit on a
+            # narrow cone (cos μ ≈ 0.84 across captions, dominated by a corpus
+            # DC offset). Default-init Linear would project that DC across every
+            # hidden unit, swamping caption deltas — bench 20260511-1004 showed
+            # cond_mlp[0] mapping cos 0.84 → 0.997 in a single step, the worst
+            # single jump in the network. LayerNorm strips the DC + uniformizes
+            # the input scale before the first Linear sees it; γ=1, β=0 init
+            # keeps the rest of the cond_mlp's zero-init behavior intact (final
+            # Linear still starts at zero → empty postfix at step 0).
             #
             # Drops:
             #   - slot_embed (basis rows are already K different SVD directions;
@@ -514,18 +528,24 @@ class PostfixNetwork(nn.Module):
             n_skew = num_postfix_tokens * (num_postfix_tokens - 1) // 2
             n_out = n_skew + 1  # K(K-1)/2 rotation seed entries + 1 magnitude scalar
             self.cond_mlp = nn.Sequential(
+                nn.LayerNorm(embed_dim),
                 nn.Linear(embed_dim, cond_hidden_dim),
                 nn.GELU(),
                 nn.Linear(cond_hidden_dim, n_out),
             )
             nn.init.zeros_(self.cond_mlp[-1].weight)
             nn.init.zeros_(self.cond_mlp[-1].bias)
-            # Cache strict-upper-tri index pairs for the S(c) reconstruction
-            # in append_postfix; computing on every forward is wasteful and
-            # the values are constants for fixed K.
-            self._S_triu_i, self._S_triu_j = (
-                torch.triu_indices(num_postfix_tokens, num_postfix_tokens, offset=1)
-                .unbind(0)
+            # Strict-upper-tri index pairs + identity matrix for the S(c)
+            # reconstruction in append_postfix. Registered as persistent=False
+            # buffers so they live on the module's device after .to(...) (no
+            # per-forward .to() round-trip) and don't show up in state_dict.
+            triu = torch.triu_indices(num_postfix_tokens, num_postfix_tokens, offset=1)
+            self.register_buffer("_S_triu_i", triu[0].contiguous(), persistent=False)
+            self.register_buffer("_S_triu_j", triu[1].contiguous(), persistent=False)
+            self.register_buffer(
+                "_eye_K",
+                torch.eye(num_postfix_tokens, dtype=torch.float32),
+                persistent=False,
             )
             self.slot_embed_init_std = 0.0  # inert under cond+ortho
 
@@ -533,7 +553,7 @@ class PostfixNetwork(nn.Module):
             logger.info(
                 f"PostfixNetwork: {mode}+ortho({self.ortho_basis_kind}) mode — "
                 f"K={num_postfix_tokens} structurally-orthogonal slots × dim {embed_dim}, "
-                f"hidden {cond_hidden_dim}, splice={self.splice_position}, "
+                f"hidden {cond_hidden_dim}, splice={self.splice_position}, pre-norm on pooled input, "
                 f"{total_params} params (cond_mlp last layer outputs "
                 f"{n_skew} skew-seed + 1 lambda(c) = {n_out}; basis frozen)"
             )
@@ -634,6 +654,13 @@ class PostfixNetwork(nn.Module):
             # legacy postfix_embeds zero-init story).
             self.S = nn.Parameter(torch.zeros(num_postfix_tokens, num_postfix_tokens))
             self.lambda_global = nn.Parameter(torch.zeros(()))
+            # Identity matrix for the Cayley solve — buffer so it follows
+            # device placement and doesn't allocate per forward.
+            self.register_buffer(
+                "_eye_K",
+                torch.eye(num_postfix_tokens, dtype=torch.float32),
+                persistent=False,
+            )
             n_skew = num_postfix_tokens * (num_postfix_tokens - 1) // 2
             logger.info(
                 f"PostfixNetwork: postfix(ortho={self.ortho_basis_kind}) mode — "
@@ -694,6 +721,25 @@ class PostfixNetwork(nn.Module):
             f"cached adapter output (T5-compatible space)"
         )
 
+    def _apply(self, fn, recurse=True):
+        """Preserve fp32 dtype on fp32-required buffers across .to()/.bfloat16().
+
+        Both `postfix_basis` and `_eye_K` feed the Cayley solve, which needs
+        fp32 for the orthogonality gate (‖postfix @ postfix.T − λ²·I‖_F < 1e-4
+        in the proposal). save_weights also pins the basis at fp32. Without
+        this override, `network.to(torch.bfloat16)` (used under `full_bf16`)
+        would silently downcast both and break the property.
+
+        Device moves still pass through — the cast back to fp32 below preserves
+        whichever device `fn` placed the buffer on.
+        """
+        out = super()._apply(fn, recurse=recurse)
+        for name in ("postfix_basis", "_eye_K"):
+            buf = self._buffers.get(name)
+            if buf is not None and buf.dtype != torch.float32:
+                self._buffers[name] = buf.to(torch.float32)
+        return out
+
     def prepend_prefix(self, crossattn_emb: torch.Tensor) -> torch.Tensor:
         """Prepend learned prefix vectors to crossattn_emb, trimming trailing padding to maintain seq length."""
         K = self.num_postfix_tokens
@@ -708,6 +754,63 @@ class PostfixNetwork(nn.Module):
             [prefix, crossattn_emb[:, : crossattn_emb.shape[1] - K]], dim=1
         )
 
+    def _compute_ortho_cond_postfix(
+        self, pooled: torch.Tensor, target_dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pure cond+ortho path: pooled (B, D) → (cond_out (B, n_out), postfix (B, K, D)).
+
+        Designed as a `torch.compile` target — no state mutation (caller writes
+        `_last_*` after the call), no Python branching on tensor values, all
+        buffers are read-only. Shapes are static once K, embed_dim, and B are
+        fixed by bucketing, so the compile boundary is shape-static.
+
+        cond_mlp runs in the autocast dtype (bf16 under training); Cayley solve
+        + matmul run in fp32 against the dtype-pinned `_eye_K` and
+        `postfix_basis` buffers (see `_apply` override).
+        """
+        K = self.num_postfix_tokens
+        B = pooled.shape[0]
+        cond_out = self.cond_mlp(pooled)  # (B, K(K-1)/2 + 1)
+        n_skew = K * (K - 1) // 2
+        S_seed = cond_out[:, :n_skew].float()
+        lam_c = cond_out[:, -1].float()
+
+        S_c = pooled.new_zeros(B, K, K, dtype=torch.float32)
+        S_c[:, self._S_triu_i, self._S_triu_j] = S_seed
+        A = S_c - S_c.transpose(-1, -2)
+        R = torch.linalg.solve(self._eye_K + A, self._eye_K - A)  # (B, K, K)
+        rotated = torch.matmul(R, self.postfix_basis)  # (B, K, D); both fp32
+        postfix = (rotated * lam_c[:, None, None]).to(target_dtype)
+        return cond_out, postfix
+
+    def compile_hot_path(
+        self, backend: str = "inductor", mode: Optional[str] = None
+    ) -> None:
+        """torch.compile the cond+ortho hot path inside `append_postfix`.
+
+        Targets `_compute_ortho_cond_postfix`, which is shape-static once K,
+        embed_dim, and B are fixed by bucketing (`dynamic=False` is safe — same
+        justification as `AnimaDiT.compile_core`). Fuses the cond_mlp + Cayley
+        + matmul + cast sequence (~15 small kernels → 1 graph at B=1), removing
+        the per-step launch overhead from this eager-Python region.
+
+        No-op when the network isn't in cond+ortho mode — other paths
+        (legacy cond, prefix, default postfix, postfix+ortho) are either
+        already trivial or rely on state that's not compile-friendly.
+        """
+        if not (self.mode in ("cond", "cond-timestep") and self.ortho):
+            return
+        compile_kwargs: dict = {"backend": backend, "dynamic": False}
+        if mode is not None:
+            compile_kwargs["mode"] = mode
+        self._compute_ortho_cond_postfix = torch.compile(  # type: ignore[method-assign]
+            self._compute_ortho_cond_postfix, **compile_kwargs
+        )
+        logger.info(
+            f"PostfixNetwork: compiled cond+ortho hot path "
+            f"(backend={backend}, mode={mode})"
+        )
+
     def _effective_postfix(self) -> torch.Tensor:
         """Materialize the K×D ortho-postfix from (S, lambda_global, postfix_basis).
 
@@ -720,9 +823,7 @@ class PostfixNetwork(nn.Module):
         so the cost is negligible vs the 32×D output. Caller is responsible for
         casting to crossattn_emb's dtype.
         """
-        eye = torch.eye(
-            self.num_postfix_tokens, device=self.S.device, dtype=torch.float32
-        )
+        eye = self._eye_K
         S_f = self.S.float()
         A = S_f - S_f.T
         # Cayley: R = (I + A)^{-1} (I - A); orthogonal because A is skew-symmetric.
@@ -766,10 +867,11 @@ class PostfixNetwork(nn.Module):
           - "front_of_padding": place at [seqlens[i], seqlens[i]+K). Caption-position-aware;
             displaces the strongest sinks. Legacy behavior.
 
-        In "cond" mode the postfix vectors are computed per-sample from a mean-pool of
-        content slots through a 2-layer MLP. In "cond-timestep" mode a σ-conditional
-        residual (from timesteps) is added to the caption-conditional base. In default
-        mode they come from a single learned parameter tensor shared across the batch.
+        In "cond" mode the postfix vectors are computed per-sample by pooling content
+        slots through a 2-layer MLP (mean-pool for legacy non-ortho path, maxabs-pool
+        for cond+ortho). In "cond-timestep" mode a σ-conditional residual (from
+        timesteps) is added to the caption-conditional base. In default mode they come
+        from a single learned parameter tensor shared across the batch.
 
         Args:
             crossattn_emb: [B, S, D] cached adapter output (zero-padded after real tokens)
@@ -781,39 +883,44 @@ class PostfixNetwork(nn.Module):
         B, S, D = crossattn_emb.shape
 
         if self.mode in ("cond", "cond-timestep"):
-            # Mean-pool over content slots (positions < seqlen[i])
             pos = torch.arange(S, device=crossattn_emb.device).unsqueeze(0)  # [1, S]
-            mask = (pos < crossattn_seqlens.unsqueeze(1)).to(
-                crossattn_emb.dtype
-            )  # [B, S]
-            denom = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-            pooled = (crossattn_emb * mask.unsqueeze(-1)).sum(dim=1) / denom  # [B, D]
+            content_mask = pos < crossattn_seqlens.unsqueeze(1)  # [B, S] bool
+
+            if self.ortho:
+                # Maxabs-pool over content slots: pick per channel the token with
+                # the largest |·| (sign preserved). Diagnostic bench 20260511-1004
+                # showed mean-pool produces cos μ=0.84 across captions (vs 0.22
+                # for maxabs) — T5 outputs have always-positive "baseline"
+                # channels that mean/max averaging drags every caption onto;
+                # caption-distinct signal lives in both positive AND negative
+                # deflections, which maxabs preserves by picking by magnitude.
+                # Padding is zero, so we set its |·| to -1 so it can never win
+                # the argmax against any non-zero content token. In-place fill
+                # on the abs() result avoids a second [B,S,D] allocation.
+                abs_emb = crossattn_emb.abs()
+                abs_emb.masked_fill_(~content_mask.unsqueeze(-1), -1.0)
+                idx = abs_emb.argmax(dim=1, keepdim=True)  # [B, 1, D]
+                pooled = crossattn_emb.gather(dim=1, index=idx).squeeze(1)  # [B, D]
+            else:
+                # Legacy non-ortho cond path keeps mean-pool — the maxabs change
+                # is gated on ortho so legacy cond checkpoints stay reproducible.
+                mask = content_mask.to(crossattn_emb.dtype)
+                denom = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                pooled = (crossattn_emb * mask.unsqueeze(-1)).sum(dim=1) / denom  # [B, D]
 
             if self.ortho:
                 # cond+ortho (C1): cond_mlp predicts (S(c), λ(c)) per caption.
                 # postfix(c) = Cayley(S(c) − S(c).T) @ basis · λ(c) — structurally
                 # `postfix(c) @ postfix(c).T = λ(c)² · I_K` per caption.
-                #
-                # Batched solve runs in fp32 for numerical stability — K is
-                # tiny (default 32) so the cost is negligible. Caller's caching
-                # of `_last_postfix` / `_last_cond_out` preserved for diagnostics.
-                cond_out = self.cond_mlp(pooled)  # (B, K(K-1)/2 + 1)
+                # Body lives in `_compute_ortho_cond_postfix` so it's a clean
+                # `torch.compile` target (see `compile_hot_path`). State writes
+                # for diagnostics stay here, outside the compiled region.
+                cond_out, postfix = self._compute_ortho_cond_postfix(
+                    pooled, crossattn_emb.dtype
+                )
                 self._last_cond_out = cond_out
-                n_skew = K * (K - 1) // 2
-                S_seed = cond_out[:, :n_skew].float()  # (B, n_skew)
-                lam_c = cond_out[:, -1].float()         # (B,)
-
-                S_c = pooled.new_zeros(B, K, K, dtype=torch.float32)
-                triu_i = self._S_triu_i.to(crossattn_emb.device)
-                triu_j = self._S_triu_j.to(crossattn_emb.device)
-                S_c[:, triu_i, triu_j] = S_seed
-                A = S_c - S_c.transpose(-1, -2)
-                eye = torch.eye(K, device=crossattn_emb.device, dtype=torch.float32)
-                R = torch.linalg.solve(eye + A, eye - A)  # (B, K, K)
-                rotated = torch.matmul(R, self.postfix_basis.float())  # (B, K, D)
-                postfix = (rotated * lam_c[:, None, None]).to(crossattn_emb.dtype)
-                self._last_sigma_residual = None
                 self._last_postfix = postfix
+                self._last_sigma_residual = None
             else:
                 # cond_mlp output isolated so the contrastive loss can target only
                 # the caption-reading branch (not slot_embed / sigma_residual which
@@ -886,6 +993,32 @@ class PostfixNetwork(nn.Module):
 
     def on_epoch_start(self, text_encoder, unet):
         self.train()
+
+    def clear_step_caches(self) -> None:
+        """Drop per-step tensor references between training/validation steps.
+
+        Under ``compile_inductor_mode="reduce-overhead"`` (cudagraph_trees),
+        ``_last_postfix`` / ``_last_cond_out`` / ``_last_sigma_residual`` hold
+        tensors produced inside ``_compute_ortho_cond_postfix`` (compiled hot
+        path) or ``append_postfix`` — those live in the cudagraph memory pool.
+        Keeping references across the step boundary pins the pool, forcing
+        re-records or silent eager fallback. Caller invokes this right before
+        ``torch.compiler.cudagraph_mark_step_begin()`` (see ``train.py`` and
+        the validation loop) so the pool can recycle on the next iteration.
+
+        Especially load-bearing at the train→eval→train boundary (first
+        epoch's end-of-epoch validation), where stale train-side references
+        would otherwise persist across the val pass and demote subsequent
+        training steps to eager — observed as a one-time epoch 1 → epoch 2
+        slowdown from ~510 ms/step to ~900 ms/step.
+
+        Safe to call unconditionally — ``get_contrastive_loss`` and
+        ``get_sigma_budget_loss`` only read ``_last_*`` within the step that
+        wrote them, before the next ``clear_step_caches`` fires.
+        """
+        self._last_postfix = None
+        self._last_cond_out = None
+        self._last_sigma_residual = None
 
     def _cond_param_list(self):
         params = list(self.cond_mlp.parameters())

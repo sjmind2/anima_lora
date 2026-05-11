@@ -41,6 +41,7 @@ from types import SimpleNamespace
 import torch
 from PIL import Image
 from torchvision import transforms
+from typing import Optional
 
 # Make ``anima_lora/`` importable when this script is invoked as
 # ``python scripts/edit.py``.

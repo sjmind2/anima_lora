@@ -1845,6 +1845,16 @@ class AnimaTrainer:
                 f"(backend={args.dynamo_backend}, mode={inductor_mode})"
             )
 
+            # Also compile the network's hot path when it exposes one (currently
+            # only the postfix cond+ortho path — `_compute_ortho_cond_postfix`).
+            # No-op for everything else. Shape-static once bucketing is fixed,
+            # so dynamic=False is safe (same justification as compile_core).
+            net_unwrapped = accelerator.unwrap_model(network)
+            if hasattr(net_unwrapped, "compile_hot_path"):
+                net_unwrapped.compile_hot_path(
+                    backend=args.dynamo_backend, mode=inductor_mode
+                )
+
         accelerator.unwrap_model(network).prepare_grad_etc(text_encoder, unet)
 
         if not cache_latents:
