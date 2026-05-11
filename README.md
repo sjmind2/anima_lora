@@ -92,7 +92,7 @@ Each ships with a doc — see the link for usage, flags, and caveats.
 | Feature | What it is | Doc |
 |---|---|---|
 | **ReFT** | Block-level residual-stream intervention (LoReFT, NeurIPS 2024). Composes with any LoRA variant. | [reft.md](docs/methods/reft.md) |
-| **Postfix / prefix tuning** | Continuous vectors appended (postfix) or prepended (prefix) to adapter cross-attention. Five postfix variants. | [postfix-sigma.md](docs/experimental/postfix-sigma.md), [prefix-tuning.md](docs/experimental/prefix-tuning.md) |
+| **Postfix (cond+ortho)** | Caption-conditional postfix vectors with structural orthogonality (Cayley-rotated frozen SVD basis). DiT frozen; only `cond_mlp` trains. | [postfix.md](docs/experimental/postfix.md) |
 | **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT frozen; trains Perceiver resampler + per-block `to_k_ip`/`to_v_ip`. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
 | **EasyControl** | Extended self-attention image conditioning. DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **Embedding inversion** | Optimize a text embedding to match a target image through the frozen DiT. | [invert.md](docs/methods/invert.md) |

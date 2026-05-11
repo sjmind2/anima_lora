@@ -157,11 +157,16 @@ def run_cond_ortho_analysis(network, args, K, D, device):
     """cond+ortho path: per-caption postfix(c) — different gates than postfix-mode.
 
     Materialize postfix(c) for N captions, check
-      (a) per-caption ortho residual `‖gram(c) - λ(c)² · I‖_F < 1e-4` (every caption)
+      (a) per-caption ortho residual `‖gram(c) - λ(c)² · I‖_F` — the pure-Cayley
+          gate (gates < 1e-4 ONLY when slot_pos is inert; slot_pos adds a
+          per-slot bias that intentionally breaks the residual). When slot_pos
+          is live, the relevant gate becomes effective-rank of postfix(c).
       (b) λ(c) distribution across captions: alive count + spread
       (c) cross-caption postfix diversity (the §C diagnostic): mean off-diagonal
           cosine of flattened postfix(c) tensors. Collapsed cond-mode v1 had
           near-1.0 here; structural ortho should disagree across captions.
+      (d) slot_pos: norm vs caption signal norm (does it dominate?), and
+          effective rank of full postfix(c) including slot_pos.
     """
     n_skew = K * (K - 1) // 2
     cached = find_cached_te(args.dataset_dir, args.num_captions, args.seed)
@@ -191,12 +196,24 @@ def run_cond_ortho_analysis(network, args, K, D, device):
     eye = torch.eye(K, device=device, dtype=torch.float32)
     R = torch.linalg.solve(eye + A, eye - A)
     basis = network.postfix_basis.float()
-    postfix = (R @ basis) * lam_c[:, None, None]  # (N, K, D)
+    cayley_postfix = (R @ basis) * lam_c[:, None, None]  # (N, K, D), Cayley-only
 
-    # (a) per-caption orthogonality residuals
+    # slot_pos may not exist on legacy checkpoints — getattr-guard.
+    slot_pos = getattr(network, "slot_pos", None)
+    slot_pos_active = slot_pos is not None and slot_pos.detach().float().abs().sum().item() > 0
+    if slot_pos is not None:
+        sp = slot_pos.detach().float().to(device)
+        postfix = cayley_postfix + sp.unsqueeze(0)  # broadcast over N
+    else:
+        sp = None
+        postfix = cayley_postfix
+
+    # (a) per-caption orthogonality residuals — against the Cayley-only postfix
+    # so the gate is comparable across v2_ln (no slot_pos) and v3 (slot_pos
+    # active). The combined postfix's orthogonality is reported separately.
     residuals = []
     for n in range(N):
-        gram = postfix[n] @ postfix[n].T
+        gram = cayley_postfix[n] @ cayley_postfix[n].T
         expected = (lam_c[n].pow(2)) * eye
         residuals.append((gram - expected).norm().item())
     residuals_t = torch.tensor(residuals)
@@ -216,6 +233,8 @@ def run_cond_ortho_analysis(network, args, K, D, device):
     lam_alive_pass = lam_alive_frac >= 0.8
 
     # (c) cross-caption diversity (§C): pairwise cos of flattened postfix
+    # (uses the *combined* postfix; slot_pos is caption-independent so adding
+    # it raises the floor — we still want to see meaningful per-caption deltas).
     flat = postfix.reshape(N, -1)
     flat_n = F.normalize(flat, dim=-1)
     cos_mat = (flat_n @ flat_n.T).cpu()
@@ -226,11 +245,43 @@ def run_cond_ortho_analysis(network, args, K, D, device):
     cross_cos_min = float(off.min().item())
     diversity_pass = cross_cos_mean < 0.95
 
+    # (d) slot_pos diagnostics + effective rank of full postfix(c)
+    slot_pos_info: dict | None = None
+    if sp is not None:
+        slot_pos_row_norms = sp.norm(dim=-1).cpu()  # (K,)
+        # Cayley-only postfix row norms are ~|λ(c)|; ratio = slot_pos / λ(c) mean
+        cayley_row_norms = cayley_postfix.norm(dim=-1)  # (N, K)
+        cayley_norm_mean = float(cayley_row_norms.mean().item())
+        slot_pos_norm_mean = float(slot_pos_row_norms.mean().item())
+        slot_pos_to_cayley_ratio = (
+            slot_pos_norm_mean / max(cayley_norm_mean, 1e-8)
+        )
+        # Effective rank of postfix(c) singular spectrum at 90% energy, averaged.
+        eff_ranks = []
+        for n in range(N):
+            svs = torch.linalg.svdvals(postfix[n])  # (K,)
+            energies = (svs ** 2).cumsum(0)
+            target = 0.9 * energies[-1]
+            eff_rank = int((energies < target).sum().item()) + 1
+            eff_ranks.append(eff_rank)
+        eff_rank_t = torch.tensor(eff_ranks, dtype=torch.float32)
+        slot_pos_info = {
+            "active": bool(slot_pos_active),
+            "row_norm_mean": slot_pos_norm_mean,
+            "row_norm_min": float(slot_pos_row_norms.min().item()),
+            "row_norm_max": float(slot_pos_row_norms.max().item()),
+            "cayley_row_norm_mean": cayley_norm_mean,
+            "slot_pos_to_cayley_ratio": slot_pos_to_cayley_ratio,
+            "effective_rank_90_mean": float(eff_rank_t.mean().item()),
+            "effective_rank_90_min": int(eff_rank_t.min().item()),
+        }
+
     print("\n" + "=" * 78)
     print(f"cond+ortho analysis — {os.path.basename(args.postfix_weight)}")
     print("=" * 78)
     print(f"  K={K}  D={D}  basis={network.ortho_basis_kind}  N_captions={N}")
-    print("\n  (a) Per-caption structural orthogonality")
+    print(f"  slot_pos: {'ACTIVE' if slot_pos_active else 'inert/legacy'}")
+    print("\n  (a) Per-caption Cayley orthogonality (pre-slot_pos)")
     print(f"    ‖gram - λ(c)² · I‖_F   max={pc_max:.3e}   mean={pc_mean:.3e}")
     print(f"    fraction passing < 1e-4: {pc_pass_frac:.3f} → "
           f"{'PASS' if pc_ortho_pass else 'FAIL'}")
@@ -238,12 +289,21 @@ def run_cond_ortho_analysis(network, args, K, D, device):
     print(f"    |λ(c)| min={lam_min:.4f}  max={lam_max:.4f}  mean={lam_mean:.4f}  std={lam_std:.4f}")
     print(f"    alive (|λ| > 1e-3): {alive}/{N} = {lam_alive_frac:.2%} → "
           f"{'PASS' if lam_alive_pass else 'FAIL'}")
-    print("\n  (c) Cross-caption postfix diversity (§C diagnostic)")
+    print("\n  (c) Cross-caption postfix diversity (§C diagnostic, full postfix)")
     print(f"    pairwise cosine: mean={cross_cos_mean:+.4f}  min={cross_cos_min:+.4f}  max={cross_cos_max:+.4f}")
     if diversity_pass:
         print("    → DIVERSE (mean < 0.95): captions produce different postfixes. PASS")
     else:
         print("    → COLLAPSED (mean ≥ 0.95): captions produce near-identical postfixes. FAIL")
+    if slot_pos_info is not None:
+        print("\n  (d) slot_pos diagnostics (splice-symmetry break)")
+        print(f"    slot_pos row norm  mean={slot_pos_info['row_norm_mean']:.4f}  "
+              f"min={slot_pos_info['row_norm_min']:.4f}  max={slot_pos_info['row_norm_max']:.4f}")
+        print(f"    cayley row norm   mean={slot_pos_info['cayley_row_norm_mean']:.4f}")
+        print(f"    slot_pos / cayley = {slot_pos_info['slot_pos_to_cayley_ratio']:.3f}  "
+              "(target ~0.3–3.0; >>1 → slot_pos dominates, <<0.1 → near-no-op)")
+        print(f"    effective rank @90% energy: mean={slot_pos_info['effective_rank_90_mean']:.1f}  "
+              f"min={slot_pos_info['effective_rank_90_min']}  (target ≈ K = {K})")
 
     payload = {
         "postfix_weight": args.postfix_weight,
@@ -274,6 +334,7 @@ def run_cond_ortho_analysis(network, args, K, D, device):
             "cos_max": cross_cos_max,
             "pass": bool(diversity_pass),
         },
+        "slot_pos": slot_pos_info,
     }
     if args.out_json:
         os.makedirs(os.path.dirname(args.out_json) or ".", exist_ok=True)

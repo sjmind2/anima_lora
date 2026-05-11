@@ -149,6 +149,15 @@ def main():
             "cross_caption_cos_max": div["cos_max"],
             "cross_caption_diversity_pass": div["pass"],
         })
+        sp = report.get("slot_pos")
+        if sp is not None:
+            metrics.update({
+                "slot_pos_active": sp["active"],
+                "slot_pos_row_norm_mean": sp["row_norm_mean"],
+                "slot_pos_to_cayley_ratio": sp["slot_pos_to_cayley_ratio"],
+                "postfix_effective_rank_90_mean": sp["effective_rank_90_mean"],
+                "postfix_effective_rank_90_min": sp["effective_rank_90_min"],
+            })
 
     write_result(
         run_dir,

@@ -10,8 +10,7 @@ Training and inference algorithms.
 | [methods/psoft-integrated-ortholora.md](methods/psoft-integrated-ortholora.md) | OrthoLoRA (Cayley) — SVD-informed init, structural orthogonality |
 | [methods/timestep_mask.md](methods/timestep_mask.md) | T-LoRA — timestep-dependent rank masking |
 | [methods/reft.md](methods/reft.md) | ReFT — block-level residual-stream intervention |
-| [methods/prefix-tuning.md](methods/prefix-tuning.md) | Prefix tuning — 12 GB VRAM, ~1 step/s, continuous prefix vectors |
-| [methods/postfix-sigma.md](methods/postfix-sigma.md) | σ-conditional postfix — caption-conditional postfix + zero-init σ residual |
+| [experimental/postfix.md](experimental/postfix.md) | Postfix (cond+ortho) — caption-conditional postfix with Cayley-rotated frozen SVD basis |
 | [methods/mod-guidance.md](methods/mod-guidance.md) | Modulation guidance — text-conditioned AdaLN steering via distilled MLP |
 | [methods/invert.md](methods/invert.md) | Embedding inversion — optimize text embeddings (full and K-slot reference) |
 | [methods/spectrum.md](methods/spectrum.md) | Spectrum — training-free inference acceleration via Chebyshev forecasting |

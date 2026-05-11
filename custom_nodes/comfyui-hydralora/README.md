@@ -2,7 +2,7 @@
 
 A single ComfyUI node that loads Anima adapter checkpoints and dispatches their components through ComfyUI's patching system. Auto-detects what the file contains — any combination of plain LoRA, HydraLoRA (live per-Linear routing), LoReFT (residual-stream edits), and prefix / postfix / cond context splices — and routes each to its correct application path.
 
-Algorithm-level notes live in the main `docs/methods/` tree (`hydra-lora.md`, `reft.md`, `postfix-sigma.md`, `prefix-tuning.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
+Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/postfix.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
 
 ## Install
 

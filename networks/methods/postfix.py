@@ -80,6 +80,7 @@ def create_network(
     te_cache_dir = kwargs.get("te_cache_dir", None)
     svd_num_files = int(kwargs.get("svd_num_files", 256))
     ortho_basis_seed = int(kwargs.get("ortho_basis_seed", 0))
+    lambda_init = float(kwargs.get("lambda_init", 0.0))
 
     network = PostfixNetwork(
         num_postfix_tokens=num_postfix_tokens,
@@ -99,6 +100,7 @@ def create_network(
         te_cache_dir=te_cache_dir,
         svd_num_files=svd_num_files,
         ortho_basis_seed=ortho_basis_seed,
+        lambda_init=lambda_init,
     )
     return network
 
@@ -129,6 +131,7 @@ def create_network_from_weights(
     metadata_sigma_hidden = None
     metadata_ortho = None
     metadata_ortho_basis = None
+    metadata_lambda_init = None
     if file is not None and os.path.splitext(file)[1] == ".safetensors":
         from safetensors import safe_open
 
@@ -141,6 +144,7 @@ def create_network_from_weights(
             metadata_sigma_hidden = meta.get("ss_sigma_hidden_dim")
             metadata_ortho = meta.get("ss_ortho")
             metadata_ortho_basis = meta.get("ss_ortho_basis")
+            metadata_lambda_init = meta.get("ss_lambda_init")
 
     has_cond = any(k.startswith("cond_mlp.") for k in weights_sd.keys())
     has_sigma = any(k.startswith("sigma_mlp.") for k in weights_sd.keys())
@@ -283,6 +287,7 @@ def create_network_from_weights(
         te_cache_dir=kwargs.get("te_cache_dir", None),
         svd_num_files=int(kwargs.get("svd_num_files", 256)),
         ortho_basis_seed=int(kwargs.get("ortho_basis_seed", 0)),
+        lambda_init=float(metadata_lambda_init) if metadata_lambda_init else 0.0,
     )
     return network, weights_sd
 
@@ -429,6 +434,7 @@ class PostfixNetwork(nn.Module):
         te_cache_dir: Optional[str] = None,
         svd_num_files: int = 256,
         ortho_basis_seed: int = 0,
+        lambda_init: float = 0.0,
     ):
         super().__init__()
         if mode not in ("postfix", "prefix", "cond", "cond-timestep"):
@@ -452,6 +458,7 @@ class PostfixNetwork(nn.Module):
         self.te_cache_dir = te_cache_dir
         self.svd_num_files = int(svd_num_files)
         self.ortho_basis_seed = int(ortho_basis_seed)
+        self.lambda_init = float(lambda_init)
         if self.ortho and mode == "cond-timestep":
             # cond-timestep + ortho deferred (cond v1 wired only). Adding σ-residual
             # under C1 means routing σ-features into S(c) and λ(c) (NOT into the
@@ -535,6 +542,19 @@ class PostfixNetwork(nn.Module):
             )
             nn.init.zeros_(self.cond_mlp[-1].weight)
             nn.init.zeros_(self.cond_mlp[-1].bias)
+            # Non-zero λ_init: bias the λ(c) output channel so the postfix has
+            # non-trivial magnitude at step 0. v2_ln (lambda_init=0) saw λ(c)
+            # collapse from mean 0.50 (epoch 1) to mean 0.034 (epoch 2 final);
+            # bench/postfix_ortho/results/20260511-1622-cond-v2-ln-final/. The
+            # zero-init never gave the network an amplitude to *defend* — only
+            # an amplitude to *grow from zero* — and any L2 / weight-decay
+            # pressure on cond_mlp shrinks it back. Biasing the λ bias makes
+            # the network choose between "keep using the postfix" and "kill
+            # it" rather than "find a reason to start it." The skew-seed bias
+            # entries stay zero (S(c)=0 → R=I → postfix(c) = basis · λ_init).
+            if self.lambda_init != 0.0:
+                with torch.no_grad():
+                    self.cond_mlp[-1].bias[-1] = self.lambda_init
             # Strict-upper-tri index pairs + identity matrix for the S(c)
             # reconstruction in append_postfix. Registered as persistent=False
             # buffers so they live on the module's device after .to(...) (no
@@ -547,13 +567,21 @@ class PostfixNetwork(nn.Module):
                 torch.eye(num_postfix_tokens, dtype=torch.float32),
                 persistent=False,
             )
-            self.slot_embed_init_std = 0.0  # inert under cond+ortho
+            # `slot_pos` (caption-independent per-slot bias) was removed in v4:
+            # the v3 run let it grow to dominate (ratio 1.82) and crush caption
+            # diversity (cos μ=0.994). The K Cayley-rotated SVD basis rows already
+            # produce K distinct cross-attention keys from content alone, so no
+            # permutation-symmetry break is needed at the input. It also created
+            # a cudagraph aliasing failure under `compile_hot_path` (the
+            # `slot_pos.float()` output sat in cudagraph memory and was
+            # overwritten before backward could consume it).
 
             total_params = sum(p.numel() for p in self.cond_mlp.parameters())
             logger.info(
                 f"PostfixNetwork: {mode}+ortho({self.ortho_basis_kind}) mode — "
                 f"K={num_postfix_tokens} structurally-orthogonal slots × dim {embed_dim}, "
                 f"hidden {cond_hidden_dim}, splice={self.splice_position}, pre-norm on pooled input, "
+                f"lambda_init={self.lambda_init}, "
                 f"{total_params} params (cond_mlp last layer outputs "
                 f"{n_skew} skew-seed + 1 lambda(c) = {n_out}; basis frozen)"
             )
@@ -1022,7 +1050,7 @@ class PostfixNetwork(nn.Module):
 
     def _cond_param_list(self):
         params = list(self.cond_mlp.parameters())
-        # Under cond+ortho (C1) we don't create slot_embed (basis rows are already
+        # Under cond+ortho we don't create slot_embed (basis rows are already
         # K different SVD directions; no permutation symmetry to break).
         if not self.ortho:
             params.append(self.slot_embed)
@@ -1184,7 +1212,7 @@ class PostfixNetwork(nn.Module):
                 # cond+ortho (C1): cond_mlp output is (K(K-1)/2 + 1) per caption.
                 # Frozen SVD basis must be persisted at fp32 (same justification
                 # as postfix+ortho v2 — bf16 truncation blows the orthogonality
-                # gate). slot_embed / sigma_mlp don't exist under ortho.
+                # gate). slot_embed / sigma_mlp / slot_pos don't exist under ortho.
                 state_dict["ortho_basis"] = self.postfix_basis.detach().clone().cpu().float()
             else:
                 state_dict["slot_embed"] = self.slot_embed.detach().clone().cpu().to(dtype)
@@ -1238,6 +1266,8 @@ class PostfixNetwork(nn.Module):
                 if self.te_cache_dir is not None:
                     metadata["ss_te_cache_dir"] = str(self.te_cache_dir)
                 metadata["ss_svd_num_files"] = str(self.svd_num_files)
+                if self.mode in ("cond", "cond-timestep"):
+                    metadata["ss_lambda_init"] = str(self.lambda_init)
 
             model_hash, legacy_hash = precalculate_safetensors_hashes(
                 state_dict, metadata
@@ -1292,6 +1322,13 @@ class PostfixNetwork(nn.Module):
                         f"{[k for k in weights_sd.keys() if k.startswith('ortho_')]})"
                     )
                 self.postfix_basis.copy_(basis_w.to(self.postfix_basis.dtype))
+                if "slot_pos" in weights_sd:
+                    # Legacy v3/v4 checkpoint — slot_pos was removed because it
+                    # collapsed caption diversity (see postfix.md). Drop it.
+                    logger.warning(
+                        "Ignoring 'slot_pos' from legacy cond+ortho checkpoint "
+                        "(parameter removed in current code)."
+                    )
                 logger.info(
                     f"Loaded cond+ortho: K={self.num_postfix_tokens} D={self.embed_dim} "
                     f"basis={self.ortho_basis_kind} (cond_mlp params: "

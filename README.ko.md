@@ -95,7 +95,7 @@ Linear 가중치 델타가 아닌 변형(ReFT / HydraLoRA `_moe` / postfix / pre
 | 기능 | 설명 | 문서 |
 |---|---|---|
 | **ReFT** | 블록 단위 residual-stream intervention (LoReFT, NeurIPS 2024). 어떤 LoRA 변형과도 조합 가능. | [reft.md](docs/methods/reft.md) |
-| **Postfix / prefix tuning** | 어댑터 cross-attention에 연속 벡터를 뒤에(postfix) 또는 앞에(prefix) 붙임. postfix 변형 5종. | [postfix-sigma.md](docs/experimental/postfix-sigma.md), [prefix-tuning.md](docs/experimental/prefix-tuning.md) |
+| **Postfix (cond+ortho)** | 캡션 조건부 postfix 벡터를 Cayley 회전된 frozen SVD 기저에 묶어 구조적 직교성을 강제. DiT는 frozen, `cond_mlp`만 학습. | [postfix.md](docs/experimental/postfix.md) |
 | **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT는 frozen, Perceiver 리샘플러와 블록별 `to_k_ip`/`to_v_ip`만 학습. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
 | **EasyControl** | 확장 self-attention 이미지 조건화. DiT는 frozen, 블록별 cond LoRA(self-attn + FFN)와 스칼라 `b_cond` 게이트만 학습. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **임베딩 인버전** | frozen DiT를 통과시켜 타깃 이미지에 맞도록 텍스트 임베딩을 최적화. | [invert.md](docs/methods/invert.md) |

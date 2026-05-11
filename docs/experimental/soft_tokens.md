@@ -120,7 +120,7 @@ The existing postfix module logs an aggressive guard against K-slot permutation 
 
 | Component | Compat | Notes |
 |---|---|---|
-| Training loop | ✅ | `train.py` passes `timesteps=...` into `append_postfix` since the postfix-sigma family already required it; soft tokens just piggyback on the same hook. |
+| Training loop | ✅ | `train.py` already passes `timesteps=...` into `append_postfix` (legacy `cond-timestep` postfix mode); soft tokens piggyback on the same hook. |
 | Standard inference | ❌ v1 | `for_inference=True` raises `NotImplementedError`. Per-step block hook would need to fire inside `library/inference/generation.py::generate_body`. |
 | Spectrum inference | ❌ v1 | Same blocker as standard inference — Spectrum's actual-step forwards would need the per-step hook too. |
 | `torch.compile` (`_run_blocks`) | ✅ | `end_of_sequence` keeps `crossattn_emb` shape static; the cached `_step_layer_tokens` is read as a runtime tensor with static shape. `front_of_padding` uses `scatter` with dynamic per-sample indices but static buffer shape — also compile-clean. |
