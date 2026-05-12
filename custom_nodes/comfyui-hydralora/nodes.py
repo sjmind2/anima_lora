@@ -1,27 +1,50 @@
-"""Unified Anima adapter loader node.
+"""Anima ComfyUI custom nodes.
 
-One node, two independently-toggled sections:
-  - Adapter: LoRA / HydraLoRA / ReFT (auto-detected from file keys)
-  - Postfix: prefix / postfix / cond context splicing (auto-detected)
+Three single-purpose loader nodes that each take a MODEL, apply one kind
+of Anima-trained intervention, and return a MODEL. Chain them when a
+workflow needs more than one.
 
-Both operate on the same cloned ``ModelPatcher``. Adapter weight patches
-and ReFT block hooks are installed first; postfix wraps
-``diffusion_model.forward`` last, so the wrapper sees the model with
-adapter modifications already in place.
+  - ``AnimaAdapterLoader``: LoRA / HydraLoRA / ReFT (auto-detected from
+    the safetensors keys + metadata). Installs ComfyUI weight patches for
+    plain LoRA, per-Linear forward hooks for HydraLoRA live routing
+    (σ-conditional and/or FeRA-style FEI-conditional on the Hydra stack),
+    and per-block forward hooks for ReFT.
+  - ``AnimaFeraLoader``: author-faithful FeRA (Yin et al., arXiv:2511.17979)
+    — global router on the latent's spectral energy + per-Linear stacked
+    independent experts. Different network family from
+    ``AnimaAdapterLoader``'s Hydra/FEI variant: incompatible save format,
+    mutually exclusive with HydraLoRA-moe (load one, not both).
+  - ``AnimaPostfixLoader``: prefix / postfix / cond context splicing.
+    Wraps ``diffusion_model.forward`` to splice learned vectors into the
+    T5-compatible crossattn embedding after the LLM adapter, CFG-safe via
+    ``cond_or_uncond``.
+
+Adapter and postfix loaders were previously bundled in a single node
+with toggle booleans; they were split in v3.0.0 so each does one thing
+and users can bypass / reorder them with ComfyUI's standard MODEL-chain
+wiring. ``AnimaFeraLoader`` was added in v3.1.0.
 """
 
 import folder_paths
 
 from .adapter import apply_adapter
+from .fera import apply_fera
 from .postfix import apply_postfix
 
 
 class AnimaAdapterLoader:
-    """Apply an Anima adapter (LoRA / Hydra / ReFT) and/or a postfix.
+    """Apply an Anima adapter (LoRA / HydraLoRA / ReFT) to a MODEL.
 
-    Each section is gated by a boolean toggle. When a toggle is off, that
-    file dropdown and its strength inputs are ignored -- there is no need
-    for a None sentinel in the dropdown.
+    Auto-detects which components the safetensors file contains and
+    routes each to its correct application path:
+
+      - Plain LoRA → ``ModelPatcher.add_patches``
+      - HydraLoRA → per-Linear ``forward_hook`` (live router replay,
+        including σ-conditional bias and FeRA-style FEI routing when
+        the checkpoint's metadata declares ``ss_use_fei_router=true``)
+      - ReFT → per-block ``forward_hook`` on the DiT's blocks
+
+    Postfix / prefix / cond files load through ``AnimaPostfixLoader``.
     """
 
     @classmethod
@@ -30,10 +53,6 @@ class AnimaAdapterLoader:
         return {
             "required": {
                 "model": ("MODEL",),
-                "use_adapter": (
-                    "BOOLEAN",
-                    {"default": True, "label_on": "on", "label_off": "off"},
-                ),
                 "adapter": (
                     loras,
                     {
@@ -64,10 +83,124 @@ class AnimaAdapterLoader:
                         "tooltip": "Strength for ReFT residual-stream edits.",
                     },
                 ),
-                "use_postfix": (
-                    "BOOLEAN",
-                    {"default": False, "label_on": "on", "label_off": "off"},
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "loaders"
+    DESCRIPTION = (
+        "Anima adapter loader. Auto-detects LoRA / HydraLoRA / ReFT in "
+        "the safetensors file. HydraLoRA installs per-Linear forward "
+        "hooks that compute the trained per-sample router gate from each "
+        "Linear's input and blend per-expert lora_up heads — full live "
+        "routing including σ-conditional bias and FeRA-style FEI-conditional "
+        "content routing when the checkpoint declares it. ReFT installs "
+        "per-block forward hooks. For prefix / postfix / cond context "
+        "splicing, chain an AnimaPostfixLoader after this node."
+    )
+
+    def apply(self, model, adapter, strength_lora, strength_reft):
+        new_model = model.clone()
+        file_path = folder_paths.get_full_path("loras", adapter)
+        apply_adapter(new_model, file_path, strength_lora, strength_reft)
+        return (new_model,)
+
+
+class AnimaFeraLoader:
+    """Apply an author-faithful FeRA adapter to a MODEL.
+
+    FeRA (Yin et al., arXiv:2511.17979): one **global router** consumes
+    the latent's Frequency-Energy Indicator each denoising step and emits
+    a single ``(B, num_experts)`` gate that every adapted Linear reuses
+    for that step. Each adapted Linear carries **independent** stacked
+    low-rank experts (``lora_down: (E, r, in)``, ``lora_up: (E, out, r)``)
+    and adds ``Σ_k w_k · U_k @ D_k @ x`` to the frozen base.
+
+    Distinct from ``AnimaAdapterLoader``'s FEI-on-Hydra variant: that
+    one routes per-Linear on Hydra's shared-A stack, this one routes
+    globally on independent experts. Different network module
+    (``networks.methods.fera`` vs ``networks.lora_anima``), different
+    save format, mutually exclusive at the inference layer — load one,
+    not both.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = folder_paths.get_filename_list("loras")
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "adapter": (
+                    loras,
+                    {
+                        "tooltip": (
+                            "Author-faithful FeRA file "
+                            "(networks.methods.fera). Stacked-Parameter "
+                            "lora_down / lora_up (no .weight suffix) plus "
+                            "router.net.* MLP keys; identified by "
+                            "ss_network_module=networks.methods.fera or "
+                            "the key sniff."
+                        )
+                    },
                 ),
+                "strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "Scales the gated expert correction added to "
+                            "each adapted Linear (mirrors the training-side "
+                            "multiplier; 0 short-circuits to the frozen base)."
+                        ),
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "loaders"
+    DESCRIPTION = (
+        "Anima FeRA loader (author-faithful — Yin et al., arXiv:2511.17979). "
+        "Installs a single model-level forward_pre_hook that computes the "
+        "per-step Frequency-Energy Indicator and global router gates, plus "
+        "per-Linear forward_hooks that add the gated stacked-expert "
+        "correction. Mutually exclusive with HydraLoRA — for FEI-on-Hydra "
+        "checkpoints, use AnimaAdapterLoader. For prefix / postfix / cond, "
+        "chain an AnimaPostfixLoader after this node."
+    )
+
+    def apply(self, model, adapter, strength):
+        new_model = model.clone()
+        file_path = folder_paths.get_full_path("loras", adapter)
+        apply_fera(new_model, file_path, strength)
+        return (new_model,)
+
+
+class AnimaPostfixLoader:
+    """Apply an Anima prefix / postfix / cond file to a MODEL.
+
+    Wraps ``diffusion_model.forward`` to splice the learned vectors into
+    the T5-compatible crossattn embedding after the LLM adapter + pad-to-512
+    step. Positive-batch rows only (CFG-safe via ``cond_or_uncond`` from
+    ``transformer_options``). Mode (prefix / postfix / cond) is
+    auto-detected from the safetensors keys.
+
+    Chain after ``AnimaAdapterLoader`` when a workflow needs both — the
+    postfix wrapper sees the model with adapter modifications already in
+    place.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = folder_paths.get_filename_list("loras")
+        return {
+            "required": {
+                "model": ("MODEL",),
                 "postfix": (
                     loras,
                     {
@@ -94,44 +227,28 @@ class AnimaAdapterLoader:
     FUNCTION = "apply"
     CATEGORY = "loaders"
     DESCRIPTION = (
-        "Anima adapter loader. Toggle adapter (LoRA / Hydra / ReFT) and "
-        "postfix sections independently. HydraLoRA installs per-Linear "
-        "forward hooks that compute the trained per-sample router gate from "
-        "each Linear's input and blend per-expert lora_up heads -- full live "
-        "routing including sigma-conditional bias. ReFT installs per-block "
-        "forward hooks. Postfix wraps diffusion_model.forward to splice "
-        "learned vectors after the LLM adapter; positive-batch rows only "
-        "(CFG-safe)."
+        "Anima postfix loader. Splices learned prefix / postfix / cond "
+        "vectors into the T5-compatible crossattn embedding after the "
+        "LLM adapter. Mode auto-detected from safetensors keys. "
+        "Positive-batch only (CFG-safe). For LoRA / HydraLoRA / ReFT "
+        "adapters, chain an AnimaAdapterLoader before this node."
     )
 
-    def apply(
-        self,
-        model,
-        use_adapter,
-        adapter,
-        strength_lora,
-        strength_reft,
-        use_postfix,
-        postfix,
-        strength_postfix,
-    ):
+    def apply(self, model, postfix, strength_postfix):
         new_model = model.clone()
-
-        if use_adapter:
-            file_path = folder_paths.get_full_path("loras", adapter)
-            apply_adapter(new_model, file_path, strength_lora, strength_reft)
-
-        if use_postfix:
-            file_path = folder_paths.get_full_path("loras", postfix)
-            apply_postfix(new_model, file_path, strength_postfix)
-
+        file_path = folder_paths.get_full_path("loras", postfix)
+        apply_postfix(new_model, file_path, strength_postfix)
         return (new_model,)
 
 
 NODE_CLASS_MAPPINGS = {
     "AnimaAdapterLoader": AnimaAdapterLoader,
+    "AnimaFeraLoader": AnimaFeraLoader,
+    "AnimaPostfixLoader": AnimaPostfixLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaAdapterLoader": "Anima Adapter Loader",
+    "AnimaFeraLoader": "Anima FeRA Loader",
+    "AnimaPostfixLoader": "Anima Postfix Loader",
 }

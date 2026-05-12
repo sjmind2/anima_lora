@@ -264,8 +264,15 @@ class ModelOffloader(Offloader):
         return backward_hook
 
     def prepare_block_devices_before_forward(
-        self, blocks: Union[list[nn.Module], nn.ModuleList]
+        self,
+        blocks: Union[list[nn.Module], nn.ModuleList],
+        free_cache: bool = True,
     ):
+        # ``free_cache=False`` skips the trailing ``empty_cache`` so callers
+        # that re-enter another forward in the same step (e.g. FeRA FECL's
+        # no-grad base pass) don't release the caching allocator's blocks
+        # just to have the next forward re-grow them — the visible nvidia-smi
+        # swing was ~1 GB per step on a 5060 Ti without changing peak allocated.
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
@@ -287,7 +294,8 @@ class ModelOffloader(Offloader):
             weighs_to_device(b, torch.device("cpu"))  # make sure weights are on cpu
 
         synchronize_device(self.device)
-        clean_memory_on_device(self.device)
+        if free_cache:
+            clean_memory_on_device(self.device)
 
     def wait_for_block(self, block_idx: int):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:

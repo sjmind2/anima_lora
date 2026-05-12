@@ -28,6 +28,69 @@ _adapter_cache: Dict[str, dict] = {}
 _REFT_KEY_RE = re.compile(r"^reft_unet_blocks_(\d+)\.(.+)$")
 
 
+# ---------------------------------------------------------------------------
+# FEI (Frequency-Energy Index) — FeRA-style content-aware routing key.
+#
+# 2-band Laplacian decomposition of the current latent z_t on the simplex.
+# Mirrors ``library/runtime/fei.py`` from the training tree so the node stays
+# standalone (no anima_lora source on the runtime path).
+# ---------------------------------------------------------------------------
+
+_GAUSS_CACHE: Dict[tuple, torch.Tensor] = {}
+
+
+def _gaussian_kernel_1d(
+    sigma: float, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
+    key = (round(sigma, 4), device, dtype)
+    cached = _GAUSS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    half = max(1, int(math.ceil(3.0 * sigma)))
+    x = torch.arange(-half, half + 1, device=device, dtype=dtype)
+    k = torch.exp(-(x * x) / (2.0 * sigma * sigma))
+    k = k / k.sum()
+    _GAUSS_CACHE[key] = k
+    return k
+
+
+def _gaussian_blur_2d(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable Gaussian along (H, W) with reflect padding. ``x`` is ``[B, C, H, W]``."""
+    if sigma <= 0:
+        return x
+    k1 = _gaussian_kernel_1d(sigma, x.device, x.dtype)
+    K = k1.numel()
+    pad = K // 2
+    C = x.shape[1]
+    kw = k1.view(1, 1, 1, K).expand(C, 1, 1, K).contiguous()
+    kh = k1.view(1, 1, K, 1).expand(C, 1, K, 1).contiguous()
+    x = torch.nn.functional.pad(x, (pad, pad, 0, 0), mode="reflect")
+    x = torch.nn.functional.conv2d(x, kw, groups=C)
+    x = torch.nn.functional.pad(x, (0, 0, pad, pad), mode="reflect")
+    x = torch.nn.functional.conv2d(x, kh, groups=C)
+    return x
+
+
+def _compute_fei_2band(z: torch.Tensor, sigma_low: float) -> torch.Tensor:
+    """Return ``[B, 2]`` simplex ``(e_low, e_high)`` on a 4D latent.
+
+    Promoted to fp32 internally — the squared norm + simplex divide can
+    underflow at small ``e_low`` in bf16. Negligible cost on
+    ``H_lat·W_lat ≈ 4096`` patch grids vs the DiT forward.
+    """
+    z = z.float()
+    lp = _gaussian_blur_2d(z, sigma_low)
+    e_low = lp.pow(2).flatten(1).sum(-1)
+    e_high = (z - lp).pow(2).flatten(1).sum(-1)
+    energies = torch.stack([e_low, e_high], dim=-1)
+    return energies / energies.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
+def _fei_sigma_low(h_lat: int, w_lat: int, fei_sigma_low_div: float) -> float:
+    """σ_low scaled to ``min(H_lat, W_lat)`` so the band semantic is bucket-invariant."""
+    return float(min(h_lat, w_lat)) / float(fei_sigma_low_div)
+
+
 def _parse_reft(weights_sd: Dict[str, torch.Tensor]) -> Optional[Dict[int, dict]]:
     """Group ReFT keys by block index. Returns None if no ReFT keys present."""
     by_idx: Dict[int, Dict[str, torch.Tensor]] = {}
@@ -222,6 +285,45 @@ def load_adapter(file_path: str) -> dict:
         hydra["num_sigma_buckets"] = num_buckets
         hydra["sigma_bucket_boundaries"] = boundaries
 
+        # FeRA-style FEI router (content-aware routing). Trained when
+        # `use_fei_router=true`; the router's input dim then has
+        # `fei_feature_dim` columns past the σ-feature slice, fed per-step
+        # 2-band Laplacian energies of the current latent. Without these
+        # metadata flags we cannot distinguish FEI columns from σ-feature
+        # columns by shape alone — they'd be misinterpreted as sinusoidal(σ)
+        # columns and the gate would route on the wrong signal.
+        fei_on = (
+            str(file_metadata.get("ss_use_fei_router", "")).lower() == "true"
+        )
+        try:
+            fei_feature_dim = (
+                int(file_metadata["ss_fei_feature_dim"])
+                if fei_on and "ss_fei_feature_dim" in file_metadata
+                else 0
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                f"{file_path}: ss_fei_feature_dim is malformed "
+                f"({file_metadata.get('ss_fei_feature_dim')!r}) — disabling FEI router."
+            )
+            fei_on = False
+            fei_feature_dim = 0
+        try:
+            fei_sigma_low_div = (
+                float(file_metadata["ss_fei_sigma_low_div"])
+                if fei_on and "ss_fei_sigma_low_div" in file_metadata
+                else 8.0  # training-side default (configs/methods/fera.toml)
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                f"{file_path}: ss_fei_sigma_low_div is malformed "
+                f"({file_metadata.get('ss_fei_sigma_low_div')!r}) — using default 8.0."
+            )
+            fei_sigma_low_div = 8.0
+        hydra["use_fei_router"] = fei_on and fei_feature_dim > 0
+        hydra["fei_feature_dim"] = fei_feature_dim if hydra["use_fei_router"] else 0
+        hydra["fei_sigma_low_div"] = fei_sigma_low_div
+
     bundle = {
         "path": file_path,
         "lora": _extract_lora_sd(weights_sd),
@@ -236,9 +338,15 @@ def load_adapter(file_path: str) -> dict:
             f"{sum(1 for k in bundle['lora'] if k.endswith('.lora_up.weight'))} LoRA modules"
         )
     if bundle["hydra"] is not None:
+        routing = []
+        if bundle["hydra"].get("use_fei_router"):
+            routing.append(f"FEI={bundle['hydra']['fei_feature_dim']}d")
+        if bundle["hydra"].get("sigma_band_partition"):
+            routing.append(f"σ-band={bundle['hydra']['num_sigma_buckets']}")
+        routing_str = f", {', '.join(routing)}" if routing else ""
         summary.append(
             f"Hydra({bundle['hydra']['num_experts']} experts, "
-            f"{len(bundle['hydra']['modules'])} modules)"
+            f"{len(bundle['hydra']['modules'])} modules{routing_str})"
         )
     if bundle["reft"] is not None:
         summary.append(f"ReFT({len(bundle['reft'])} blocks)")
@@ -279,10 +387,11 @@ def _make_hydra_hook(params: dict, strength: float, sigma_state: dict):
     dtype is preserved; bottleneck matmuls upcast to fp32 to match the CLI
     precision policy — see ``LoRAModule.forward`` rationale). ``sigma_state``
     is shared across all hydra hooks for this checkpoint; the
-    diffusion-forward wrapper writes ``sigma_state["sigma"]`` once per
-    denoising step, and each hook reads it to build sinusoidal(σ) features
-    that are concatenated onto the pooled rank-R router input when
-    ``sigma_feature_dim > 0``.
+    diffusion-model pre-hook writes ``sigma_state["sigma"]`` (and, when a
+    FEI router is attached, ``sigma_state["fei"]``) once per denoising
+    step, and each hook reads them to build the per-sample router input.
+    The router-input concat order matches ``HydraLoRAModule._compute_gate``:
+    ``[pooled, sinusoidal(σ), FEI]`` — any slice may be empty.
 
     When ``sigma_band_partition`` is on, expert logits outside each sample's
     σ band are masked to ``-inf`` before softmax — mirrors
@@ -294,11 +403,12 @@ def _make_hydra_hook(params: dict, strength: float, sigma_state: dict):
     state = {
         "lora_down": params["lora_down"],
         "lora_ups": params["lora_ups"],          # (E, out, rank)
-        "router_w": params["router_w"],          # (E, rank + sigma_feature_dim)
+        "router_w": params["router_w"],          # (E, rank + sigma_dim + fei_dim)
         "router_b": params["router_b"],          # (E,)
         "inv_scale": params.get("inv_scale"),    # (in_dim,) or None
         "scale": params["scale"],
         "sigma_feature_dim": int(params.get("sigma_feature_dim", 0)),
+        "fei_feature_dim": int(params.get("fei_feature_dim", 0)),
         "sigma_band_partition": bool(params.get("sigma_band_partition", False)),
         "num_sigma_buckets": int(params.get("num_sigma_buckets", 0)),
         "expert_band": params.get("expert_band"),  # (E,) long, or None
@@ -367,6 +477,20 @@ def _make_hydra_hook(params: dict, strength: float, sigma_state: dict):
             pooled = torch.nn.functional.pad(
                 pooled, (0, state["sigma_feature_dim"])
             )
+        if state["fei_feature_dim"] > 0 and sigma_state.get("fei") is not None:
+            # FEI is already fp32 from _compute_fei_2band and lives on the
+            # latent's device — same as pooled after _ensure_on_device.
+            # Slice in case the router's fei_feature_dim is smaller than the
+            # available simplex width (unused today; 2-band == 2-d here).
+            fei_feat = sigma_state["fei"][:, : state["fei_feature_dim"]]
+            if fei_feat.shape[0] == 1 and pooled.shape[0] != 1:
+                fei_feat = fei_feat.expand(pooled.shape[0], -1)
+            pooled = torch.cat([pooled, fei_feat], dim=-1)
+        elif state["fei_feature_dim"] > 0:
+            # FEI router but pre-hook didn't fire (defensive): keep shape.
+            pooled = torch.nn.functional.pad(
+                pooled, (0, state["fei_feature_dim"])
+            )
         logits = torch.nn.functional.linear(
             pooled, state["router_w"], state["router_b"]
         )
@@ -397,14 +521,23 @@ def _make_hydra_hook(params: dict, strength: float, sigma_state: dict):
     return hydra_hook
 
 
-def _make_sigma_pre_hook(sigma_state: dict):
-    """Forward pre-hook that records the diffusion-step ``timesteps`` arg.
+def _make_router_pre_hook(
+    router_state: dict,
+    fei_enabled: bool,
+    fei_sigma_low_div: float,
+):
+    """Forward pre-hook that records the per-step routing inputs.
 
-    Each hydra hook reads ``sigma_state["sigma"]`` to compute the
-    σ-conditional router input. ``args[1]`` is ``timesteps`` from
-    ``BaseModel._apply_model`` (``self.diffusion_model(xc, t, ...)``) — the
-    only call site of the DiT in inference. Hook is a pure dict store; no
-    args are modified, so we return ``None``.
+    Always writes ``router_state["sigma"]`` from ``args[1]`` (timesteps).
+    When ``fei_enabled`` is true, also computes the per-sample 2-band
+    Laplacian FEI from ``args[0]`` (the latent ``x``) and writes
+    ``router_state["fei"]`` of shape ``(B, 2)``. Each hydra hook reads
+    whichever it needs during gate computation.
+
+    For Anima, ``args[0]`` is the 5D ``(B, C, T, H, W)`` latent passed to
+    the cosmos backbone; the T=1 dim is squeezed before the 2D blur. FEI
+    compute is one separable Gaussian on a ``H_lat·W_lat ≈ 4096`` grid —
+    negligible vs the DiT forward.
 
     Why a pre-hook rather than overriding ``diffusion_model.forward``:
     replacing ``forward`` via ``add_object_patch`` strands sub-Linears
@@ -412,20 +545,32 @@ def _make_sigma_pre_hook(sigma_state: dict):
     load path — exactly the failure mode that retired the old
     ``block.forward`` override in favor of ``_forward_hooks``. A pre-hook
     leaves ``forward`` untouched and torch.compile traces cleanly through it
-    (with the dynamo-disable guard below for safety on the dict store).
+    (with the dynamo-disable guard below for safety on the dict stores and
+    the FEI conv2d).
     """
 
     @torch._dynamo.disable
-    def sigma_pre_hook(module, args):
+    def router_pre_hook(module, args):
         if len(args) >= 2 and args[1] is not None:
             # Normalize to fp32 once per denoising step in eager Python; the
             # hydra hooks downstream then read it without re-casting (each
             # cast inside the compiled graph would log a DeviceCopy warning
             # per adapted Linear). `.detach()` so autograd never sees it,
             # `.float()` is a no-op when already fp32 (comfy's typical case).
-            sigma_state["sigma"] = args[1].detach().float()
+            router_state["sigma"] = args[1].detach().float()
+        if fei_enabled and len(args) >= 1 and args[0] is not None:
+            x = args[0].detach()
+            # Anima/cosmos passes a 5D (B, C, T, H, W) latent; collapse T=1
+            # so the 2D Laplacian sees (B, C, H, W). Already-4D latents
+            # (other backbones) pass through unchanged.
+            if x.dim() == 5:
+                x = x.squeeze(2)
+            h_lat = int(x.shape[-2])
+            w_lat = int(x.shape[-1])
+            sigma_low = _fei_sigma_low(h_lat, w_lat, fei_sigma_low_div)
+            router_state["fei"] = _compute_fei_2band(x, sigma_low)
 
-    return sigma_pre_hook
+    return router_pre_hook
 
 
 def _resolve_module(model, dotted_path: str):
@@ -460,7 +605,19 @@ def _apply_hydra_live_to_model(
 
     key_map = comfy.lora.model_lora_keys_unet(model.model, {})
 
+    # Per-checkpoint shared routing state. The pre-hook writes "sigma" every
+    # step (and "fei" when FeRA-style routing is on); every per-Linear hook
+    # reads from this dict.
     sigma_state: dict = {}
+
+    # FEI router metadata. Populated by `load_adapter` from `ss_use_fei_router`
+    # / `ss_fei_feature_dim` / `ss_fei_sigma_low_div`. Without metadata, FEI
+    # stays off — and the per-module sigma_feature_dim calc below collapses
+    # to the original (rank → σ) split, so non-FEI checkpoints behave exactly
+    # as before.
+    fei_on = bool(hydra_data.get("use_fei_router", False))
+    fei_feature_dim = int(hydra_data.get("fei_feature_dim", 0))
+    fei_sigma_low_div = float(hydra_data.get("fei_sigma_low_div", 8.0))
 
     # Reconstruct the σ-band → expert lookup once per checkpoint. Identical to
     # training's `_register_sigma_band_partition`: interleaved layout
@@ -482,15 +639,17 @@ def _apply_hydra_live_to_model(
             edges_full = torch.tensor(boundaries, dtype=torch.float32)
         sigma_edges = edges_full[1:-1].contiguous()
 
-    # Install a forward pre-hook on diffusion_model to record σ. Patch
-    # _forward_pre_hooks (an OrderedDict) via add_object_patch so it's
-    # reverted on ModelPatcher.unpatch_model. Composes with any prior
-    # diffusion_model.forward object_patch (postfix wraps forward; the
-    # pre-hook fires before that wrapper sees args).
+    # Install a forward pre-hook on diffusion_model to record σ (and FEI on
+    # FeRA-style checkpoints). Patch _forward_pre_hooks (an OrderedDict) via
+    # add_object_patch so it's reverted on ModelPatcher.unpatch_model.
+    # Composes with any prior diffusion_model.forward object_patch (postfix
+    # wraps forward; the pre-hook fires before that wrapper sees args).
     diffusion_model = model.get_model_object("diffusion_model")
-    sigma_pre_hook = _make_sigma_pre_hook(sigma_state)
+    router_pre_hook = _make_router_pre_hook(
+        sigma_state, fei_on, fei_sigma_low_div
+    )
     new_pre_hooks = OrderedDict(diffusion_model._forward_pre_hooks)
-    new_pre_hooks[id(sigma_pre_hook)] = sigma_pre_hook
+    new_pre_hooks[id(router_pre_hook)] = router_pre_hook
     model.add_object_patch(
         "diffusion_model._forward_pre_hooks", new_pre_hooks
     )
@@ -527,14 +686,16 @@ def _apply_hydra_live_to_model(
         )
         rank = mod["lora_down"].shape[0]
 
-        # Router input is either rank (σ off) or rank + sigma_feature_dim
-        # (σ concatenated onto the pooled rank-R vector — see
-        # HydraLoRAModule._compute_gate).
+        # Router input layout matches HydraLoRAModule._compute_gate's concat
+        # order: [pooled rank-R, sinusoidal(σ), FEI]. FEI dim comes from
+        # safetensors metadata (uniform across modules in shipped configs);
+        # σ dim is whatever's left after stripping rank + fei.
         router_in = mod["router_w"].shape[1]
-        sigma_feature_dim = router_in - rank
+        sigma_feature_dim = router_in - rank - fei_feature_dim
         if sigma_feature_dim < 0:
             skipped.append(
-                f"{prefix}: router input {router_in} < rank {rank} "
+                f"{prefix}: router input {router_in} < rank {rank} + "
+                f"fei_feature_dim {fei_feature_dim} "
                 f"(shape {tuple(mod['router_w'].shape)}) -- checkpoint malformed"
             )
             continue
@@ -553,6 +714,7 @@ def _apply_hydra_live_to_model(
             "inv_scale": mod.get("inv_scale"),
             "scale": alpha / rank,
             "sigma_feature_dim": sigma_feature_dim,
+            "fei_feature_dim": fei_feature_dim,
             "sigma_band_partition": expert_band is not None,
             "num_sigma_buckets": num_sigma_buckets,
             "expert_band": expert_band,
@@ -570,10 +732,13 @@ def _apply_hydra_live_to_model(
             f"Hydra live-routing skipped {len(skipped)} prefix(es); "
             f"first few: {skipped[:5]}"
         )
+    # Decide what's actually being routed on by checking the router-input
+    # split, not the raw shape. With FEI metadata in play, "router_in > rank"
+    # alone no longer implies σ-conditional.
     has_sigma = any(
         "router_w" in m
         and "lora_down" in m
-        and m["router_w"].shape[1] > m["lora_down"].shape[0]
+        and m["router_w"].shape[1] - m["lora_down"].shape[0] - fei_feature_dim > 0
         for m in hydra_data["modules"].values()
     )
     band_msg = (
@@ -581,9 +746,15 @@ def _apply_hydra_live_to_model(
         if expert_band is not None
         else ""
     )
+    fei_msg = (
+        f", FEI={fei_feature_dim}d (σ_low_div={fei_sigma_low_div:g})"
+        if fei_on
+        else ""
+    )
     logger.info(
         f"Hydra live-routing installed {patched} hooks "
-        f"(strength={strength}, σ-conditional={'yes' if has_sigma else 'no'}{band_msg})"
+        f"(strength={strength}, σ-conditional={'yes' if has_sigma else 'no'}"
+        f"{fei_msg}{band_msg})"
     )
     return patched
 

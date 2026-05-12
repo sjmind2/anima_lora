@@ -249,6 +249,23 @@ def _functional_loss(ctx: LossContext) -> torch.Tensor:
     return weight * func_loss.float()
 
 
+def _fera_fecl_loss(ctx: LossContext) -> torch.Tensor:
+    """FeRA Frequency-Energy Consistency Loss (Yin et al. eq. 10).
+
+    The unscaled scalar is computed inside
+    ``train.py::get_noise_pred_and_target`` (after a no-grad base-pass
+    forward with FeRA routing disabled) and stashed in
+    ``ctx.aux['fecl_loss']``. This handler just multiplies by
+    ``network.fecl_weight`` — keeping the scaling knob in one place,
+    matches the soft-tokens / REPA registry pattern.
+    """
+    weight = float(getattr(ctx.network, "fecl_weight", 0.0) or 0.0)
+    loss = ctx.aux.get("fecl_loss")
+    if weight <= 0.0 or loss is None:
+        return ctx.model_pred.new_zeros(())
+    return weight * loss.float()
+
+
 def _soft_tokens_contrastive_loss(ctx: LossContext) -> torch.Tensor:
     """SoftREPA-style InfoNCE on diffusion-loss logits (paper §3.1).
 
@@ -319,6 +336,7 @@ LOSS_REGISTRY: dict[str, LossFn] = {
     "multiscale": _multiscale_loss,
     "soft_tokens_contrastive": _soft_tokens_contrastive_loss,
     "repa": _repa_loss,
+    "fera_fecl": _fera_fecl_loss,
 }
 
 
@@ -330,6 +348,7 @@ _STAGE_SCALAR_BROADCAST = (
     "functional",
     "soft_tokens_contrastive",
     "repa",
+    "fera_fecl",
 )
 _STAGE_SCALAR_POST = ("multiscale",)
 # _STAGE_SCALAR_POST is consulted by LossComposer.compose via the hard-coded
@@ -439,5 +458,13 @@ def build_loss_composer(args: argparse.Namespace, network: object) -> LossCompos
         and float(getattr(args, "repa_weight", 0.0) or 0.0) > 0.0
     ):
         active.append("repa")
+    # FeRA FECL: active iff the network is a FeRANetwork with fecl_weight > 0.
+    # The trainer's base-pass forward + ``compute_fecl_loss`` only runs under
+    # the same gate (see ``train.py::get_noise_pred_and_target``), so the
+    # composer activation just mirrors that condition.
+    if hasattr(network, "fera_layers") and float(
+        getattr(network, "fecl_weight", 0.0) or 0.0
+    ) > 0.0:
+        active.append("fera_fecl")
 
     return LossComposer(active_losses=active)

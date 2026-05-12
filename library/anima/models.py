@@ -1637,10 +1637,12 @@ class Anima(nn.Module):
         self.prepare_block_swap_before_forward()
         return True
 
-    def prepare_block_swap_before_forward(self):
+    def prepare_block_swap_before_forward(self, free_cache: bool = True):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
-        self.offloader.prepare_block_devices_before_forward(self.blocks)
+        self.offloader.prepare_block_devices_before_forward(
+            self.blocks, free_cache=free_cache
+        )
 
     def _run_blocks(
         self,

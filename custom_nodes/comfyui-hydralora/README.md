@@ -1,26 +1,33 @@
-# Anima Adapter Loader (ComfyUI)
+# Anima Adapter / Postfix Loaders (ComfyUI)
 
-A single ComfyUI node that loads Anima adapter checkpoints and dispatches their components through ComfyUI's patching system. Auto-detects what the file contains — any combination of plain LoRA, HydraLoRA (live per-Linear routing), LoReFT (residual-stream edits), and prefix / postfix / cond context splices — and routes each to its correct application path.
+Two ComfyUI custom nodes that load Anima-trained interventions and dispatch them through ComfyUI's patching system. Each node does one thing; chain them with the MODEL socket when a workflow needs both.
 
 Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/postfix.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
 
 ## Install
 
-Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The node appears as **Anima Adapter Loader** in the loaders menu.
+Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The two nodes appear as **Anima Adapter Loader** and **Anima Postfix Loader** in the loaders menu.
 
-## The loader
+## The loaders
 
-One node, two independently-toggled sections with separate strength controls:
+### Anima Adapter Loader
 
 | Input | Purpose |
 |-------|---------|
-| `adapter_name` | safetensors file holding any mix of LoRA / Hydra / ReFT keys |
+| `adapter` | safetensors file holding any mix of LoRA / HydraLoRA / ReFT keys |
 | `strength_lora` | scales LoRA + HydraLoRA delta (set 0 to disable both while keeping ReFT) |
 | `strength_reft` | scales ReFT residual edit (set 0 to disable ReFT while keeping LoRA) |
-| `postfix_name` | separate safetensors for prefix / postfix / cond context splicing |
-| `postfix_strength` | scales the postfix / prefix delta |
 
-The adapter section sniffs the safetensors header and routes each component independently — you get correct behavior whether the file contains plain LoRA, a `*_moe.safetensors` hydra checkpoint, a ReFT-only file, or any combination. The two strength sliders are useful for ablation ("is it the LoRA or the ReFT doing the anatomy fix?") and for dialing back either branch when one overshoots.
+Sniffs the safetensors header and routes each component independently — you get correct behavior whether the file contains plain LoRA, a `*_moe.safetensors` hydra checkpoint (σ-conditional or FeRA-style FEI-conditional), a ReFT-only file, or any combination. The two strength sliders are useful for ablation ("is it the LoRA or the ReFT doing the anatomy fix?") and for dialing back either branch when one overshoots.
+
+### Anima Postfix Loader
+
+| Input | Purpose |
+|-------|---------|
+| `postfix` | safetensors file with prefix / postfix / cond keys |
+| `strength_postfix` | scales the postfix / prefix delta |
+
+Mode (prefix / postfix / cond) is auto-detected from the file's keys. When chaining with the adapter loader, put the postfix loader *after* the adapter loader so the postfix wrapper sees the model with adapter modifications already in place.
 
 ## How each component applies
 
@@ -28,7 +35,9 @@ The adapter section sniffs the safetensors header and routes each component inde
 
 **HydraLoRA** (live routing) → per-Linear `forward_hook` installed via `ModelPatcher.add_object_patch` on each adapted Linear's `_forward_hooks`. The hook replays `HydraLoRAModule.forward` exactly: rank-R `lora_down` projection, RMS pool over the sequence dim, optional sinusoidal(σ) concatenated onto the pooled vector, `Linear(rank + sigma_feature_dim, E)` router, softmax, gate-weighted expert `lora_up` blend. Routing is data-driven, so `strength_lora` is a single slider — per-expert controls would not be meaningful under live routing.
 
-σ-conditional routing: a thin wrapper around `diffusion_model.forward` records the current `timesteps` into shared state on each denoising call; every hydra hook reads it to build the sinusoidal σ features. Detected automatically from `router.weight.shape[1] > rank`.
+σ-conditional routing: a forward pre-hook on `diffusion_model` records the current `timesteps` into shared state on each denoising call; every hydra hook reads it to build the sinusoidal σ features. Detected automatically from `router.weight.shape[1] > rank` (minus any FEI dim, when applicable — see below).
+
+FeRA-style FEI routing (`make exp-fera` checkpoints): when the checkpoint's safetensors metadata declares `ss_use_fei_router=true`, the same pre-hook also computes the per-step 2-band Laplacian energy (`e_low, e_high`) of the current latent and stashes it as `(B, 2)` simplex features. The hook concatenates them onto the pooled router input *after* any σ features, matching the training-time `_compute_gate` order `[pooled, sinusoidal(σ), FEI]`. The σ-band partition path and FEI router compose freely — they touch different parts of the router-input layout — though shipped FeRA configs leave σ-band off. FEI compute is one separable Gaussian per denoising step on the (B, C, H, W) latent, negligible vs the DiT forward.
 
 **ReFT** → per-block `forward_hook` installed via `ModelPatcher.add_object_patch` on `diffusion_model.blocks.<idx>._forward_hooks`. The hook adds `R^T · (ΔW · h + b) · scale · strength` to the block output.
 
@@ -48,6 +57,30 @@ For both HydraLoRA and ReFT we install a `forward_hook` rather than overriding `
 | `__init__.py` | Re-exports `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` |
 
 ## Changelog
+
+### 3.0.0 — 2026-05-12 — Split adapter/postfix into two nodes + FeRA FEI router
+
+**Breaking — workflow update required.** The single `AnimaAdapterLoader` with `use_adapter` / `use_postfix` toggle booleans is gone. In its place:
+
+- `AnimaAdapterLoader` now applies LoRA / HydraLoRA / ReFT only (inputs: `model`, `adapter`, `strength_lora`, `strength_reft`).
+- `AnimaPostfixLoader` (new node) applies prefix / postfix / cond context splicing (inputs: `model`, `postfix`, `strength_postfix`).
+
+Chain them when a workflow needs both — `MODEL → AnimaAdapterLoader → AnimaPostfixLoader → MODEL` (or only the one you need). Each node now does one thing; bypass them via ComfyUI's standard "bypass node" feature when you want to A/B with adapter-only vs postfix-only. Existing workflows that referenced `AnimaAdapterLoader` with eight inputs will need to be rewired: re-pick the adapter node (it now has four inputs) and add a fresh `AnimaPostfixLoader` if the workflow was using a postfix.
+
+Also lands FeRA-style FEI routing support (the second half of this release, below).
+
+#### FeRA-style FEI router support
+
+Catches the node up to the training-side FeRA-on-Hydra path (`make exp-fera`, `configs/methods/fera.toml`). Before this, loading an `anima_hydra_fei*_moe.safetensors` succeeded structurally but produced wrong gates: the node inferred `sigma_feature_dim = router_in - rank` and happily fed sinusoidal(σ) into router columns the trainer had reserved for FEI features, so the router routed on a completely different signal than it was trained on. There's no way to distinguish the two cases from `router.weight.shape` alone — needed safetensors metadata.
+
+Applied in `adapter.py`:
+
+1. `load_adapter` now reads `ss_use_fei_router`, `ss_fei_feature_dim`, and `ss_fei_sigma_low_div` from the safetensors metadata and stashes them on the parsed hydra bundle. Malformed values fall back to a clean default with a warning rather than crashing.
+2. `_make_router_pre_hook` (renamed from `_make_sigma_pre_hook`) extends the existing diffusion-model pre-hook: when FEI is enabled, in addition to recording `timesteps` from `args[1]`, it also computes the 2-band Laplacian energy of `args[0]` (the latent, squeezed of any T=1 dim) using `σ_low = min(H_lat, W_lat) / fei_sigma_low_div` — bucket-invariant by construction. Stashed as `(B, 2)` simplex into the same shared state read by every per-Linear hook.
+3. `_make_hydra_hook` extends `_compute_gate` to concat FEI features onto the pooled router input *after* the existing sinusoidal(σ) slice, matching training's `[pooled, σ, FEI]` order. Defensive zero-pad path keeps router shape valid if the pre-hook hasn't fired.
+4. `_apply_hydra_live_to_model` derives `sigma_feature_dim = router_in - rank - fei_feature_dim` so old σ-only checkpoints collapse to the original split (no behavior change), FEI-only checkpoints get `σ_dim=0, fei_dim=2`, and a future σ+FEI sweep cell gets both correctly. The "σ-conditional yes/no" log line also accounts for FEI now.
+
+Compute helpers (`_compute_fei_2band`, `_gaussian_blur_2d`, `_gaussian_kernel_1d`, `_fei_sigma_low`) mirror `library/runtime/fei.py` and are inlined in `adapter.py` to keep the node standalone.
 
 ### 2.2.0 — 2026-05-02 — σ-band partition reconstruction + perf cleanup
 
