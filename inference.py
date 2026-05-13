@@ -5,7 +5,6 @@ import copy
 import gc
 import os
 import random
-from importlib.util import find_spec
 from typing import List, Dict, Any
 
 import torch
@@ -36,10 +35,6 @@ from library.inference import (
 # Side-effect import: registers spectrum_denoise with library.inference.generation
 # so --spectrum dispatches without library.inference holding a hard edge into networks/.
 import networks.spectrum  # noqa: F401, E402
-
-lycoris_available = find_spec("lycoris") is not None
-if lycoris_available:
-    pass
 
 from library.log import setup_logging  # noqa: E402
 
@@ -257,12 +252,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to latent for decode. no inference",
     )
-    parser.add_argument(
-        "--lycoris",
-        action="store_true",
-        help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}",
-    )
-
     # Modulation guidance
     parser.add_argument(
         "--pooled_text_proj",
@@ -512,9 +501,6 @@ def parse_args() -> argparse.Namespace:
             raise ValueError(
                 "Either --prompt, --from_file or --interactive must be specified"
             )
-
-    if args.lycoris and not lycoris_available:
-        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     if args.attn_mode == "sdpa":
         args.attn_mode = "torch"  # backward compatibility

@@ -215,6 +215,7 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
         num_sigma_buckets: int = 1,
         sigma_bucket_boundaries: Optional[List[float]] = None,
         fei_feature_dim: int = 0,
+        use_global_router: bool = False,
     ):
         super().__init__(
             lora_name,
@@ -281,22 +282,29 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
         # Shared diagonal scale — zero-init → ΔW = 0 at init
         self.lambda_layer = torch.nn.Parameter(torch.zeros(1, lora_dim))
 
+        self.use_global_router = bool(use_global_router)
         # Layer-local router (same as HydraLoRAModule): reads the pooled rank-R
         # signal (post Q_eff projection, pre-λ) concatenated with sinusoidal(σ)
         # when σ routing is enabled. See HydraLoRAModule.__init__ for the full
-        # rationale on direct-input σ vs additive-bias sigma_mlp.
-        self.sigma_feature_dim = int(sigma_feature_dim)
-        # FEI router input — see ``HydraLoRAModule.__init__`` for the full
-        # rationale. OrthoHydra inherits the exact same routing surface so
-        # ``hydralora_fei`` works whether the LoRA stack uses plain Hydra or
-        # OrthoHydra.
-        self.fei_feature_dim = int(fei_feature_dim)
-        router_in_dim = lora_dim + self.sigma_feature_dim + self.fei_feature_dim
-        self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
-        with torch.no_grad():
-            self.router.weight.zero_()
-            torch.nn.init.normal_(self.router.weight[:, :lora_dim], std=0.01)
-            self.router.bias.zero_()
+        # rationale on direct-input σ vs additive-bias sigma_mlp. Under
+        # ``use_global_router`` the per-layer router is skipped; gates come
+        # from the network-level ``GlobalRouter`` via ``_routing_weights``.
+        if self.use_global_router:
+            self.sigma_feature_dim = 0
+            self.fei_feature_dim = 0
+        else:
+            self.sigma_feature_dim = int(sigma_feature_dim)
+            # FEI router input — see ``HydraLoRAModule.__init__`` for the full
+            # rationale. OrthoHydra inherits the exact same routing surface so
+            # ``hydralora_fei`` works whether the LoRA stack uses plain Hydra or
+            # OrthoHydra.
+            self.fei_feature_dim = int(fei_feature_dim)
+            router_in_dim = lora_dim + self.sigma_feature_dim + self.fei_feature_dim
+            self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
+            with torch.no_grad():
+                self.router.weight.zero_()
+                torch.nn.init.normal_(self.router.weight[:, :lora_dim], std=0.01)
+                self.router.bias.zero_()
 
         # Per-channel input pre-scaling (SmoothQuant-style)
         self._register_channel_scale(self.Q_basis, channel_scale)
@@ -313,7 +321,25 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
         # See ``HydraLoRAModule`` for the None-vs-Tensor guard rationale.
         _register_sigma_feature_cache(self, self.sigma_feature_dim)
         _register_fei_feature_cache(self, self.fei_feature_dim)
+        if self.use_global_router:
+            # Network-level gate broadcast. See HydraLoRAModule.__init__ for
+            # the buffer protocol; ``LoRANetwork._wire_shared_routing_buffers``
+            # aliases this across every routing-aware module.
+            self.register_buffer(
+                "_routing_weights",
+                torch.full(
+                    (1, num_experts),
+                    1.0 / max(int(num_experts), 1),
+                    dtype=torch.float32,
+                ),
+                persistent=False,
+            )
         # Hard σ-band expert partition (see HydraLoRAModule for rationale).
+        if specialize_experts_by_sigma_buckets and self.use_global_router:
+            raise ValueError(
+                "specialize_experts_by_sigma_buckets is incompatible with "
+                "use_global_router=True (no per-layer logits to mask)."
+            )
         self._sigma_band_partition: bool = bool(specialize_experts_by_sigma_buckets)
         if self._sigma_band_partition:
             _register_sigma_band_partition(
@@ -362,7 +388,16 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
         step 0 and freeze gradient. See ``HydraLoRAModule._compute_gate`` for
         the rationale on direct-input σ routing and the always-a-Tensor
         ``_sigma`` pattern.
+
+        Under ``use_global_router`` the gate is the broadcast
+        ``_routing_weights`` buffer; ``lx`` is ignored.
         """
+        if self.use_global_router:
+            B = lx.shape[0] if lx.dim() >= 1 else 1
+            w = self._routing_weights
+            if w.dim() == 1:
+                w = w.unsqueeze(0)
+            return w.to(lx.dtype).expand(B, -1)
         if lx.dim() >= 3:
             B = lx.shape[0]
             pooled = lx.reshape(B, -1, lx.shape[-1]).pow(2).mean(dim=1).sqrt()
@@ -398,6 +433,25 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
 
     def clear_fei(self) -> None:
         _clear_fei_feature_cache(self)
+
+    def set_routing_weights(self, weights: torch.Tensor) -> None:
+        # Mirrors ``HydraLoRAModule.set_routing_weights`` — fallback for
+        # callers writing the buffer directly. The standard path is the
+        # ``LoRANetwork._wire_shared_routing_buffers`` aliasing.
+        if not getattr(self, "use_global_router", False):
+            return
+        buf = self._routing_weights
+        v = weights.detach().to(dtype=buf.dtype, device=buf.device)
+        if v.shape == buf.shape:
+            buf.copy_(v)
+        else:
+            self._buffers["_routing_weights"] = v.clone()
+
+    def clear_routing_weights(self) -> None:
+        if not getattr(self, "use_global_router", False):
+            return
+        E = int(self._routing_weights.shape[-1])
+        self._routing_weights.fill_(1.0 / max(E, 1))
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)

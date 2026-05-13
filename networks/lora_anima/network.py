@@ -227,10 +227,25 @@ class LoRANetwork(torch.nn.Module):
             else None
         )
         self._fei_router_hits = 0
+        # Modules built with ``use_global_router=True`` (shared_A +
+        # ``route_per_layer=False``): the per-layer router is skipped and gates
+        # arrive via the network-level ``GlobalRouter``. Counted separately
+        # from ``_fei_router_hits`` because the per-layer FEI cat is bypassed.
+        self._global_router_hits = 0
         # Retained as a network attr (library/inference/adapters.py reads it
         # via getattr); derived from cfg.router_source.
         self.use_fei_router = cfg.router_source == "fei"
         self.use_sigma_router = cfg.router_source == "sigma"
+        # Shared-A Hydra layout + network-level router (FEI-on-Hydra global).
+        # Toggle for the per-module construction loop below; lets Hydra /
+        # OrthoHydra modules skip ``self.router`` and consume gates from the
+        # ``GlobalRouter`` instead. Mirrors the FeRA (independent_A) routing
+        # location without changing the underlying Hydra parameter layout.
+        self._use_global_router_for_hydra = (
+            cfg.use_moe_style == "shared_A"
+            and not cfg.route_per_layer
+            and cfg.router_source != "none"
+        )
 
         # Per-module HydraLoRA gating. Matching modules get the Hydra class;
         # non-matching modules fall back to plain LoRA / OrthoLoRAExp so MoE
@@ -450,10 +465,16 @@ class LoRANetwork(torch.nn.Module):
                     pass  # no extra kwargs — SVD init reads from org_module directly
                 elif effective_module_class == OrthoHydraLoRAExpModule:
                     extra_kwargs["num_experts"] = cfg.num_experts
+                    if self._use_global_router_for_hydra:
+                        extra_kwargs["use_global_router"] = True
+                        self._global_router_hits += 1
                 elif effective_module_class == HydraLoRAModule:
                     extra_kwargs["num_experts"] = cfg.num_experts
                     if cfg.expert_init_std > 0.0:
                         extra_kwargs["expert_init_std"] = cfg.expert_init_std
+                    if self._use_global_router_for_hydra:
+                        extra_kwargs["use_global_router"] = True
+                        self._global_router_hits += 1
 
                 # Hard σ-band expert partition: applied to every Hydra/
                 # OrthoHydra module (independent of the σ-feature router
@@ -479,7 +500,9 @@ class LoRANetwork(torch.nn.Module):
                 # B0 pre-analysis in timestep-hydra.md). From-weights path uses
                 # an explicit name set; fresh-from-kwargs path uses a regex
                 # over original_name. Gated on the effective class so a
-                # hydra-excluded module can't pick up σ either.
+                # hydra-excluded module can't pick up σ either. Skipped under
+                # ``use_global_router`` — the network-level router consumes
+                # the routing signal once and the per-Linear cat is dead.
                 if (
                     cfg.router_source == "sigma"
                     and effective_module_class
@@ -488,6 +511,7 @@ class LoRANetwork(torch.nn.Module):
                         OrthoHydraLoRAExpModule,
                     )
                     and is_unet
+                    and not self._use_global_router_for_hydra
                 ):
                     if self._sigma_router_names is not None:
                         enable = lora_name in self._sigma_router_names
@@ -503,7 +527,9 @@ class LoRANetwork(torch.nn.Module):
                 # widen the router input with the per-sample FEI simplex on
                 # modules whose name matches the layer filter. The FEI tensor
                 # itself is computed once per step in the train/inference loop
-                # and propagated via ``LoRANetwork.set_fei``.
+                # and propagated via ``LoRANetwork.set_fei``. Skipped under
+                # ``use_global_router`` — the GlobalRouter reads FEI directly
+                # at the network level and per-Linear cat is dead.
                 if (
                     cfg.router_source == "fei"
                     and effective_module_class
@@ -512,6 +538,7 @@ class LoRANetwork(torch.nn.Module):
                         OrthoHydraLoRAExpModule,
                     )
                     and is_unet
+                    and not self._use_global_router_for_hydra
                 ):
                     if self._fei_router_names is not None:
                         enable_fei = lora_name in self._fei_router_names
@@ -673,10 +700,10 @@ class LoRANetwork(torch.nn.Module):
         # Build the network-level GlobalRouter when the cfg selects MoE
         # without per-Linear routers. The input dim is derived from the
         # routing signal: ``"fei"`` → ``fei_feature_dim`` simplex,
-        # ``"sigma"`` → ``sigma_feature_dim`` sinusoidal features. When the
-        # routing-aware module list is empty (no StackedExperts in the
-        # build, e.g. shared_A + per-network global is a future stub),
-        # the router is built but never fires.
+        # ``"sigma"`` → ``sigma_feature_dim`` sinusoidal features.
+        # Routing-aware modules: ``independent_A`` (StackedExperts) always
+        # consume the broadcast gates; ``shared_A`` (Hydra / OrthoHydra)
+        # consumes them when built with ``use_global_router=True``.
         self.global_router: Optional[GlobalRouter] = None
         if cfg.use_moe_style is not False and not cfg.route_per_layer:
             if cfg.router_source == "fei":
@@ -2232,6 +2259,26 @@ class LoRANetwork(torch.nn.Module):
                     logger.info(
                         f"REPA head param group: lr={repa_lr:.2e} "
                         f"({repa_lr_scale}x of unet_lr={base_lr})"
+                    )
+
+        # GlobalRouter (route_per_layer=False) lives on the network, not on
+        # per-Linear LoRA modules, so the assemble_params loop above misses it.
+        # Add it explicitly with the same router_lr_scale convention used for
+        # per-Linear routers (unet_lr × router_lr_scale).
+        if getattr(self, "global_router", None) is not None:
+            gr_params = list(self.global_router.parameters())
+            if len(gr_params) > 0:
+                router_scale = float(self.cfg.router_lr_scale)
+                base_lr = unet_lr if unet_lr is not None else default_lr
+                if base_lr is None or base_lr == 0:
+                    logger.info("GlobalRouter: no base LR, skipping param group")
+                else:
+                    gr_lr = float(base_lr) * router_scale
+                    all_params.append({"params": gr_params, "lr": gr_lr})
+                    lr_descriptions.append("global router")
+                    logger.info(
+                        f"GlobalRouter param group: lr={gr_lr:.2e} "
+                        f"({router_scale}x of unet_lr={base_lr})"
                     )
 
         return all_params, lr_descriptions

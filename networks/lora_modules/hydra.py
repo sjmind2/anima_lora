@@ -193,6 +193,16 @@ class HydraLoRAModule(BaseLoRAModule):
     this chicken-and-egg problem — the σ columns train alongside the
     content columns on the same chain rule, so σ routing emerges as soon as
     the router learns anything at all.
+
+    ``use_global_router`` (shared_A + ``route_per_layer=False`` path): the
+    per-layer router is dropped and gates are read from a ``_routing_weights``
+    buffer broadcast in from the network-level ``GlobalRouter``. The shared
+    ``lora_down`` + per-expert ``lora_up`` layout is unchanged — only the
+    gating source moves. σ-band partition is incompatible with this path
+    (the partition rewrites local logits and there are no local logits to
+    rewrite). Balance loss is silently inert in this mode: ``_last_gate``
+    is the detached buffer broadcast, so ``get_balance_loss`` contributes a
+    constant with no gradient signal back to the GlobalRouter.
     """
 
     def __init__(
@@ -213,6 +223,7 @@ class HydraLoRAModule(BaseLoRAModule):
         num_sigma_buckets: int = 1,
         sigma_bucket_boundaries: Optional[List[float]] = None,
         fei_feature_dim: int = 0,
+        use_global_router: bool = False,
     ):
         super().__init__(
             lora_name,
@@ -249,6 +260,7 @@ class HydraLoRAModule(BaseLoRAModule):
         if expert_init_std > 0.0:
             torch.nn.init.normal_(self.lora_up_weight, mean=0.0, std=expert_init_std)
 
+        self.use_global_router = bool(use_global_router)
         # Local router: reads [pooled rank-R signal | sinusoidal(σ)] → per-sample
         # expert gates. Operating in rank-R space (not raw in_dim) is load-bearing:
         # raw DiT inputs have 80–96× DC-bias outlier channels and ~4096 tokens, so
@@ -256,29 +268,37 @@ class HydraLoRAModule(BaseLoRAModule):
         # left the router with no trainable gradient (see docs/methods/hydra-lora.md
         # §Fixes). `lora_down` is trained jointly, so signal-carrying directions
         # accumulate here and there are no large outliers to saturate softmax in bf16.
-        self.sigma_feature_dim = int(sigma_feature_dim)
-        # FEI router input (FeRA-style content-aware routing). When
-        # ``fei_feature_dim > 0``, the per-sample 2-band FEI ``[B, fei_dim]``
-        # is concatenated to the router input alongside the rank-R signal
-        # and (optional) sinusoidal(σ). All three sources can coexist; the
-        # toggle blocks in ``configs/methods/lora.toml`` keep them in
-        # opposition for clean A/B. Default ``fei_dim=2`` = the raw simplex
-        # ``(e_low, e_high)`` from ``library.runtime.fei.compute_fei_2band``
-        # (bench-validated 2-band collapse — see
-        # ``[[project_fera_probe_2band_decision]]``).
-        self.fei_feature_dim = int(fei_feature_dim)
-        router_in_dim = self.lora_dim + self.sigma_feature_dim + self.fei_feature_dim
-        self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
-        # Split init: small-std on the pooled rank-R columns, zeros on the
-        # σ- and FEI-feature columns. Step 0 gate is then identical to the
-        # σ=off, FEI=off router, and σ/FEI influence emerges only as those
-        # columns train.
-        with torch.no_grad():
-            self.router.weight.zero_()
-            torch.nn.init.normal_(
-                self.router.weight[:, : self.lora_dim], std=0.01
+        # Under ``use_global_router`` the per-layer router is skipped entirely;
+        # gates arrive via the ``_routing_weights`` shared buffer instead.
+        if self.use_global_router:
+            self.sigma_feature_dim = 0
+            self.fei_feature_dim = 0
+        else:
+            self.sigma_feature_dim = int(sigma_feature_dim)
+            # FEI router input (FeRA-style content-aware routing). When
+            # ``fei_feature_dim > 0``, the per-sample 2-band FEI ``[B, fei_dim]``
+            # is concatenated to the router input alongside the rank-R signal
+            # and (optional) sinusoidal(σ). All three sources can coexist; the
+            # toggle blocks in ``configs/methods/lora.toml`` keep them in
+            # opposition for clean A/B. Default ``fei_dim=2`` = the raw simplex
+            # ``(e_low, e_high)`` from ``library.runtime.fei.compute_fei_2band``
+            # (bench-validated 2-band collapse — see
+            # ``[[project_fera_probe_2band_decision]]``).
+            self.fei_feature_dim = int(fei_feature_dim)
+            router_in_dim = (
+                self.lora_dim + self.sigma_feature_dim + self.fei_feature_dim
             )
-            self.router.bias.zero_()
+            self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
+            # Split init: small-std on the pooled rank-R columns, zeros on the
+            # σ- and FEI-feature columns. Step 0 gate is then identical to the
+            # σ=off, FEI=off router, and σ/FEI influence emerges only as those
+            # columns train.
+            with torch.no_grad():
+                self.router.weight.zero_()
+                torch.nn.init.normal_(
+                    self.router.weight[:, : self.lora_dim], std=0.01
+                )
+                self.router.bias.zero_()
 
         self._register_channel_scale(self.lora_down.weight.data, channel_scale)
 
@@ -303,12 +323,34 @@ class HydraLoRAModule(BaseLoRAModule):
         # guard. ``set_fei`` rebinds it once the network's shared FEI buffer
         # is wired in (see ``LoRANetwork._wire_shared_fei_buffers``).
         _register_fei_feature_cache(self, self.fei_feature_dim)
+        # Under ``use_global_router``, ``_routing_weights`` is the per-step
+        # gate broadcast in by ``LoRANetwork.set_routing_weights`` (same
+        # protocol as ``StackedExpertsLoRAModule``). Uniform ``1/E`` placeholder
+        # so the forward branch runs unconditionally without a None guard.
+        if self.use_global_router:
+            self.register_buffer(
+                "_routing_weights",
+                torch.full(
+                    (1, num_experts),
+                    1.0 / max(int(num_experts), 1),
+                    dtype=torch.float32,
+                ),
+                persistent=False,
+            )
         # Hard σ-band expert partition (Track C). Independent of σ-feature
         # router — when on, the E experts are split into ``num_sigma_buckets``
         # bands of ``E // num_sigma_buckets`` each; out-of-band logits are
         # masked to -inf before softmax so a sample at σ in band b can only
         # route to the experts in that band. Soft routing still operates
         # within each band. Validated upstream (network constructor).
+        # Incompatible with ``use_global_router`` — the partition rewrites
+        # local logits and there are no local logits to rewrite.
+        if specialize_experts_by_sigma_buckets and self.use_global_router:
+            raise ValueError(
+                "specialize_experts_by_sigma_buckets is incompatible with "
+                "use_global_router=True (no per-layer logits to mask). Pick "
+                "one: per-layer σ partition, or network-level GlobalRouter."
+            )
         self._sigma_band_partition: bool = bool(specialize_experts_by_sigma_buckets)
         if self._sigma_band_partition:
             _register_sigma_band_partition(
@@ -344,7 +386,18 @@ class HydraLoRAModule(BaseLoRAModule):
         placeholder at init, step σ after ``set_sigma``), so the branch on
         "σ set vs not" is gone — the router-input shape stays constant and
         there is no None-vs-Tensor guard to recompile on.
+
+        Under ``use_global_router`` the gate is the broadcast
+        ``_routing_weights`` buffer (``(1,E)`` placeholder → ``(B,E)`` after
+        ``set_routing_weights``); ``lx`` is ignored, and pool/cat/router are
+        all skipped.
         """
+        if self.use_global_router:
+            B = lx.shape[0] if lx.dim() >= 1 else 1
+            w = self._routing_weights
+            if w.dim() == 1:
+                w = w.unsqueeze(0)
+            return w.to(lx.dtype).expand(B, -1)
         if lx.dim() >= 3:
             B = lx.shape[0]
             pooled = lx.reshape(B, -1, lx.shape[-1]).pow(2).mean(dim=1).sqrt()
@@ -388,6 +441,26 @@ class HydraLoRAModule(BaseLoRAModule):
 
     def clear_fei(self) -> None:
         _clear_fei_feature_cache(self)
+
+    def set_routing_weights(self, weights: torch.Tensor) -> None:
+        # Mirrors ``StackedExpertsLoRAModule.set_routing_weights`` — the
+        # ``LoRANetwork._wire_shared_routing_buffers`` aliasing pass writes
+        # to one shared buffer and every module sees it. This per-module
+        # API is the fallback path for callers writing the buffer directly.
+        if not getattr(self, "use_global_router", False):
+            return
+        buf = self._routing_weights
+        v = weights.detach().to(dtype=buf.dtype, device=buf.device)
+        if v.shape == buf.shape:
+            buf.copy_(v)
+        else:
+            self._buffers["_routing_weights"] = v.clone()
+
+    def clear_routing_weights(self) -> None:
+        if not getattr(self, "use_global_router", False):
+            return
+        E = int(self._routing_weights.shape[-1])
+        self._routing_weights.fill_(1.0 / max(E, 1))
 
     def forward(self, x):
         # Policy: bf16 storage, fp32 for the bottleneck matmuls. See

@@ -20,11 +20,11 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 64
-network_dim = 64
+network_alpha = 32
+network_dim = 32
 
-learning_rate = 1e-5
-max_train_epochs = 24
+learning_rate = 2e-5
+max_train_epochs = 4
 save_every_n_epochs = 4
 checkpointing_epochs = 4
 
@@ -43,52 +43,55 @@ use_ortho = true
 # -------------
 # Timestep mask
 
-use_timestep_mask = true
-min_rank = 8
-alpha_rank_scale = 1.0
-
+# use_timestep_mask = true
+# min_rank = 8
+# alpha_rank_scale = 1.0
 
 # -------------
-# hydralora (shared-A MoE, per-Linear router on σ features)
+# "independent_A" and route_per_layer=true -> hydralora
 
-output_name = "anima_hydra"
-use_moe_style = "shared_A"  # False | "shared_A" | "independent_A"
+# use_moe_style = "shared_A"
+# route_per_layer = true
+# router_source = "sigma"
 
-route_per_layer = true  # true | false
+# sigma_feature_dim = 16
+# per_bucket_balance_weight = 0.3   # × balance_loss_weight, per-bucket term
+# num_sigma_buckets = 3
+# specialize_experts_by_sigma_buckets = true
+# sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
+# router_targets = ".*(mlp\\.layer[12])$" 
 
+# -------------
+# "shared_A" and route_per_layer=false -> fera
 
-router_source = "sigma" # "sigma" | "fei"
-num_experts = 12
+use_moe_style = "independent_A"
+route_per_layer = false 
+router_source = "fei"
+
+fei_feature_dim = 2          # raw simplex (e_low, e_high)
+fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
+fera_num_bands = 2
+fera_fecl_weight = 0.0
+
+output_name = "anima_fera"
+
+num_experts = 4
 balance_loss_weight = 2e-7 # seems lr * 1/100 is proper
 
 balance_loss_warmup_ratio = 0.4
 network_router_lr_scale = 10
-router_targets = ".*(mlp\\.layer[12])$" # ".*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$"
-
-# Under router_source = "sigma"
-sigma_feature_dim = 16
-per_bucket_balance_weight = 0.3   # × balance_loss_weight, per-bucket term
-num_sigma_buckets = 3
-specialize_experts_by_sigma_buckets = true
-sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
-
-# Under router_source = "fei"
-# fei_feature_dim = 2          # raw simplex (e_low, e_high)
-# fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
-# fera_num_bands = 2
-# fera_fecl_weight = 0.0
+router_targets = ".*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$"
 
 # -------------
 # reft
 
-add_reft = true
-reft_dim = 64
-reft_alpha = 64
-reft_layers = "last_8"
-
+# add_reft = true
+# reft_dim = 64
+# reft_alpha = 64
+# reft_layers = "last_8"
 
 compile_mode = "full"
-compile_inductor_mode = "reduce-overhead"
+# compile_inductor_mode = "reduce-overhead"
 
 
 # ── Per-channel input pre-scaling (SmoothQuant-style, optional) ─────────
@@ -114,23 +117,3 @@ compile_inductor_mode = "reduce-overhead"
 # repa_weight = 0.5
 # repa_layer = 8
 # repa_lr_scale = 1.0       # head LR = repa_lr_scale * unet_lr
-
-# -------------
-# hydralora-fei (FeRA-style content-aware routing — Phase 1 of plan2.md)
-# Swaps the σ-keyed router for a 2-band FEI router (DoG-banded latent energy).
-# A/B target: this block vs the default σ-router block above. To activate:
-#   1. Replace `router_source = "sigma"` above with `router_source = "fei"`.
-#   2. Comment out the σ-router block (sigma_feature_dim,
-#      per_bucket_balance_weight, num_sigma_buckets,
-#      specialize_experts_by_sigma_buckets, sigma_bucket_boundaries).
-#      `router_targets` is shared across σ / FEI / Hydra — leave it as is.
-#   3. Uncomment the FEI block below.
-#   4. Change `output_name` to `"anima_hydra_fei"` so artifacts don't collide.
-# The bench probe collapsed FeRA's 3 bands → 2 (mid was structurally sparse
-# on flow-matching latents at every σ_mid we tried, confirmed on training
-# latents 2026-05-13). σ_low scaling defaults to D/4 across aspect buckets
-# from the dataset sweep — see [[project_fera_probe_2band_decision]].
-
-# fei_feature_dim = 2          # raw simplex (e_low, e_high)
-# fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
-# (layer scope is `router_targets` above — shared with Hydra / σ-router)

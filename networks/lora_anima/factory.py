@@ -169,7 +169,14 @@ def create_network(
         logger.info(
             f"Timestep-dependent rank masking: min_rank={cfg.min_rank}, alpha={cfg.alpha_rank_scale}"
         )
-    if cfg.router_source == "sigma" and network._sigma_router_hits > 0:
+    if cfg.router_source == "sigma" and network._global_router_hits > 0:
+        logger.info(
+            f"GlobalRouter (σ) → Hydra: {network._global_router_hits} "
+            f"shared-A modules consume gates from the network-level router "
+            f"on sinusoidal(σ) (feat={cfg.sigma_feature_dim}). Per-layer "
+            f"routers are disabled; balance loss is inert in this mode."
+        )
+    elif cfg.router_source == "sigma" and network._sigma_router_hits > 0:
         logger.info(
             f"σ-conditional HydraLoRA router: {network._sigma_router_hits} modules "
             f"with sinusoidal(σ) concatenated to router input (feat={cfg.sigma_feature_dim}), "
@@ -180,7 +187,15 @@ def create_network(
             "router_source='sigma' but no modules matched router_targets "
             f"regex {cfg.router_targets!r} — σ-routing is inactive"
         )
-    if cfg.router_source == "fei" and network._fei_router_hits > 0:
+    if cfg.router_source == "fei" and network._global_router_hits > 0:
+        logger.info(
+            f"GlobalRouter (FEI) → Hydra: {network._global_router_hits} "
+            f"shared-A modules consume gates from the network-level router "
+            f"on FEI ({cfg.fei_feature_dim}-band simplex, σ_low_div={cfg.fei_sigma_low_div}). "
+            f"Per-layer routers are disabled; balance loss is inert in this "
+            f"mode (gates arrive detached)."
+        )
+    elif cfg.router_source == "fei" and network._fei_router_hits > 0:
         logger.info(
             f"FEI-conditional HydraLoRA router: {network._fei_router_hits} modules "
             f"with FEI ({cfg.fei_feature_dim}-band simplex) concatenated to router input "

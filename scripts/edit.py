@@ -217,7 +217,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no_metadata", action="store_true")
     p.add_argument("--lora_weight", nargs="*", default=None)
     p.add_argument("--lora_multiplier", nargs="*", type=float, default=1.0)
-    p.add_argument("--lycoris", action="store_true")
     p.add_argument(
         "--compile_blocks",
         action="store_true",

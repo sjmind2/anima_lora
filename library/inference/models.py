@@ -35,9 +35,7 @@ def load_dit_model(
 ) -> anima_models.Anima:
     """Load DiT model with optional LoRA merge, P-GRAFT hooks, and torch.compile."""
 
-    loading_device = "cpu"
-    if not args.lycoris:
-        loading_device = device
+    loading_device = device
 
     # HydraLoRA moe (incl. FeRA-style stacked-experts global FEI): router-live
     # inference can't go through static merge. Detect early so we can skip the
@@ -69,7 +67,6 @@ def load_dit_model(
     if (
         not pgraft_mode
         and not hydra_mode
-        and not args.lycoris
         and args.lora_weight is not None
         and len(args.lora_weight) > 0
     ):
