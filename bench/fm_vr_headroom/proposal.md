@@ -1,5 +1,21 @@
 # Variance-Reduced Flow-Matching Loss for Anima
 
+> **2026-05-14 errata.** The HEADROOM-gate run cited below
+> (`results/20260514-1300-tlora-vs-base/`) measured a **merged T-LoRA**
+> trainable against a base frozen reference — a near-converged-adapter
+> regime where `u_pred ≈ u_pred^L` is true by construction, which pins
+> `λ → −1` and `ρ² → 1`. **Live training (`output/logs/
+> lora_default_20260514-1921/`) shows `vr/lambda_ema` settles at ~−0.72,
+> not −0.996.** The asymptote, fixed-λ=−1 ablation hypothesis, and the
+> HF-residual-adapter motivation that all leaned on the −0.996 figure
+> are no longer supported by that data point. VR-loss v1.5 itself still
+> trains and the eyeball A/B held — what's wrong is the strength of the
+> conclusions, not the existence of *some* variance-reduction signal.
+> The bench's null gap (decorrelated-ε ρ² ≈ 0.024) confirms ε-pairing
+> produces real structural correlation; the gradient-variance question
+> (vr_loss.md Open Q #2) is what actually matters and remains unmeasured.
+> See `README.md` for the full errata.
+
 Plan to integrate the AsymFlow §5.2 control-variate FM loss (Chen et al.,
 arXiv:2605.12964) into Anima's LoRA-family training. The headroom bench in
 this directory's [`README.md`](README.md) / [`run_bench.py`](run_bench.py)

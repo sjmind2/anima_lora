@@ -24,9 +24,9 @@ network_alpha = 32
 network_dim = 32
 
 learning_rate = 2e-5
-max_train_epochs = 6
-save_every_n_epochs = 6
-checkpointing_epochs = 6
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -41,7 +41,6 @@ vr_fei_sigma_low_div = 4.0
 
 compile_mode = "full"
 compile_inductor_mode = "reduce-overhead"
-
 
 # -------------
 # Ortho-lora

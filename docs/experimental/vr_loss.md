@@ -16,6 +16,18 @@ This is a **loss-level change**, not a new adapter — the trained checkpoint
 inferences identically to a standard FM-trained one. Composes with every
 adapter family in `networks/lora_anima/`.
 
+> **Framing.** "Variance reduction" follows the paper, but the gradient of
+> `||y + λz||²` is biased toward the high-frequency residual `x_0 − x_0^L`:
+> `z` is detached, but co-varies with `∂u_pred/∂θ` through the shared input
+> `x_t`, so `E[z · ∂u_pred/∂θ] ≠ 0` and the standard FM stationary point is
+> shifted. That bias *is* the intended training signal — spend adapter
+> capacity on what the base can't already explain. Read this as
+> **base-residual control-variate FM**, not unbiased estimation of standard
+> FM. The loss-level reduction (ρ² ≈ 0.9999, see headroom bench) is real;
+> whether it translates into a corresponding gradient-variance reduction
+> for the optimizer is still an open empirical question — see
+> [Open questions](#open-questions).
+
 ## TL;DR
 
 ```
@@ -92,24 +104,60 @@ compute.
                               λ_ema   ← (1−β)·λ_ema + β·λ_batch
 ```
 
-### Choice of `x_0^L`
+### Why a low-pass `x_0^L` (paper mapping)
+
+AsymFlow §5.2's variance reduction hinges on a *paired* construction: a
+target `x_0^L` the frozen reference predicts accurately, and an orthogonal
+residual `x_0 − x_0^L` that the finetune actually has to learn. In the
+paper, `x_0^L = Az_0` is a patch-wise Procrustes lift from the pretrained
+latent into a low-rank pixel subspace `Im(P)` (Appendix A.1). Because the
+frozen *latent* model nails this component by construction, its prediction
+deviation `d^L = x_0^L − x̂_0^L` carries the shared noise structure that
+also pollutes the full-rank training residual `d = x_0 − x̂_0`. With a
+patch-wise `λ* = −⟨d^L, d⟩ / ‖d^L‖²` (paper Eq. 18 / Appendix A.3), VR
+cancels exactly that shared variance, leaving only the new low-level
+mismatch the finetune is supposed to close.
+
+Anima lives entirely in latent space, so there's no latent-to-pixel lift
+and no Procrustes subspace to construct. The natural Anima analog is the
+**FEI Gaussian low-pass**: it splits the latent into a structural band the
+frozen base predicts confidently and a detail band that's left for the
+adapter to learn. That's the same role `Pε` / `(I − P)ε` plays in the
+paper, just expressed in spatial frequency instead of patch-PCA coordinates.
+
+Mapping the paper onto our setup:
+
+| AsymFlow §5.2 | This integration |
+|---|---|
+| Frozen latent base (separate pretrained model) | `network.set_multiplier(0)` on the trainable DiT — LoRA is additive, so the bypass forward *is* the base DiT |
+| Low-rank target `x_0^L = Az_0` (Procrustes lift) | `x_0^L = gaussian_blur_2d(x_0, σ_low)` (FEI low-pass) |
+| Orthogonal complement `(I − P)x_0` | The high-frequency band `x_0 − x_0^L` |
+| Patch-wise `λ*` (Appendix A.3, clamped to `[0, 1]`) | Global EMA `λ`; per-element / per-band falsified below |
 
 ```
 σ_low = min(H_lat, W_lat) / vr_fei_sigma_low_div    # default 4.0
 x_0^L = gaussian_blur_2d(x_0, σ_low)
 ```
 
-Same FEI kernel that drives the live HydraLoRA / FeRA routing on
-`router_source = "fei"`. Three reasons:
+What makes FEI specifically right here:
 
-1. The model's adapter routing is already shaped around this band split, so
-   the control variate inherits the same inductive bias instead of inventing
-   a new one.
-2. `library/runtime/fei.py::gaussian_blur_2d` is in-tree, fp32-safe, and
-   kernel-cached — no new module.
-3. The 2-band FEI gives a free diagnostic axis: per-FEI-band ρ² in the bench
-   already shows the high-band ρ² is what carries the headroom (≈ 0.998
-   mid-t median).
+1. *Aligned with what the base already knows.* Anima pretraining locks in
+   the low-frequency / structural content; LoRA fine-tunes the detail. The
+   FEI low-pass picks out exactly the band where the frozen-reference
+   prediction is accurate — the precondition for high ρ² in the control
+   variate.
+2. *Same band split the adapter already routes on.* HydraLoRA / FeRA routing
+   on `router_source = "fei"` is conditioned on the same
+   `library/runtime/fei.py::gaussian_blur_2d` split, so the control variate
+   inherits the existing inductive bias instead of inventing a new one.
+3. *In-tree, kernel-cached.* `gaussian_blur_2d` is fp32-safe and the kernel
+   is cached — no new module, no extra alloc.
+4. *Free diagnostic axis.* Per-FEI-band ρ² in
+   `bench/fm_vr_headroom/results/20260514-1300-tlora-vs-base/` confirms the
+   paper's mechanism transposes: the high-band ρ² (mid-t median **0.998**,
+   λ_global **−0.996 ± 0.002**) is what carries the headroom, exactly as
+   `Im(I − P)` residual carries the win against `Im(P)` deviation in
+   AsymFlow.
 
 Default `vr_fei_sigma_low_div = 4.0` matches the live training default in
 `configs/gui-methods/fera.toml` and `configs/gui-methods/hydralora_fei.toml`.
@@ -132,6 +180,23 @@ var = (z * z).sum().clamp_min(1e-12)
 confirmed `λ_global = −0.996 ± 0.002` across all 36 (sample, t) pairs at
 N=32, so the online estimator converges fast and a small β is well
 conditioned.
+
+**What `λ ≈ −1` means.** Substituting λ = −1 into the loss:
+
+```
+||y − z||²  =  ||(u_pred − u_pred^L) − ((ε − x_0) − (ε − x_0^L))||²
+            =  ||Δu_adapter − (x_0^L − x_0)||²
+            =  ||Δu_adapter + x_0^H||²      where x_0^H ≡ x_0 − x_0^L
+```
+
+So the EMA-converged loss is asking the adapter's delta-prediction
+`Δu_adapter = u_pred − u_pred^L` to cancel the high-frequency velocity
+residual `x_0^H` — exactly the band the FEI low-pass discards. This is
+the operational statement of "spend adapter capacity on what the base
+can't already explain". Because the online EMA lands so close to the
+fixed `λ = −1` limit, a fixed-λ control bench (see Open questions) is
+the cleanest remaining ablation: if it matches learned-EMA within noise,
+the cov/var bookkeeping can go and the loss becomes a one-liner.
 
 Per-element λ (v2) and per-FEI-band `λ_k` (v3) were considered as refinements
 and **bench-falsified on Anima** by the perband-headroom run
@@ -178,8 +243,15 @@ Postfix's `network.append_postfix` modifies `crossattn_emb` *before* the
 DiT call, not the DiT itself, so the bypass forward receives the same
 postfix-appended tokens as the gradient forward — postfix is therefore
 *not* nulled (it can't be: postfix isn't an additive residual on weights).
-For runs that combine postfix with VR, this means the control variate
-includes the postfix contribution. Plain LoRA-family runs are unaffected.
+
+> **Semi-gradient caveat (postfix + VR).** When postfix is trainable, `z`
+> depends on the postfix parameters through `crossattn_emb`, but its
+> gradient w.r.t. those parameters is dropped (`z` is detached). This is
+> a **semi-gradient** method on the postfix path: the cov/var λ estimate
+> is well-defined, but the postfix gradient no longer minimizes the loss
+> you wrote down. Plain LoRA-family runs are unaffected. Treat
+> postfix+VR as experimental; gate it explicitly per-run rather than
+> mixing the two by default.
 
 Hooks on the unet (REPA capture, functional MSE captures) fire on this
 forward too, but they are consumed *before* the VR block runs — see the
@@ -233,11 +305,11 @@ also fire on the bypass forward — they're benign because the captured
 state is consumed *before* the VR block runs.
 
 Net training win requires VR to give >1.4× effective convergence. The
-paper reports +0.96 HPSv3 from VR alone on AsymFLUX.2 klein
-(Table 3) but no wall-clock figure, so this has to be re-demonstrated for
-Anima — see "Validation status" below.
-
-in r=16, 2.56k steps, this took 60min, compared to 50min
+paper reports +0.96 HPSv3 from VR alone on AsymFLUX.2 klein (Table 3).
+On Anima, a short A/B at r=16 / 2.56k steps took 60min with VR vs. 50min
+standard FM, and VR samples were visibly the quality win at the +40%
+step-cost overhead (eyeball A/B; quantitative HPSv3 / VQA pass still
+optional).
 
 ## Memory
 
@@ -252,79 +324,53 @@ can run VR — they just pay the ~+40% compute.
 |---|---|---|
 | `vr_loss_weight` | `0.0` | Gate **and** overall scale on the VR loss term. `0.0` disables (standard FM); `1.0` matches the paper recipe; smaller values let other losses contribute relatively more. |
 | `vr_fei_sigma_low_div` | `4.0` | Divisor for `σ_low = min(H_lat, W_lat) / div`. Matches the live FEI default. |
-| `vr_sigma_min` | `1e-3` | Defensive floor on `σ_t` in the `1/σ_t` factor (AsymFlow §6.1). Not consumed by the v1 loss handler (we work in velocity-target form so `σ_t` cancels). The parser flag is kept as a no-op for compatibility; the v2 extension it was reserved for has been falsified (see Validation status). |
+| `vr_sigma_min` | `1e-3` | Defensive floor on `σ_t` in the `1/σ_t` factor (AsymFlow §6.1). Not consumed by the shipped loss handler — we work in velocity-target form so `σ_t` cancels algebraically. The parser flag is kept as a no-op for compatibility; the per-element-λ extension it was reserved for was falsified on the headroom rig (scalar λ already at the asymptote). |
 | `vr_lambda_beta` | `0.01` | EMA rate on `λ`. `λ_ema ← (1−β)·λ_ema + β·λ_batch`. |
-
-## Validation status
-
-| Stage | What | Where | Status |
-|---|---|---|---|
-| v0 | Frozen-ref + decorrelated-ε-null headroom bench | `bench/fm_vr_headroom/results/20260514-1300-tlora-vs-base/` | ✅ HEADROOM — `ρ²_high_band` mid-t median **0.998**, null gap **+0.988**, `λ_global` **−0.996 ± 0.002**, flat from t=0.10–0.85 |
-| v0.5 | Re-run with `anima-preview2` as trainable to bound the trainable-similarity bias | (optional) | Not blocking v1 |
-| v0.7 | Per-element / per-FEI-band λ feasibility on the same headroom rig | `bench/fm_vr_headroom/results/20260514-1637-perband-headroom-tlora/` | ❌ **DEAD** — v2 (per-element) `reduction_per_elem − reduction_global` mid-t mean **+7.9e-6**; v3 (per-band) `perband__delta_vs_global` mid-t mean **−3.4e-6**. Scalar λ already at the asymptote (`reduction_global` ≈ 0.9999); no remaining variance for a richer λ to cancel. |
-| v1 | Wire VR loss into `train.py` + `library/training/losses.py` | **this doc** | ✅ Compiles, loss-handler unit-checked, pre-existing tests green (`test_loss_registry.py`, `test_config.py`, `test_smoke.py`) |
-| v1.5 | Stage 1 A/B: standard FM vs VR on a short LoRA run | eyeball A/B at r=16, 2.56k steps | ✅ VR buys the quality win at the +40% step-cost overhead — verified by sample inspection. Quantitative HPSv3 / VQA pass still optional. |
-| v2 | EMA frozen ref, per-element λ, LPIPS correction | — | ❌ Falsified by v0.7. Not pursuing. |
-| v3 | Per-band `λ_k` via `_fera_fecl_bands` | — | ❌ Falsified by v0.7. Not pursuing. |
-
-## Risks
-
-1. **Trainable ≠ frozen divergence is small at step 0.** The Stage 0 bench
-   used a T-LoRA-merged checkpoint as trainable against a frozen base DiT —
-   ρ² = 0.998 with λ pinned to −1 might be measuring "two near-identical
-   models always agree on input-pair deltas" rather than "VR cancels real
-   per-step gradient noise." The null gap (+0.988) rules out the literal
-   shared-model artifact, but Stage 1 A/B is the only way to fully resolve.
-   With the adapter-bypass implementation the divergence *grows* across
-   training (the trainable DiT keeps drifting; the bypass forward is always
-   the current base prediction — fixed across the whole run), which is what
-   we want from a variance-reduction control variate.
-2. **Bias risk.** `E[z] = (x_0^L − E[ref_pred^L | x_t^L])` is non-zero because
-   the reference is biased. With a fixed reference (always base DiT) the
-   bias is constant in `λ`, so the variance minimum is still at
-   `λ* = −Cov/Var`, but the *expected* loss differs from standard FM. The
-   paper resolves with an LPIPS perceptual correction term — v1 skips it,
-   and v1.5 confirmed sample quality holds at r=16 / 2.56k steps without it.
-   If a longer-step quality regression ever surfaces, the LPIPS term is the
-   first thing to try — not richer λ (v2/v3 are falsified).
-3. **Interaction with other losses.** REPA / FECL / functional / soft-tokens
-   all stay active and unchanged; only `flow_match` is swapped for
-   `flow_matching_vr`. If REPA or FECL silently depended on the FM term's
-   native variance, second-order effects are possible. Stage 1 is the only
-   way to surface this.
-4. **Postfix interaction.** The bypass forward zeros LoRA + ReFT but
-   *cannot* null `network.append_postfix` (postfix prepends tokens to
-   `crossattn_emb` and is not an additive residual on DiT weights). For
-   `postfix + VR` runs the control variate therefore includes the postfix
-   contribution, which still cancels noise but biases `λ` differently than
-   a pure-base reference would. Plain LoRA-family runs are unaffected.
-5. **Static-shape compile.** The extra forward inherits the main forward's
-   static padded shape, so `torch.compile`'s `_run_blocks` cache is reused
-   for free. The bypass forward runs under `torch.no_grad()`, so gradient
-   checkpointing saves no activations and there is no second backward.
-6. **Memory.** None. The trainable DiT is the only DiT in VRAM.
 
 ## Open questions
 
-- **Reference granularity** — v1 always reads "pure base" (multiplier=0
-  on every step). A variant could use the *current* trainable adapter at
-  some scale (e.g. multiplier=0.5 or the resumed multiplier) as the
-  control variate — that's a one-line change to the `set_multiplier` call,
-  but needs thinking about whether the residual `z` stays decorrelated
+- **Fixed `λ = −1` vs learned EMA** — `λ_ema` settles at −0.996, so the
+  loss is operationally `||y − z||²`. A short bench fixing `λ = −1` (drop
+  cov/var bookkeeping, single hyperparameter-free loss) against the
+  learned-EMA path should match within noise; if it does, ship the
+  fixed-λ variant. This is the cheapest remaining ablation.
+- **Gradient-level diagnostics** — the headroom bench measures loss-level
+  ρ² (0.9999), but the optimizer cares about `Var[g]` and
+  `cos(g_vr, g_full-batch)`. Add a small probe that logs:
+  `Var[g_standard]`, `Var[g_vr]`, `cos(g_vr, g_standard)`,
+  `cos(g_vr, g_largebatch_reference)` — this is the missing link between
+  "99.99% loss variance recovered" and "the optimizer actually does
+  better". Cheap; can run alongside the fixed-λ bench.
+- **Wall-clock-matched A/B** — current A/B is matched-step (60min VR vs
+  50min standard). The honest comparison gives standard FM the 1.4× step
+  budget VR pays for; only then is the quality delta attributable to VR
+  vs to more compute. Run before stamping v1 as "shipped quality win".
+- **Mid-training ρ² stability** — the bench used a *merged* T-LoRA
+  against base, where `u_pred ≈ u_pred^L` is true by construction. Re-probe
+  ρ² at, say, step 1k / 2k of a live run to confirm the correlation
+  doesn't collapse once the adapter has drifted from base. If it does,
+  the EMA λ will track but the variance-reduction headroom shrinks.
+- **DDP / accumulation correctness** — `cov` and `var` for λ are computed
+  per-rank in `_flow_matching_vr_loss`. If anyone runs Anima multi-GPU,
+  this needs an `accelerator.reduce(...)` across ranks before the EMA
+  update; otherwise λ silently desynchronizes across workers. Single-GPU
+  runs (the typical Anima training preset) are unaffected.
+- **Reference granularity** — current code always reads "pure base"
+  (multiplier=0 on every step). A variant could use the *current* trainable
+  adapter at some scale (e.g. multiplier=0.5 or the resumed multiplier) as
+  the control variate — that's a one-line change to the `set_multiplier`
+  call, but needs thinking about whether the residual `z` stays decorrelated
   from the gradient, since the bypass forward now shares a non-trivial
-  function with the gradient forward. v1's pure-base choice keeps `z`
+  function with the gradient forward. The pure-base choice keeps `z`
   cleanly independent of the trainable LoRA's current state. Still open;
   no measured signal that it matters.
-- ~~**Multi-band schedule**~~ — closed by v0.7. Per-FEI-band λ recovers
-  −3.4e-6 reduction over global (estimator artifact; true joint upper-
-  bounded by per-element +7.9e-6). Scalar λ stays.
-- **CFG-dropout interaction** — v1 uses the *same* (possibly dropped)
+- **CFG-dropout interaction** — the loss uses the *same* (possibly dropped)
   crossattn_emb for both forwards in a step, so cancellation is preserved.
-- **σ_min clamping** — paper uses `σ_min = 0.04` on the `1/σ_t` factor.
-  v1 works in velocity-target form (`y = u_pred − target`), where `σ_t`
-  algebraically cancels, so no clamp is needed. `--vr_sigma_min` is parked
-  as a no-op (v2, the per-element-λ extension it was reserved for, was
-  falsified by v0.7).
+- **LPIPS perceptual correction** — the paper pairs VR with an LPIPS term
+  to absorb the bias from `E[x_0^L | x_t] ≈ E[x_0^L | x_t^L]`. We skip it
+  and sample quality holds at r=16 / 2.56k steps; if a longer-step quality
+  regression ever surfaces, LPIPS is the first thing to try (not richer λ —
+  per-element / per-band variants were falsified on the headroom rig).
 
 ## References
 

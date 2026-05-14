@@ -149,6 +149,14 @@ class AnimaTrainer:
         if mean_combined_norm is not None:
             logs["norm/avg_combined_norm"] = mean_combined_norm
 
+        if float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0:
+            lambda_ema = self._vr_state.get("lambda_ema")
+            lambda_batch = self._vr_state.get("lambda_batch")
+            if isinstance(lambda_ema, float):
+                logs["vr/lambda_ema"] = lambda_ema
+            if isinstance(lambda_batch, float):
+                logs["vr/lambda_batch"] = lambda_batch
+
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
             if lr_descriptions is not None:

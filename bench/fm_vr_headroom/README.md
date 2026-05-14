@@ -1,5 +1,31 @@
 # FM Variance-Reduction Headroom
 
+> **2026-05-14 errata.** The headline `λ_global = −0.996 ± 0.002` and
+> `ρ² ≈ 0.999` from `results/20260514-1300-tlora-vs-base/` were measured
+> with `trainable_dit = anima-tlora-0509-12_merged.safetensors` (a
+> near-converged adapter) vs `frozen_dit = anima-preview3-base.safetensors`.
+> In that regime `u_pred ≈ u_pred^L` is true by construction, so the
+> readings are an *upper bound for the near-converged regime*, not a
+> training-time prediction. **Live training disagrees**: the first run
+> with `vr/lambda_ema` logging (`output/logs/lora_default_20260514-1921/`,
+> step ~586) shows `vr/lambda_ema` walks from −0.89 → −0.72, mean −0.75 —
+> ~30% off the bench asymptote. Two consequences:
+>
+> 1. **Don't cite `λ ≈ −1` as a training-time fact.** `docs/experimental/
+>    vr_loss.md`'s "λ_ema settles at −0.996 → fixed-λ=−1 should match"
+>    and the (now archived) `archive/proposals/hf_residual_adapter.md`'s
+>    "`λ → −1` collapse" both extrapolated from this bench past its scope.
+> 2. **ρ² is loss-level; the optimizer cares about gradient variance.**
+>    With Var(y) small in the near-converged regime, "99.99% of that
+>    variance" is a tiny absolute number against actual SGD noise. The
+>    gradient-variance probe in vr_loss.md Open Q #2 remains unaddressed.
+>
+> What the bench *did* validate: ε-pairing produces real structural
+> correlation (null ρ² ≈ 0.024 → 0.99 is not an artifact of "both
+> forwards see similar inputs"). VR-loss v1.5 still trains and the
+> eyeball A/B held; the bench just doesn't justify the strength of the
+> conclusions that were drawn from it.
+
 Diagnostic for whether the AsymFlow §5.2 control-variate trick (Chen et al.,
 arXiv:2605.12964) has measurable headroom on Anima's *standard latent*
 flow-matching loss. The trick replaces the FM target
