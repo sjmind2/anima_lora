@@ -36,8 +36,8 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 # output_name = "anima_vr"
-vr_loss_weight = 1.0
-vr_fei_sigma_low_div = 4.0
+# vr_loss_weight = 1.0
+# vr_fei_sigma_low_div = 4.0
 
 # -------------
 # Ortho-lora

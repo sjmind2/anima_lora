@@ -222,6 +222,8 @@ paper reports +0.96 HPSv3 from VR alone on AsymFLUX.2 klein
 (Table 3) but no wall-clock figure, so this has to be re-demonstrated for
 Anima — see "Validation status" below.
 
+in r=16, 2.56k steps, this took 60min, compared to 45min
+
 ## Memory
 
 No extra VRAM beyond what standard FM uses. The control-variate forward

@@ -198,9 +198,9 @@ anima_lora's entire performance stack is structured around "16GB VRAM must work 
 
 **anima_lora** uses the `networks/lora_anima/` package to build a LoRA network via monkey-patching target modules. Target selection uses the exclude pattern quoted above (in `factory.py`) and `network_module` dispatch in configs. LoRA application is by runtime patching, not by weight merging.
 
-**comfy** applies LoRAs via `comfy/lora.py` + `comfy/model_patcher.py`. Weight merging is the default; patch-based is also supported. ComfyUI's LoRA key-mapping has to convert between anima_lora's key naming (e.g. `lora_unet_blocks_0_cross_attn_q_proj.lora_down.weight`) and ComfyUI's expected format — `scripts/convert_lora_to_comfy.py` handles this for you when exporting LoRAs for ComfyUI use.
+**comfy** applies LoRAs via `comfy/lora.py` + `comfy/model_patcher.py`. Weight merging is the default; patch-based is also supported. ComfyUI's stock `LoraLoader` recognizes anima's `lora_unet_` key naming directly (it's the kohya-ss convention) — it strips the prefix and swaps underscores back to dots to map onto `diffusion_model.*` targets. No conversion step is needed.
 
-**Practical consequence.** LoRAs trained in anima_lora load fine in ComfyUI after running `scripts/convert_lora_to_comfy.py`. LoRAs trained in ComfyUI (rare, since the training stack lives in anima_lora) would need the inverse conversion.
+**Practical consequence.** Plain LoRAs trained in anima_lora load fine in ComfyUI's stock LoRA loader. HydraLoRA / FeRA / ReFT and prefix/postfix checkpoints carry extra keys (`router.*`, `reft_*`, stacked `lora_ups.N.*`) that the stock loader silently drops — those need the `custom_nodes/comfyui-hydralora/` Anima Adapter Loader node.
 
 ## 5. Text encoder / conditioning interface
 
@@ -231,7 +231,7 @@ Already covered in §3 as part of the performance table. Two concrete things wor
 
 ### Running an anima_lora-trained LoRA in ComfyUI
 
-- ✅ LoRA weights load fine (after `scripts/convert_lora_to_comfy.py`).
+- ✅ LoRA weights load fine via ComfyUI's stock LoRA loader (kohya-ss `lora_unet_` keys are native).
 - ✅ Base image quality matches (same underlying transformer blocks).
 - ❌ Mod guidance via `pooled_text_proj_0413.safetensors` **does not load into ComfyUI's model** — it lives outside the base state dict. You must use the custom node from [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler) to activate it, which installs the `t_embedding_norm` hook out-of-band.
 - ❌ Spectrum acceleration is not available unless you run the [ComfyUI-Spectrum-KSampler](https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler) custom node.
@@ -267,4 +267,3 @@ There is no reason to merge the two; they solve different problems. The point of
 - `comfy/comfy/ldm/cosmos/predict2.py::MiniTrainDIT` — ComfyUI's vanilla forward
 - `comfy/comfy/ldm/anima/model.py` — ComfyUI's Anima wrapper (`preprocess_text_embeds`)
 - `networks/lora_anima/factory.py` — anima_lora LoRA targeting (`pooled_text_proj` exclusion)
-- `scripts/convert_lora_to_comfy.py` — key-name translator for moving LoRAs between the two stacks

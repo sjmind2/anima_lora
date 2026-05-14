@@ -15,11 +15,11 @@ Outputs:
     output/bench/<variant>/<time>_<seed>.png            (images)
 
 Usage:
-    python scripts/bench_methods.py                          # full sweep
-    python scripts/bench_methods.py --variants lora tlora    # subset
-    python scripts/bench_methods.py --skip-train             # reuse ckpts, re-infer
-    python scripts/bench_methods.py --skip-infer             # train only
-    PRESET=low_vram python scripts/bench_methods.py
+    python archive/bench_methods.py                          # full sweep
+    python archive/bench_methods.py --variants lora tlora    # subset
+    python archive/bench_methods.py --skip-train             # reuse ckpts, re-infer
+    python archive/bench_methods.py --skip-infer             # train only
+    PRESET=low_vram python archive/bench_methods.py
 """
 from __future__ import annotations
 

@@ -280,10 +280,8 @@ Data preparation scripts in `preprocess/`:
 
 Utility scripts in `scripts/`:
 - `distill_modulation.py` — Train pooled_text_proj MLP for modulation guidance (used by `make distill-mod`)
-- `convert_lora_to_comfy.py` — Convert LoRA key names between anima and ComfyUI formats
 - `comfy_batch.py` — Run ComfyUI batch workflow from `workflows/` directory
 - `merge_to_dit.py` — Bake a LoRA adapter into the base DiT (used by `make merge`)
-- `bench_methods.py` — Benchmark inference across method configurations (writes to `bench/`)
 - `compute_pe_centroid.py` — Compute PE-feature centroid for DCW v4's `cos(c_pool, μ_centroid)` channel.
 - `export_logs_json.py` — Export TensorBoard run scalars to JSON/JSONL (used by `make export-logs`)
 - `anima_tagger/cli.py` — Train the Anima Tagger checkpoint used by DirectEdit (invoke as `python -m scripts.anima_tagger.cli`). See `docs/experimental/anima_tagger.md`.
