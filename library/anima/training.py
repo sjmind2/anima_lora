@@ -376,6 +376,41 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Path to EMA model safetensors file to resume EMA state from a previous run",
     )
 
+    # Variance-reduced flow-matching loss (AsymFlow §5.2, arXiv:2605.12964).
+    # See bench/fm_vr_headroom/proposal.md. Gated off by default.
+    parser.add_argument(
+        "--vr_loss_weight",
+        type=float,
+        default=0.0,
+        help="Weight of the VR control-variate correction on the FM loss. "
+        "0 = standard FM (default). 1.0 = paper recipe. When > 0, the trainer "
+        "runs one extra no-grad forward per step on the FEI-low-passed latent "
+        "through the *same* trainable DiT with the adapter zeroed "
+        "(network.set_multiplier(0)) — equivalent to a frozen base DiT for "
+        "LoRA-family runs, without holding a second model copy in VRAM.",
+    )
+    parser.add_argument(
+        "--vr_fei_sigma_low_div",
+        type=float,
+        default=4.0,
+        help="Divisor for the FEI low-pass kernel used to build x_0^L "
+        "(σ_low = min(H_lat, W_lat) / div). Matches live FEI default (4.0).",
+    )
+    parser.add_argument(
+        "--vr_sigma_min",
+        type=float,
+        default=1e-3,
+        help="Floor on σ_t in the VR loss denominator (AsymFlow §6.1). "
+        "Defensive against low-σ instability in the 1/σ_t factor. 0 disables.",
+    )
+    parser.add_argument(
+        "--vr_lambda_beta",
+        type=float,
+        default=0.01,
+        help="EMA rate for the online λ estimator: "
+        "λ_ema ← (1−β)·λ_ema + β·λ_batch. Default 0.01 over typically B=4.",
+    )
+
     # Functional MSE loss against inversion runs (postfix-func)
     parser.add_argument(
         "--inversion_dir",

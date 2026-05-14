@@ -91,6 +91,11 @@ from library.training import (
     verify_training_args,
 )
 from library.training.loop import build_loop_state, run_training_loop
+from library.training.router_conditioning import apply_router_conditioning
+from library.training.text_conds import prepare_text_conds
+from library.training.forward_kwargs import build_forward_kwargs
+from library.training.inversion_forward import compute_inversion_func_loss
+from library.training.vr_forward import run_vr_reference_forward
 from library.log import setup_logging, add_logging_arguments
 
 setup_logging()
@@ -110,6 +115,11 @@ class AnimaTrainer:
         # here in ``get_noise_pred_and_target`` and consumed by the loss
         # composer in ``_process_batch_inner``.
         self._extras_for_step: dict = {}
+        # EMA λ state, mutated by the flow_matching_vr loss handler each step.
+        # The "frozen reference" for the AsymFlow §5.2 control variate is just
+        # the trainable DiT with ``network.set_multiplier(0)`` — see the VR
+        # block in ``get_noise_pred_and_target``.
+        self._vr_state: dict = {"lambda_ema": None}
 
     # region logging helpers
 
@@ -508,6 +518,17 @@ class AnimaTrainer:
             logger.info(f"enable block swap: blocks_to_swap={args.blocks_to_swap}")
             model.enable_block_swap(args.blocks_to_swap, accelerator.device)
 
+        # Variance-reduced FM loss: the "frozen reference" is the trainable
+        # DiT itself with ``network.set_multiplier(0)`` during the no-grad
+        # forward — works because base weights are frozen and LoRA-family
+        # adapters are additive. See ``get_noise_pred_and_target`` for the
+        # bypass. Saves ~5 GB VRAM vs holding a second DiT copy.
+        if float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0:
+            logger.info(
+                f"VR loss enabled (vr_loss_weight={args.vr_loss_weight}); "
+                f"using trainable DiT with multiplier=0 as the control variate"
+            )
+
         return model, text_encoders
 
     def get_tokenize_strategy(self, args):
@@ -624,52 +645,15 @@ class AnimaTrainer:
         timesteps = sampler_out.timesteps  # [0,1]-scaled, float32
         sigmas = sampler_out.sigmas
 
-        # Set timestep-dependent rank mask on LoRA and ReFT modules
-        if hasattr(network, "set_timestep_mask"):
-            network.set_timestep_mask(timesteps, max_timestep=1.0)
-        if hasattr(network, "set_reft_timestep_mask"):
-            network.set_reft_timestep_mask(timesteps, max_timestep=1.0)
-        # σ-conditional HydraLoRA router (Track B, timestep-hydra.md). No-op
-        # unless use_sigma_router is on and the variant is hydra/ortho_hydra.
-        if hasattr(network, "set_sigma"):
-            network.set_sigma(timesteps)
-        # FEI-conditional HydraLoRA router (FeRA-style content-aware). FEI is
-        # a function of the actual input the model sees this step
-        # (``noisy_model_input``), not a leak from the target — see plan.md
-        # Phase 1. No-op unless use_fei_router is on and the variant is
-        # hydra/ortho_hydra. Same hookpoint as set_sigma so cudagraph capture
-        # sees a stable order.
-        # FEI router input — set_fei() drives both the per-Linear FEI router
-        # (FEI-on-Hydra Phase 1) and the network-level GlobalRouter (FeRA /
-        # stacked_experts). FEI is a function of the actual input the model
-        # sees this step (``noisy_model_input``), not a leak from the target.
-        # No-op when the active network has no FEI router. Same hookpoint as
-        # set_sigma so cudagraph capture sees a stable order.
-        if getattr(network, "use_fei_router", False):
-            from library.runtime.fei import compute_fei_2band, fei_sigma_low
-
-            _fei_z = noisy_model_input
-            if _fei_z.dim() == 5:
-                _fei_z = _fei_z.squeeze(2)
-            _h_lat, _w_lat = int(_fei_z.shape[-2]), int(_fei_z.shape[-1])
-            _div = float(getattr(network.cfg, "fei_sigma_low_div", 8.0))
-            _fei = compute_fei_2band(_fei_z, fei_sigma_low(_h_lat, _w_lat, _div))
-            network.set_fei(_fei)
-        # HydraLoRA expert-warmup: during the first ``expert_warmup_ratio`` of
-        # training, only one randomly-chosen expert per module receives
-        # gradient (forward still uses all experts via the learned gate).
-        # No-op unless expert_warmup_ratio > 0.
-        if is_train and hasattr(network, "step_expert_warmup"):
-            network.step_expert_warmup(
-                int(getattr(self, "_hydra_warmup_step", 0)),
-                int(getattr(args, "max_train_steps", 0) or 0),
-            )
-            if hasattr(network, "step_balance_loss_warmup"):
-                network.step_balance_loss_warmup(
-                    int(getattr(self, "_hydra_warmup_step", 0)),
-                    int(getattr(args, "max_train_steps", 0) or 0),
-                )
-            self._hydra_warmup_step = int(getattr(self, "_hydra_warmup_step", 0)) + 1
+        # Per-step network conditioning: timestep masks, σ/FEI routers, expert warmup.
+        self._hydra_warmup_step = apply_router_conditioning(
+            network=network,
+            noisy_model_input=noisy_model_input,
+            timesteps=timesteps,
+            is_train=is_train,
+            warmup_step=int(getattr(self, "_hydra_warmup_step", 0)),
+            max_train_steps=int(getattr(args, "max_train_steps", 0) or 0),
+        )
 
         # Gradient checkpointing support
         if args.gradient_checkpointing:
@@ -681,60 +665,22 @@ class AnimaTrainer:
                     if t is not None and t.dtype.is_floating_point:
                         t.requires_grad_(True)
 
-        # Unpack text encoder conditions
-        crossattn_emb = None
-        if len(text_encoder_conds) == 5:
-            prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask, crossattn_emb = (
-                text_encoder_conds
-            )
-        else:
-            prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = text_encoder_conds
-
-        # Pre-compute max sequence length on CPU to avoid GPU sync in KV trimming
-        _max_crossattn_seqlen = None
-        if args.trim_crossattn_kv and t5_attn_mask is not None:
-            _max_crossattn_seqlen = int(t5_attn_mask.sum(dim=-1).max())
-
-        if crossattn_emb is None:
-            # Move to device
-            prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
-            attn_mask = attn_mask.to(accelerator.device)
-            t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
-            t5_attn_mask = t5_attn_mask.to(accelerator.device)
-        else:
-            crossattn_emb = crossattn_emb.to(accelerator.device, dtype=weight_dtype)
-            if args.trim_crossattn_kv or hasattr(network, "append_postfix"):
-                t5_attn_mask = t5_attn_mask.to(accelerator.device)
-
-        # On-device caption dropout. The freshly-transferred GPU tensors are
-        # not aliased to the dataloader's CPU copies, so we can write in-place
-        # -- no clones, no main-thread CPU memcpy on the critical path.
-        caption_dropout_rates = (
-            batch.get("caption_dropout_rates") if isinstance(batch, dict) else None
+        # Unpack text encoder conditions, H2D move, and on-device caption dropout.
+        tc = prepare_text_conds(
+            text_encoder_conds=text_encoder_conds,
+            batch=batch,
+            text_encoding_strategy=ctx.text_encoding_strategy,
+            network=network,
+            device=accelerator.device,
+            weight_dtype=weight_dtype,
+            trim_crossattn_kv=bool(args.trim_crossattn_kv),
         )
-        if caption_dropout_rates is not None:
-            if crossattn_emb is None:
-                ctx.text_encoding_strategy.apply_caption_dropout_inplace(
-                    caption_dropout_rates,
-                    prompt_embeds=prompt_embeds,
-                    attn_mask=attn_mask,
-                    t5_input_ids=t5_input_ids,
-                    t5_attn_mask=t5_attn_mask,
-                )
-            else:
-                # In this branch prompt_embeds / attn_mask / t5_input_ids stay
-                # on CPU because they're unused downstream -- only zero what the
-                # model actually consumes (and only touch t5_attn_mask if it
-                # was moved to device above).
-                ctx.text_encoding_strategy.apply_caption_dropout_inplace(
-                    caption_dropout_rates,
-                    crossattn_emb=crossattn_emb,
-                    t5_attn_mask=(
-                        t5_attn_mask
-                        if t5_attn_mask is not None and t5_attn_mask.is_cuda
-                        else None
-                    ),
-                )
+        crossattn_emb = tc.crossattn_emb
+        prompt_embeds = tc.prompt_embeds
+        attn_mask = tc.attn_mask
+        t5_input_ids = tc.t5_input_ids
+        t5_attn_mask = tc.t5_attn_mask
+        _max_crossattn_seqlen = tc.max_crossattn_seqlen
 
         # Create padding mask
         bs = latents.shape[0]
@@ -766,26 +712,18 @@ class AnimaTrainer:
                 )
             else:
                 # crossattn_emb is already in target (T5-compatible) space.
-                # Postfix mode: inject learned vectors before DiT forward.
-                # Pool text BEFORE injection so modulation guidance sees only real text.
-                has_postfix = hasattr(network, "append_postfix")
-                kw = {}
-                if has_postfix:
-                    kw["pooled_text_override"] = crossattn_emb.max(dim=1).values
-                    seqlens = t5_attn_mask.sum(dim=-1).to(torch.int32)
-                    crossattn_emb = network.append_postfix(
-                        crossattn_emb, seqlens, timesteps=timesteps
-                    )
-                if args.trim_crossattn_kv:
-                    kw["crossattn_seqlens"] = t5_attn_mask.sum(dim=-1).to(torch.int32)
-                    max_cs = _max_crossattn_seqlen
-                    if has_postfix:
-                        kw["crossattn_seqlens"] = (
-                            kw["crossattn_seqlens"] + network.num_postfix_tokens
-                        )
-                        if max_cs is not None:
-                            max_cs += network.num_postfix_tokens
-                    kw["max_crossattn_seqlen"] = max_cs
+                # Postfix splice + KV-trim kwargs.
+                fk = build_forward_kwargs(
+                    network=network,
+                    crossattn_emb=crossattn_emb,
+                    t5_attn_mask=t5_attn_mask,
+                    timesteps=timesteps,
+                    max_crossattn_seqlen=_max_crossattn_seqlen,
+                    trim_crossattn_kv=bool(args.trim_crossattn_kv),
+                )
+                crossattn_emb = fk.crossattn_emb
+                kw = fk.kw
+                has_postfix = fk.has_postfix
                 model_pred = anima(
                     noisy_model_input,
                     timesteps,
@@ -823,73 +761,48 @@ class AnimaTrainer:
                         if out:
                             self._extras_for_step.update(out)
 
-                # --- Functional MSE loss against stochastic inversion run ---
-                # If functional loss is enabled and the batch has inversions loaded,
-                # run a second no-grad forward with a sampled inversion run as
-                # crossattn_emb and compute MSE between the two sets of cross_attn
-                # output_proj captures at the configured blocks.
+                # Functional MSE loss against a sampled stochastic inversion run.
+                # The captures dict is populated by trainer-owned forward hooks
+                # on cross_attn.output_proj at ``self._func_blocks``.
                 self._func_loss = None
-                inv_runs = (
-                    batch.get("inversion_runs") if isinstance(batch, dict) else None
-                )
-                inv_mask = (
-                    batch.get("inversion_mask") if isinstance(batch, dict) else None
-                )
+                if is_train and getattr(self, "_func_blocks", None):
+                    self._func_loss = compute_inversion_func_loss(
+                        anima_call=anima,
+                        captures=self._func_captures,
+                        block_indices=self._func_blocks,
+                        batch=batch,
+                        noisy_model_input=noisy_model_input,
+                        timesteps=timesteps,
+                        padding_mask=padding_mask,
+                        has_postfix=has_postfix,
+                        kw=kw,
+                        device=accelerator.device,
+                        dtype=weight_dtype,
+                    )
+
+                # Variance-reduced FM control variate (AsymFlow §5.2). Stash the
+                # residual `z` so the loss composer can blend `(y + λ·z)²`.
                 if (
                     is_train
-                    and getattr(self, "_func_blocks", None)
-                    and inv_runs is not None
-                    and inv_mask is not None
-                    and bool(inv_mask.any().item())
+                    and float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0
                 ):
-                    # Snapshot main-forward captures (still attached to postfix MLP graph)
-                    cap_main = dict(self._func_captures)
-                    missing = [bi for bi in self._func_blocks if bi not in cap_main]
-                    if missing:
-                        raise RuntimeError(
-                            f"Functional loss: main forward did not populate captures for blocks {missing}"
-                        )
-
-                    # Sample one run per batch element
-                    inv_runs_dev = inv_runs.to(accelerator.device, dtype=weight_dtype)
-                    inv_mask_dev = inv_mask.to(accelerator.device)
-                    B_inv, N_runs, _, _ = inv_runs_dev.shape
-                    run_idx = torch.randint(
-                        0, N_runs, (B_inv,), device=inv_runs_dev.device
+                    z_residual = run_vr_reference_forward(
+                        anima_call=anima,
+                        network=network,
+                        latents=latents,
+                        noise=noise,
+                        sigmas=sigmas,
+                        timesteps=timesteps,
+                        crossattn_emb=crossattn_emb,
+                        padding_mask=padding_mask,
+                        forward_kwargs=kw,
+                        weight_dtype=weight_dtype,
+                        fei_sigma_low_div=float(args.vr_fei_sigma_low_div),
                     )
-                    sampled_inv = inv_runs_dev[
-                        torch.arange(B_inv, device=inv_runs_dev.device), run_idx
-                    ]  # [B, S, D]
-
-                    # Same pooled_text_override so AdaLN modulation is identical;
-                    # only cross-attn K/V differs between the two forwards.
-                    inv_kw = {}
-                    if has_postfix and "pooled_text_override" in kw:
-                        inv_kw["pooled_text_override"] = kw["pooled_text_override"]
-
-                    with torch.no_grad():
-                        _ = anima(
-                            noisy_model_input,
-                            timesteps,
-                            sampled_inv,
-                            padding_mask=padding_mask,
-                            **inv_kw,
-                        )
-
-                    cap_inv = {
-                        bi: self._func_captures[bi].detach() for bi in self._func_blocks
+                    self._extras_for_step["vr"] = {
+                        "z": z_residual.detach(),
+                        "state": self._vr_state,
                     }
-
-                    mask_f = inv_mask_dev.float()
-                    denom = mask_f.sum().clamp(min=1.0)
-                    block_losses = []
-                    for bi in self._func_blocks:
-                        diff = cap_main[bi].float() - cap_inv[bi].float()
-                        per_sample = diff.pow(2).mean(
-                            dim=tuple(range(1, diff.ndim))
-                        )  # [B]
-                        block_losses.append((per_sample * mask_f).sum() / denom)
-                    self._func_loss = sum(block_losses) / len(block_losses)
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
 
         # Note: do NOT clear timestep mask here -- gradient checkpointing recomputes the forward
