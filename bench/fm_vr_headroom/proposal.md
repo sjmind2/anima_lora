@@ -4,8 +4,12 @@ Plan to integrate the AsymFlow §5.2 control-variate FM loss (Chen et al.,
 arXiv:2605.12964) into Anima's LoRA-family training. The headroom bench in
 this directory's [`README.md`](README.md) / [`run_bench.py`](run_bench.py)
 cleared its gate on 2026-05-14 (`results/20260514-1300-tlora-vs-base/`,
-verdict **HEADROOM**); this doc is now the implementation plan, not a
-proposal in search of evidence.
+verdict **HEADROOM**). **As of 2026-05-14 the plan has shipped through
+v1.5** — v1 wired and v1.5 eyeball A/B confirmed VR buys the quality win
+at +40% step cost on r=16 / 2.56k steps. The v2/v3 λ refinements were
+falsified by a follow-on perband-headroom bench
+(`results/20260514-1637-perband-headroom-tlora/`) and are closed, not
+deferred. This doc is now historical record + design rationale.
 
 ## TL;DR
 
@@ -98,10 +102,9 @@ Same kernel that defines FEI routing on the Hydra/FeRA paths. Three reasons:
    No new module.
 3. The 2-band FEI gives a free diagnostic axis: per-FEI-band breakdown in
    the bench tells us whether VR helps low-frequency-dominated samples
-   differently than high-frequency ones. If the effect is uniform across
-   FEI bins, single-band VR is enough; if it's content-dependent, multi-band
-   (per-band λ_k using `_fera_fecl_bands` decomposition) is the natural
-   extension.
+   differently than high-frequency ones. **Closed:** the 2026-05-14
+   perband-headroom run found uniform effect — single-band VR is enough
+   (see "Per-element λ … now closed" below).
 
 Default `fei_sigma_low_div = 4.0` matches the live training default in
 `configs/gui-methods/fera.toml` / `configs/gui-methods/hydralora_fei.toml`.
@@ -157,8 +160,15 @@ noisy. Bench confirms λ_global ≈ -1.0 across all (sample, t) pairs at
 N=32, so the online estimator should converge fast and the EMA β = 0.01
 is well-conditioned.
 
-Per-element λ (the bench reports `reduction_per_elem_lambda` for context) is
-deferred to v2. Per-band λ_k via `_fera_fecl_bands` is the v3 extension.
+Per-element λ (v2) and per-band λ_k via `_fera_fecl_bands` (v3) were
+considered as refinements and **falsified** by the 2026-05-14
+perband-headroom bench (`results/20260514-1637-perband-headroom-tlora/`):
+- v2 mid-t mean delta over global: **+7.9e-6** (= +0.00079%).
+- v3 mid-t mean delta over global: **−3.4e-6** (estimator artifact;
+  bounded above by v2's +7.9e-6, so still zero in practice).
+
+Scalar λ already attains mid-t reduction ≈ 0.9999, leaving no headroom for
+a richer λ to recover. v2 / v3 are now closed, not deferred.
 
 ### Compute cost
 
@@ -188,8 +198,9 @@ cannot assume it from the paper's quality delta.
 
 New handler `_flow_matching_vr_loss` registered as `"flow_matching_vr"`,
 activated when `args.vr_loss_weight > 0`. Replaces the standard `flow_matching`
-entry in the active-losses list. Stage 0 (bench) determines whether to ship
-v1 = single global λ or v3 = per-band λ_k from the start.
+entry in the active-losses list. v1 = single global λ. (v3 = per-band λ_k
+was the alternative under consideration before Stage 0; closed by the
+perband-headroom bench.)
 
 ### `train.py` `get_noise_pred_and_target`
 
@@ -293,8 +304,9 @@ compute isn't worth it.
    mean the *expected* loss isn't exactly the same as standard FM — there's a
    systematic shift that could push the trained model away from the FM optimum.
    The paper handles this with the LPIPS perceptual correction term (§5.2 last
-   paragraph). v1 of this plan skips that; v2 may need to add it if
-   training shows quality regression at long step counts.
+   paragraph). v1 skipped it; v1.5 confirmed sample quality holds at r=16 /
+   2.56k steps without it. If a longer-step regression ever surfaces, the
+   LPIPS term is the lever — not richer λ (v2/v3 are falsified).
 
 3. **Interaction with existing losses.** Anima's training loss has multiple
    components (FM + REPA + FECL + functional + soft-tokens + …). VR replaces
@@ -318,10 +330,10 @@ compute isn't worth it.
   finetune's *starting* state including any LoRA from a resumed checkpoint?
   v1 assumes pure base DiT; v2 might prefer "starting state" so resume-from-
   checkpoint runs use the resumed state as the control variate.
-- **Multi-band schedule.** Single-band (default) vs `K=3` bands using
-  `_fera_fecl_bands`. The bench can be extended to measure ρ² per band
-  trivially (~10 lines). If different bands have very different ρ², per-band
-  λ_k buys extra reduction.
+- ~~**Multi-band schedule.**~~ Closed by the 2026-05-14 perband-headroom
+  bench: per-FEI-band λ recovers `−3.4e-6` mid-t reduction over global
+  (estimator-artifact negative; upper-bounded by per-element `+7.9e-6`).
+  Scalar λ stays.
 - **CFG-dropout interaction.** When the trainer drops the cross-attention
   embedding for CFG training, does the frozen ref's prediction at `x_t^L`
   use the same dropped embedding? v1 says yes (same crossattn_emb for both
@@ -338,10 +350,11 @@ compute isn't worth it.
 |---|---|---|---|
 | v0 | Frozen-ref + decorrelated-ε-null headroom bench. | `bench/fm_vr_headroom/results/20260514-1300-tlora-vs-base/` | ✅ DONE — HEADROOM |
 | v0.5 | (Optional) Re-run with `--trainable_dit anima-preview2.safetensors` to bound the trainable-similarity bias from Risks #1. | `bench/fm_vr_headroom/results/<run>/` | Not blocking v1; informative for Risks #1. |
-| v1 | Wire VR loss into `train.py` + `library/training/losses.py`. | This doc's "Integration points" section. | Compiles, smoke-trains, frozen-ref VRAM stays under preset budget. |
-| v1.5 | Stage 1 A/B: standard FM vs VR on a short LoRA run. | `bench/fm_vr_headroom/training_ab.py` (new). | HPSv3 ≥ +0.02 at fixed step OR ≥ +0.01 at fixed wall-clock, robust across two prompt subsets. |
-| v2 | EMA frozen ref, per-element λ, LPIPS correction. | Conditional on v1.5 quality regression at long step counts, or VRAM gating users out. | |
-| v3 | Per-band λ_k via `_fera_fecl_bands`. | Conditional on v1.5 showing FEI-bin-dependent gain. | |
+| v0.7 | Per-element / per-band λ feasibility on the same headroom rig. | `bench/fm_vr_headroom/results/20260514-1637-perband-headroom-tlora/` | ❌ DEAD — v2 delta +7.9e-6, v3 delta −3.4e-6, both bench-noise. Closes v2/v3 below. |
+| v1 | Wire VR loss into `train.py` + `library/training/losses.py`. | This doc's "Integration points" section. | ✅ DONE — Compiles, smoke-trains, frozen-ref VRAM under preset budget (no extra model via adapter-bypass). |
+| v1.5 | Stage 1 A/B: standard FM vs VR on a short LoRA run. | eyeball A/B at r=16, 2.56k steps. | ✅ DONE — VR buys the quality win at the +40% step-cost overhead. Quantitative HPSv3/VQA pass still optional. |
+| v2 | ~~EMA frozen ref, per-element λ, LPIPS correction.~~ | — | ❌ Closed by v0.7 (per-element λ). LPIPS correction still live if a long-step regression ever surfaces. |
+| v3 | ~~Per-band λ_k via `_fera_fecl_bands`.~~ | — | ❌ Closed by v0.7. |
 
 ## References
 

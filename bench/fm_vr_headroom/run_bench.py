@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -100,6 +101,19 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--attn_mode", default="flash")
     p.add_argument("--label", type=str, default=None)
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile each DiT block (per-block, via DiT.compile_blocks). "
+        "Compiles both trainable and frozen models. First (sample, t) pair pays "
+        "the compile cost (~30–60s per model); subsequent pairs run faster.",
+    )
+    p.add_argument(
+        "--compile_mode",
+        default=None,
+        help="Optional inductor mode for compile_blocks (e.g. 'reduce-overhead'). "
+        "Leave unset for the default.",
+    )
     return p.parse_args()
 
 
@@ -270,6 +284,11 @@ def _banded_metrics(Y: torch.Tensor, Z: torch.Tensor, sigma_low: float) -> dict:
     ``high_band__rho_sq_global`` — the low-band ρ² is ≈ 1 by
     construction (`x_0^L = LP(x_0)`) and reflects the part of the FM
     signal that VR will *cancel*, not the part it usefully de-noises.
+
+    Also emits ``perband__reduction_combined`` — the v3 feasibility metric:
+    full-signal variance reduction when λ_low and λ_high are applied to
+    their respective bands of Z. Compare to ``global__reduction_global_lambda``
+    via ``perband__delta_vs_global``.
     """
     Y_low, Y_high = _project_bands(Y, sigma_low)
     Z_low, Z_high = _project_bands(Z, sigma_low)
@@ -281,6 +300,23 @@ def _banded_metrics(Y: torch.Tensor, Z: torch.Tensor, sigma_low: float) -> dict:
     ]:
         for k, v in variance_metrics(a, b).items():
             out[f"{prefix}__{k}"] = v
+
+    lam_low = out["low_band__lambda_global"]
+    lam_high = out["high_band__lambda_global"]
+    Y_flat = Y.reshape(Y.shape[0], -1).double()
+    Zl_flat = Z_low.reshape(Z_low.shape[0], -1).double()
+    Zh_flat = Z_high.reshape(Z_high.shape[0], -1).double()
+    Y_c = Y_flat - Y_flat.mean(dim=0, keepdim=True)
+    Zl_c = Zl_flat - Zl_flat.mean(dim=0, keepdim=True)
+    Zh_c = Zh_flat - Zh_flat.mean(dim=0, keepdim=True)
+    residual = Y_c + lam_low * Zl_c + lam_high * Zh_c
+    var_y_total = (Y_c * Y_c).mean(dim=0).sum()
+    var_after_pb = (residual * residual).mean(dim=0).sum()
+    reduction_pb = (1.0 - var_after_pb / var_y_total.clamp_min(1e-30)).item()
+    out["perband__reduction_combined"] = float(reduction_pb)
+    out["perband__delta_vs_global"] = float(reduction_pb - out["global__reduction_global_lambda"])
+    out["perband__lambda_low"] = float(lam_low)
+    out["perband__lambda_high"] = float(lam_high)
     return out
 
 
@@ -317,6 +353,9 @@ def main():
     )
     anima_trainable.to(device, dtype=dtype).eval().requires_grad_(False)
     anima_trainable.reset_mod_guidance()
+    if args.compile:
+        log.info("compiling trainable DiT blocks (this can take ~30–60s)")
+        anima_trainable.compile_blocks(mode=args.compile_mode)
 
     if same_model:
         anima_frozen = anima_trainable
@@ -332,6 +371,9 @@ def main():
         )
         anima_frozen.to(device, dtype=dtype).eval().requires_grad_(False)
         anima_frozen.reset_mod_guidance()
+        if args.compile:
+            log.info("compiling frozen DiT blocks (this can take ~30–60s)")
+            anima_frozen.compile_blocks(mode=args.compile_mode)
 
     timesteps = sample_timesteps(args.num_timesteps, args.t_min, args.t_max, args.seed)
     log.info(f"timesteps: {[round(t.item(), 3) for t in timesteps]}")
@@ -345,6 +387,8 @@ def main():
     rng = torch.Generator(device=device).manual_seed(args.seed)
 
     rows: list[dict] = []
+    total_pairs = len(samples) * len(timesteps)
+    pbar = tqdm(total=total_pairs, desc="vr-headroom", dynamic_ncols=True)
     for si, (stem, latent_key, npz_path, te_path) in enumerate(samples):
         x0, crossattn = load_pair(npz_path, latent_key, te_path, device, dtype)
         # x0: (C, H_lat, W_lat). x0^L = low-pass via the FEI kernel.
@@ -416,24 +460,24 @@ def main():
                 }
             )
             rows.append(metrics)
-            null_str = (
-                f" ρ²_null_hi={metrics['null__high_band__rho_sq_global']:.3f}"
-                if Zn_chunks
-                else ""
-            )
-            log.info(
-                f"  [{si+1}/{len(samples)} t={t:.2f}] "
-                f"ρ²_g={metrics['global__rho_sq_global']:.3f} "
-                f"ρ²_hi={metrics['high_band__rho_sq_global']:.3f} "
-                f"ρ²_lo={metrics['low_band__rho_sq_global']:.3f} "
-                f"λ_g={metrics['global__lambda_global']:+.3f}{null_str} "
-                f"fei_lo={fei[0]:.2f}"
-            )
+            postfix = {
+                "t": f"{t:.2f}",
+                "ρ²_g": f"{metrics['global__rho_sq_global']:.3f}",
+                "ρ²_hi": f"{metrics['high_band__rho_sq_global']:.3f}",
+                "ρ²_lo": f"{metrics['low_band__rho_sq_global']:.3f}",
+                "λ_g": f"{metrics['global__lambda_global']:+.3f}",
+                "Δpb": f"{metrics['perband__delta_vs_global']:+.4f}",
+            }
+            if Zn_chunks:
+                postfix["ρ²_null_hi"] = f"{metrics['null__high_band__rho_sq_global']:.3f}"
+            pbar.set_postfix(postfix)
+            pbar.update(1)
 
         del x0, x0_4d, x0_L_4d, crossattn
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    pbar.close()
 
     # Per-sample-t CSV.
     csv_path = run_dir / "per_sample_t.csv"
@@ -484,8 +528,14 @@ def main():
         "low_band__rho_sq_global__mid_t": agg("low_band__rho_sq_global", in_mid_t),
         "global__lambda_global": agg("global__lambda_global"),
         "high_band__lambda_global": agg("high_band__lambda_global"),
+        "low_band__lambda_global": agg("low_band__lambda_global"),
         "global__reduction_global_lambda": agg("global__reduction_global_lambda"),
         "high_band__reduction_global_lambda": agg("high_band__reduction_global_lambda"),
+        "perband__reduction_combined": agg("perband__reduction_combined"),
+        "perband__delta_vs_global": agg("perband__delta_vs_global"),
+        "perband__delta_vs_global__mid_t": agg("perband__delta_vs_global", in_mid_t),
+        "perband__lambda_low": agg("perband__lambda_low"),
+        "perband__lambda_high": agg("perband__lambda_high"),
     }
     if args.null_runs:
         summary["null__high_band__rho_sq_global__mid_t"] = agg(

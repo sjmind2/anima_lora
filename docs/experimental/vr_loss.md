@@ -133,7 +133,22 @@ confirmed `λ_global = −0.996 ± 0.002` across all 36 (sample, t) pairs at
 N=32, so the online estimator converges fast and a small β is well
 conditioned.
 
-Per-element λ and per-FEI-band `λ_k` are deferred to v2 / v3.
+Per-element λ (v2) and per-FEI-band `λ_k` (v3) were considered as refinements
+and **bench-falsified on Anima** by the perband-headroom run
+(`bench/fm_vr_headroom/results/20260514-1637-perband-headroom-tlora/`, n=24
+mid-t pairs, T-LoRA-merged vs base):
+
+- v2 (per-element λ): `reduction_per_elem − reduction_global` mean **+7.9e-6**
+  (= +0.00079% absolute).
+- v3 (per-band λ): `perband__reduction_combined − reduction_global` mean
+  **−3.4e-6** (= −0.00034%; sign is an estimator artifact — the within-band
+  optima of `(λ_low, λ_high)` aren't the joint optimum because the FEI bands
+  aren't statistically orthogonal across noise samples. The joint-optimum
+  upper bound is the per-element number, +7.9e-6).
+
+The scalar global λ is already at the asymptote (`reduction_global ≈ 0.9999`
+mid-t mean), so there is no remaining variance for a richer λ to cancel.
+v2 / v3 will not ship.
 
 ### Adapter-bypass reference
 
@@ -222,7 +237,7 @@ paper reports +0.96 HPSv3 from VR alone on AsymFLUX.2 klein
 (Table 3) but no wall-clock figure, so this has to be re-demonstrated for
 Anima — see "Validation status" below.
 
-in r=16, 2.56k steps, this took 60min, compared to 45min
+in r=16, 2.56k steps, this took 60min, compared to 50min
 
 ## Memory
 
@@ -237,7 +252,7 @@ can run VR — they just pay the ~+40% compute.
 |---|---|---|
 | `vr_loss_weight` | `0.0` | Gate **and** overall scale on the VR loss term. `0.0` disables (standard FM); `1.0` matches the paper recipe; smaller values let other losses contribute relatively more. |
 | `vr_fei_sigma_low_div` | `4.0` | Divisor for `σ_low = min(H_lat, W_lat) / div`. Matches the live FEI default. |
-| `vr_sigma_min` | `1e-3` | Defensive floor on `σ_t` in the `1/σ_t` factor (AsymFlow §6.1). Not consumed by the v1 loss handler (we work in velocity-target form so `σ_t` cancels) but kept on the parser for v2's per-element-λ extension. |
+| `vr_sigma_min` | `1e-3` | Defensive floor on `σ_t` in the `1/σ_t` factor (AsymFlow §6.1). Not consumed by the v1 loss handler (we work in velocity-target form so `σ_t` cancels). The parser flag is kept as a no-op for compatibility; the v2 extension it was reserved for has been falsified (see Validation status). |
 | `vr_lambda_beta` | `0.01` | EMA rate on `λ`. `λ_ema ← (1−β)·λ_ema + β·λ_batch`. |
 
 ## Validation status
@@ -246,10 +261,11 @@ can run VR — they just pay the ~+40% compute.
 |---|---|---|---|
 | v0 | Frozen-ref + decorrelated-ε-null headroom bench | `bench/fm_vr_headroom/results/20260514-1300-tlora-vs-base/` | ✅ HEADROOM — `ρ²_high_band` mid-t median **0.998**, null gap **+0.988**, `λ_global` **−0.996 ± 0.002**, flat from t=0.10–0.85 |
 | v0.5 | Re-run with `anima-preview2` as trainable to bound the trainable-similarity bias | (optional) | Not blocking v1 |
+| v0.7 | Per-element / per-FEI-band λ feasibility on the same headroom rig | `bench/fm_vr_headroom/results/20260514-1637-perband-headroom-tlora/` | ❌ **DEAD** — v2 (per-element) `reduction_per_elem − reduction_global` mid-t mean **+7.9e-6**; v3 (per-band) `perband__delta_vs_global` mid-t mean **−3.4e-6**. Scalar λ already at the asymptote (`reduction_global` ≈ 0.9999); no remaining variance for a richer λ to cancel. |
 | v1 | Wire VR loss into `train.py` + `library/training/losses.py` | **this doc** | ✅ Compiles, loss-handler unit-checked, pre-existing tests green (`test_loss_registry.py`, `test_config.py`, `test_smoke.py`) |
-| v1.5 | Stage 1 A/B: standard FM vs VR on a short LoRA run | `bench/fm_vr_headroom/training_ab.py` (not yet written) | Pending — HPSv3 ≥ +0.02 at fixed step OR ≥ +0.01 at fixed wall-clock, robust across two prompt subsets |
-| v2 | EMA frozen ref, per-element λ, LPIPS correction | — | Conditional on v1.5 quality regression at long step counts |
-| v3 | Per-band `λ_k` via `_fera_fecl_bands` | — | Conditional on v1.5 showing FEI-bin-dependent gain |
+| v1.5 | Stage 1 A/B: standard FM vs VR on a short LoRA run | eyeball A/B at r=16, 2.56k steps | ✅ VR buys the quality win at the +40% step-cost overhead — verified by sample inspection. Quantitative HPSv3 / VQA pass still optional. |
+| v2 | EMA frozen ref, per-element λ, LPIPS correction | — | ❌ Falsified by v0.7. Not pursuing. |
+| v3 | Per-band `λ_k` via `_fera_fecl_bands` | — | ❌ Falsified by v0.7. Not pursuing. |
 
 ## Risks
 
@@ -266,9 +282,11 @@ can run VR — they just pay the ~+40% compute.
 2. **Bias risk.** `E[z] = (x_0^L − E[ref_pred^L | x_t^L])` is non-zero because
    the reference is biased. With a fixed reference (always base DiT) the
    bias is constant in `λ`, so the variance minimum is still at
-   `λ* = −Cov/Var`, but the *expected* loss differs from standard FM. Paper
-   resolves with an LPIPS perceptual correction term — v1 skips it. v2 may
-   need it if Stage 1 shows long-step quality regression.
+   `λ* = −Cov/Var`, but the *expected* loss differs from standard FM. The
+   paper resolves with an LPIPS perceptual correction term — v1 skips it,
+   and v1.5 confirmed sample quality holds at r=16 / 2.56k steps without it.
+   If a longer-step quality regression ever surfaces, the LPIPS term is the
+   first thing to try — not richer λ (v2/v3 are falsified).
 3. **Interaction with other losses.** REPA / FECL / functional / soft-tokens
    all stay active and unchanged; only `flow_match` is swapped for
    `flow_matching_vr`. If REPA or FECL silently depended on the FM term's
@@ -289,22 +307,24 @@ can run VR — they just pay the ~+40% compute.
 ## Open questions
 
 - **Reference granularity** — v1 always reads "pure base" (multiplier=0
-  on every step). A v2 variant could use the *current* trainable adapter
-  at some scale (e.g. multiplier=0.5 or the resumed multiplier) as the
+  on every step). A variant could use the *current* trainable adapter at
+  some scale (e.g. multiplier=0.5 or the resumed multiplier) as the
   control variate — that's a one-line change to the `set_multiplier` call,
   but needs thinking about whether the residual `z` stays decorrelated
   from the gradient, since the bypass forward now shares a non-trivial
   function with the gradient forward. v1's pure-base choice keeps `z`
-  cleanly independent of the trainable LoRA's current state.
-- **Multi-band schedule** — single global `λ` vs `K=3` bands using
-  `_fera_fecl_bands`. The bench reports `low_band__` / `high_band__` ρ²
-  already; if Stage 1 shows FEI-bin-dependent gain we promote to per-band.
+  cleanly independent of the trainable LoRA's current state. Still open;
+  no measured signal that it matters.
+- ~~**Multi-band schedule**~~ — closed by v0.7. Per-FEI-band λ recovers
+  −3.4e-6 reduction over global (estimator artifact; true joint upper-
+  bounded by per-element +7.9e-6). Scalar λ stays.
 - **CFG-dropout interaction** — v1 uses the *same* (possibly dropped)
   crossattn_emb for both forwards in a step, so cancellation is preserved.
 - **σ_min clamping** — paper uses `σ_min = 0.04` on the `1/σ_t` factor.
   v1 works in velocity-target form (`y = u_pred − target`), where `σ_t`
-  algebraically cancels, so no clamp is needed. `--vr_sigma_min` is kept on
-  the parser for v2's per-element-λ extension.
+  algebraically cancels, so no clamp is needed. `--vr_sigma_min` is parked
+  as a no-op (v2, the per-element-λ extension it was reserved for, was
+  falsified by v0.7).
 
 ## References
 
