@@ -691,6 +691,7 @@ def do_sample(
     guidance_scale: float = 1.0,
     flow_shift: float = 3.0,
     neg_crossattn_emb: Optional[torch.Tensor] = None,
+    show_progress: bool = True,
 ) -> torch.Tensor:
     """Generate a sample using Euler discrete sampling for rectified flow.
 
@@ -741,7 +742,7 @@ def do_sample(
 
     use_cfg = guidance_scale > 1.0 and neg_crossattn_emb is not None
 
-    for i in tqdm(range(steps), desc="Sampling"):
+    for i in tqdm(range(steps), desc="Sampling", disable=not show_progress):
         sigma = sigmas[i]
         t = sigma.unsqueeze(0)  # (1,)
 
@@ -1040,6 +1041,7 @@ def sample_image_to_tensor(
     guidance_scale: float = 4.0,
     flow_shift: float = 3.0,
     seed: Optional[int] = None,
+    show_progress: bool = True,
 ) -> torch.Tensor:
     """Sample one image and return the decoded pixel tensor in ``[-1, 1]``.
 
@@ -1070,6 +1072,7 @@ def sample_image_to_tensor(
         guidance_scale,
         flow_shift,
         neg_crossattn_emb,
+        show_progress=show_progress,
     )
 
     gc.collect()

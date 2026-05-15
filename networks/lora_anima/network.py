@@ -224,10 +224,6 @@ class LoRANetwork(torch.nn.Module):
         self._hydra_router_hits: int = 0
         self._hydra_router_misses: int = 0
         self._last_sigma: Optional[torch.Tensor] = None
-        # Per-expert pick fraction across hydra modules on the most recent
-        # warmup step (random or best-by-grad path). None outside the warmup
-        # window — the metric in metrics.py drops out of the dashboard then.
-        self._last_expert_warmup_picks: Optional[torch.Tensor] = None
         # Hydra up-weight grad-norm snapshot (T-LoRA / σ-bucket conflict
         # diagnostic). Filled by ``capture_up_grad_stats`` between backward
         # and ``optimizer.zero_grad``; consumed by the ``hydra_up_grad``
@@ -239,6 +235,10 @@ class LoRANetwork(torch.nn.Module):
         # postfix and the metrics layer call it on log steps. Cleared in
         # ``clear_step_caches`` so the next forward recomputes.
         self._router_stats_cache: Optional[Dict[str, object]] = None
+        # Separate cache for the chimera dual-pool router stats — different
+        # reduction (mean gates per pool, not argmax-histogram) and different
+        # entropy normalization (per-pool log(K_pool)). Same lifecycle.
+        self._chimera_router_stats_cache: Optional[Dict[str, object]] = None
 
         # Local aliases for the closure body and the post-closure ReFT block.
         # Reading via `cfg.foo` works too; aliases just keep the diff small.
@@ -555,6 +555,14 @@ class LoRANetwork(torch.nn.Module):
                     if self._use_global_router_for_hydra:
                         extra_kwargs["use_global_router"] = True
                         self._global_router_hits += 1
+                    if cfg.use_chimera_hydra:
+                        # Dual-pool runtime form (load path from a distilled
+                        # chimera checkpoint — see factory.py is_chimera_hydra
+                        # branch). HydraLoRAModule narrows its router to K_c
+                        # outputs and registers _freq_routing_weights for the
+                        # network-level FreqRouter broadcast. σ/FEI feature
+                        # dims must stay 0 here — FreqRouter owns those axes.
+                        extra_kwargs["num_experts_content"] = cfg.num_experts_content
                 elif effective_module_class == StackedExpertsLoRAModule:
                     # Independent-A (FeRA). Gates arrive via the network-level
                     # ``GlobalRouter`` through the shared ``_routing_weights``
@@ -1466,6 +1474,7 @@ class LoRANetwork(torch.nn.Module):
         """
         self._last_sigma = None
         self._router_stats_cache = None
+        self._chimera_router_stats_cache = None
         for lora in self.unet_loras + self.text_encoder_loras:
             if hasattr(lora, "_last_gate"):
                 lora._last_gate = None
@@ -1499,129 +1508,6 @@ class LoRANetwork(torch.nn.Module):
             return
         warmup_steps = int(max_train_steps * ratio)
         self._balance_loss_weight = 0.0 if global_step < warmup_steps else target
-
-    def step_expert_warmup(self, global_step: int, max_train_steps: int) -> None:
-        """Per-step random expert-gradient masking during the warmup window.
-
-        Forward stays full MoE (every expert contributes via the learned gate),
-        but only one randomly-sampled expert per module receives gradient this
-        step. Breaks the zero-init expert symmetry without ever training an
-        expert in isolation — each expert always sees the other experts'
-        contribution when it updates. See ``docs/methods/hydra-lora.md``
-        §Expert-warmup for motivation.
-
-        Expert index is sampled independently per module so that different
-        modules can route the same sample to different experts. After the
-        warmup window the mask is filled with ones, so the unconditional
-        ``up*m + up.detach()*(1-m)`` term in the adapter forward collapses to
-        identity — every expert receives gradient normally.
-
-        State lives entirely in the ``_expert_grad_mask`` buffer; dynamo
-        treats buffer mutations as dynamic (no recompile per step and no
-        recompile at the warmup→post-warmup transition).
-        """
-        if self.cfg.expert_warmup_ratio <= 0.0 or max_train_steps <= 0:
-            return
-        warmup_steps = int(max_train_steps * self.cfg.expert_warmup_ratio)
-        in_warmup = global_step < warmup_steps
-        k = self.cfg.expert_warmup_k
-        pick_counts: Optional[torch.Tensor] = None
-        n_modules = 0
-        for lora in self.unet_loras + self.text_encoder_loras:
-            if not hasattr(lora, "_expert_grad_mask"):
-                continue
-            mask = lora._expert_grad_mask
-            if in_warmup:
-                k_eff = max(1, min(k, lora.num_experts))
-                if k_eff >= lora.num_experts:
-                    mask.fill_(1.0)
-                else:
-                    idx = torch.randperm(lora.num_experts, device=mask.device)[:k_eff]
-                    mask.zero_()
-                    mask[idx] = 1.0
-                if pick_counts is None or pick_counts.numel() < lora.num_experts:
-                    new = torch.zeros(lora.num_experts, device=mask.device)
-                    if pick_counts is not None:
-                        new[: pick_counts.numel()] = pick_counts
-                    pick_counts = new
-                pick_counts[: lora.num_experts] += mask[: lora.num_experts].detach()
-                n_modules += 1
-            else:
-                mask.fill_(1.0)
-        if in_warmup and pick_counts is not None and n_modules > 0:
-            self._last_expert_warmup_picks = pick_counts / n_modules
-        else:
-            self._last_expert_warmup_picks = None
-
-    def step_expert_best_warmup_post_backward(
-        self, global_step: int, max_train_steps: int
-    ) -> None:
-        """Greedy counterpart to ``step_expert_warmup``: during the warmup
-        window, keep gradient only on the top-k experts ranked by per-expert
-        grad-norm; zero the rest. Forward stays full MoE (mask all-ones), so
-        every expert produces a proper gradient — we then drop the experts
-        whose update would do least to lower loss this step. Score is
-        ``‖∂L/∂P_e‖_F`` where ``P_e`` is the per-expert parameter
-        (``lora_up_weight[e]`` for plain Hydra, ``S_p[e]`` for OrthoHydra);
-        grad-norm is a first-order proxy for the loss decrease an SGD step on
-        that expert would buy.
-
-        Must be called AFTER backward (so .grad is populated) and BEFORE
-        optimizer.step. Outside the warmup window this is a no-op.
-
-        Mutually exclusive with ``expert_warmup_ratio``: that path zeros the
-        forward mask so non-selected experts have zero grad anyway, which
-        would make this top-k selection redundant. ``factory.py`` warns if
-        both are set; behaviorally the random path's pre-forward masking
-        wins because it produces zero grads that this method then sees.
-        """
-        ratio = self.cfg.expert_best_warmup_ratio
-        if ratio <= 0.0 or max_train_steps <= 0:
-            return
-        warmup_steps = int(max_train_steps * ratio)
-        if global_step >= warmup_steps:
-            self._last_expert_warmup_picks = None
-            return
-        k = self.cfg.expert_warmup_k
-        pick_counts: Optional[torch.Tensor] = None
-        n_modules = 0
-        for lora in self.unet_loras + self.text_encoder_loras:
-            param = None
-            if hasattr(lora, "lora_up_weight") and lora.lora_up_weight.dim() == 3:
-                param = lora.lora_up_weight
-            elif hasattr(lora, "S_p") and lora.S_p.dim() == 3:
-                param = lora.S_p
-            if param is None or param.grad is None:
-                continue
-            E = param.shape[0]
-            k_eff = max(1, min(k, E))
-            if k_eff >= E:
-                continue
-            norms = param.grad.detach().reshape(E, -1).norm(dim=-1)
-            topk = torch.topk(norms, k_eff).indices
-            keep = torch.zeros(E, dtype=param.grad.dtype, device=param.grad.device)
-            keep[topk] = 1.0
-            param.grad.mul_(keep.view(E, *([1] * (param.dim() - 1))))
-            if pick_counts is None or pick_counts.numel() < E:
-                new = torch.zeros(E, device=keep.device)
-                if pick_counts is not None:
-                    new[: pick_counts.numel()] = pick_counts
-                pick_counts = new
-            pick_counts[:E] += keep.float()
-            n_modules += 1
-        if pick_counts is not None and n_modules > 0:
-            self._last_expert_warmup_picks = pick_counts / n_modules
-        else:
-            self._last_expert_warmup_picks = None
-
-    def get_expert_warmup_pick_stats(self) -> Optional[List[float]]:
-        """Per-expert pick fraction (0.0–1.0) across hydra modules on the most
-        recent warmup step. None when not in warmup. ``metrics.py`` consumes
-        this and emits ``hydra/expert_warmup_pick/{i}`` scalars."""
-        picks = self._last_expert_warmup_picks
-        if picks is None:
-            return None
-        return picks.detach().cpu().tolist()
 
     @staticmethod
     def _switch_balance(gate: torch.Tensor) -> torch.Tensor:
@@ -1778,7 +1664,20 @@ class LoRANetwork(torch.nn.Module):
         across modules. Returns None when no hydra module has cached a gate
         this step. Thin wrapper over :meth:`get_router_stats` kept for the
         progress-bar postfix path; prefer ``get_router_stats`` for logging.
+
+        Chimera path returns the simple mean of the per-pool entropies
+        (each already normalized to [0, 1] by ``log(K_pool)``) so the
+        postfix shows a sensible scalar; the legacy single-vector entropy
+        would read >1.0 on chimera (concat sums to 2, not 1).
         """
+        if getattr(self, "_use_chimera_hydra", False):
+            cstats = self.get_chimera_router_stats()
+            if not cstats:
+                return None
+            parts = [cstats[k] for k in ("content_entropy", "freq_entropy") if k in cstats]
+            if not parts:
+                return None
+            return sum(parts) / len(parts)
         stats = self.get_router_stats()
         return stats.get("entropy_mean") if stats else None
 
@@ -1922,6 +1821,97 @@ class LoRANetwork(torch.nn.Module):
             out["bucket_counts"] = bucket_counts_t.cpu().tolist()
 
         self._router_stats_cache = out
+        return out
+
+    def get_chimera_router_stats(
+        self,
+    ) -> Dict[str, Union[float, List[float]]]:
+        """Per-pool router diagnostics for the chimera dual-pool routing.
+
+        Chimera's ``_last_gate`` is ``cat([π_c, π_f])`` of shape
+        ``(B, K_c + K_f)`` — two independent softmaxes glued together, so the
+        whole vector sums to 2 and ``argmax`` across the concat is doubly
+        misleading: it (a) only ever names one slot per sample so the
+        per-pool view collapses to a single histogram summing to 1, and
+        (b) biases toward whichever pool happens to have higher initialization
+        variance (FreqRouter's ``init_std=0.1`` vs the content router's 0.01).
+        This routine reports each pool independently, using **mean gates**
+        (same approach as ``fera/expert_usage`` — see
+        ``[[project_fera_expert_usage_mean_gates]]``):
+
+          * Content pool: aggregate ``π_c = gate[..., :K_c]`` across every
+            chimera module that cached a gate this step. Mean over modules
+            then over batch gives the per-content-expert usage vector
+            ``(K_c,)``, which sums to ~1.
+          * Freq pool: the FreqRouter broadcasts the same ``π_f`` to every
+            module, so we read it once from ``freq_router._last_gates``
+            (shape ``(B, K_f)``) — no module aggregation needed. Mean over
+            batch gives the per-freq-expert usage vector ``(K_f,)``.
+
+        Returned entropy / margin are normalized per pool: entropy by
+        ``log(K_pool)`` (so [0, 1] is the right range — the legacy
+        ``hydra/router_entropy`` would read >1.0 on chimera because it
+        divided the sum-to-2 vector's entropy by ``log(E)``, not
+        ``log(2·K_pool)``).
+
+        Empty dict on non-chimera networks or when no gate has been cached
+        this step.
+        """
+        if not getattr(self, "_use_chimera_hydra", False):
+            return {}
+        if self._chimera_router_stats_cache is not None:
+            return self._chimera_router_stats_cache
+
+        out: Dict[str, Union[float, List[float]]] = {}
+        K_c_default = int(getattr(self.cfg, "num_experts_content", 0))
+
+        # --- Content pool: aggregate π_c across modules ----------------------
+        pi_c_list: List[torch.Tensor] = []
+        K_c_ref: Optional[int] = None
+        for lora in self.unet_loras + self.text_encoder_loras:
+            gate = getattr(lora, "_last_gate", None)
+            if gate is None:
+                continue
+            K_c = int(getattr(lora, "num_experts_content", K_c_default))
+            if K_c <= 0:
+                continue
+            if K_c_ref is None:
+                K_c_ref = K_c
+            elif K_c != K_c_ref:
+                continue
+            pi_c_list.append(gate[..., :K_c])
+
+        if pi_c_list and K_c_ref is not None and K_c_ref > 1:
+            pi_c = torch.stack(pi_c_list, dim=0).float().clamp_min(1e-12)  # (M, B, K_c)
+            norm_c = math.log(K_c_ref)
+            H_c_per_mod = -(pi_c * pi_c.log()).sum(dim=-1).mean(dim=-1) / norm_c
+            top2_c = pi_c.topk(2, dim=-1).values
+            margin_c_per_mod = (top2_c[..., 0] - top2_c[..., 1]).mean(dim=-1)
+            usage_c = pi_c.mean(dim=(0, 1))  # (K_c,)
+            summary_c = torch.stack(
+                [H_c_per_mod.mean().detach(), margin_c_per_mod.mean().detach()]
+            ).cpu()
+            out["content_entropy"] = float(summary_c[0])
+            out["content_margin"] = float(summary_c[1])
+            out["content_usage"] = usage_c.detach().cpu().tolist()
+
+        # --- Freq pool: single broadcast tensor from FreqRouter --------------
+        fr = getattr(self, "freq_router", None)
+        pi_f = fr._last_gates if fr is not None else None
+        if pi_f is not None and pi_f.dim() == 2 and pi_f.shape[-1] > 1:
+            K_f = int(pi_f.shape[-1])
+            pf = pi_f.float().clamp_min(1e-12)
+            norm_f = math.log(K_f)
+            H_f = (-(pf * pf.log()).sum(dim=-1).mean() / norm_f).detach()
+            top2_f = pf.topk(2, dim=-1).values
+            margin_f = (top2_f[..., 0] - top2_f[..., 1]).mean().detach()
+            usage_f = pf.mean(dim=0).detach()
+            summary_f = torch.stack([H_f, margin_f]).cpu()
+            out["freq_entropy"] = float(summary_f[0])
+            out["freq_margin"] = float(summary_f[1])
+            out["freq_usage"] = usage_f.cpu().tolist()
+
+        self._chimera_router_stats_cache = out
         return out
 
     def capture_up_grad_stats(self) -> None:
@@ -2101,11 +2091,10 @@ class LoRANetwork(torch.nn.Module):
     def metrics(self, ctx: MetricContext) -> dict[str, float]:
         """Emit log-step keys owned by the LoRA network.
 
-        Covers ortho regularization, hydra balance loss, router stats, hydra
-        up-weight grad-norm diagnostics, and the per-expert warmup pick
-        distribution. Each block returns nothing if its driver is off
-        (``_ortho_reg_weight == 0``, ``_use_hydra == False``, etc.) so the
-        cost on inactive paths is one attr check.
+        Covers ortho regularization, hydra balance loss, router stats, and
+        hydra up-weight grad-norm diagnostics. Each block returns nothing
+        if its driver is off (``_ortho_reg_weight == 0``, ``_use_hydra ==
+        False``, etc.) so the cost on inactive paths is one attr check.
         """
         out: dict[str, float] = {}
 
@@ -2130,21 +2119,39 @@ class LoRANetwork(torch.nn.Module):
         if not getattr(self, "_use_hydra", False):
             return out
 
-        # Router diagnostics.
-        stats = self.get_router_stats()
-        if stats:
-            out["hydra/router_entropy"] = float(stats["entropy_mean"])
-            out["hydra/router_entropy_p05"] = float(stats["entropy_p05"])
-            out["hydra/router_entropy_p50"] = float(stats["entropy_p50"])
-            out["hydra/router_entropy_p95"] = float(stats["entropy_p95"])
-            out["hydra/router_margin"] = float(stats["margin_mean"])
-            for i, v in enumerate(stats.get("expert_usage", [])):
-                out[f"hydra/expert_usage/{i}"] = float(v)
-            for b, row in enumerate(stats.get("expert_usage_per_bucket", [])):
-                for i, v in enumerate(row):
-                    out[f"hydra/expert_usage_b{b}/{i}"] = float(v)
-            for b, c in enumerate(stats.get("bucket_counts", [])):
-                out[f"hydra/bucket_count/{b}"] = float(c)
+        # Router diagnostics. Chimera takes a different path because its
+        # ``_last_gate`` is a concat of two independent softmaxes, so the
+        # argmax-histogram aggregation under ``hydra/*`` is doubly misleading
+        # (sums to 1 instead of 2; biased toward whichever pool has higher
+        # init variance — see ``get_chimera_router_stats`` docstring).
+        if getattr(self, "_use_chimera_hydra", False):
+            cstats = self.get_chimera_router_stats()
+            if cstats:
+                if "content_entropy" in cstats:
+                    out["chimera/content_entropy"] = float(cstats["content_entropy"])
+                    out["chimera/content_margin"] = float(cstats["content_margin"])
+                    for i, v in enumerate(cstats.get("content_usage", [])):
+                        out[f"chimera/content_usage/{i}"] = float(v)
+                if "freq_entropy" in cstats:
+                    out["chimera/freq_entropy"] = float(cstats["freq_entropy"])
+                    out["chimera/freq_margin"] = float(cstats["freq_margin"])
+                    for i, v in enumerate(cstats.get("freq_usage", [])):
+                        out[f"chimera/freq_usage/{i}"] = float(v)
+        else:
+            stats = self.get_router_stats()
+            if stats:
+                out["hydra/router_entropy"] = float(stats["entropy_mean"])
+                out["hydra/router_entropy_p05"] = float(stats["entropy_p05"])
+                out["hydra/router_entropy_p50"] = float(stats["entropy_p50"])
+                out["hydra/router_entropy_p95"] = float(stats["entropy_p95"])
+                out["hydra/router_margin"] = float(stats["margin_mean"])
+                for i, v in enumerate(stats.get("expert_usage", [])):
+                    out[f"hydra/expert_usage/{i}"] = float(v)
+                for b, row in enumerate(stats.get("expert_usage_per_bucket", [])):
+                    for i, v in enumerate(row):
+                        out[f"hydra/expert_usage_b{b}/{i}"] = float(v)
+                for b, c in enumerate(stats.get("bucket_counts", [])):
+                    out[f"hydra/bucket_count/{b}"] = float(c)
 
         # Hydra up-weight grad norms by rank region and σ-band.
         up = self.get_up_grad_stats()
@@ -2181,12 +2188,6 @@ class LoRANetwork(torch.nn.Module):
                     ) ** 0.5 / (float(bv) ** 0.5 + eps)
             if "sp_total_band" in up:
                 _emit_per_band("sp_total", up["sp_total_band"])
-
-        # Per-expert pick distribution during expert warmup.
-        picks = self.get_expert_warmup_pick_stats()
-        if picks is not None:
-            for i, v in enumerate(picks):
-                out[f"hydra/expert_warmup_pick/{i}"] = float(v)
 
         # GlobalRouter stats — for stacked-experts + per-network routing
         # (plan2 §three-axis-config). Mirrors the per-Linear hydra keys but
@@ -2368,6 +2369,17 @@ class LoRANetwork(torch.nn.Module):
                 list(self.cfg.reg_lrs.items()) if self.cfg.reg_lrs is not None else []
             )
             router_scale = float(self.cfg.router_lr_scale)
+            # Chimera content-router multiplier (stacks on router_scale). The
+            # per-Linear ``router.*`` group below collects chimera's content
+            # router params (chimera modules own the only per-Linear
+            # ``router.*`` in their network). Off-by-default for non-chimera
+            # runs so plain Hydra is unaffected.
+            content_router_scale = (
+                float(self.cfg.content_router_lr_scale)
+                if getattr(self.cfg, "use_chimera_hydra", False)
+                else 1.0
+            )
+            router_lr_mult = router_scale * content_router_scale
 
             def _is_router_param(pname: str) -> bool:
                 # named_parameters() yields top-level names like "router.weight"
@@ -2441,7 +2453,7 @@ class LoRANetwork(torch.nn.Module):
                             else reg_lr
                         )
                     elif key == "router":
-                        param_data["lr"] = reg_lr * router_scale
+                        param_data["lr"] = reg_lr * router_lr_mult
                     else:
                         param_data["lr"] = reg_lr
                     if (
@@ -2469,7 +2481,7 @@ class LoRANetwork(torch.nn.Module):
                     if key == "plus":
                         param_data["lr"] = lr * loraplus_ratio
                     elif key == "router":
-                        param_data["lr"] = lr * router_scale
+                        param_data["lr"] = lr * router_lr_mult
                     else:
                         param_data["lr"] = lr
                 if (
@@ -2584,16 +2596,18 @@ class LoRANetwork(torch.nn.Module):
             fr_params = list(self.freq_router.parameters())
             if len(fr_params) > 0:
                 router_scale = float(self.cfg.router_lr_scale)
+                freq_scale = float(self.cfg.freq_router_lr_scale)
                 base_lr = unet_lr if unet_lr is not None else default_lr
                 if base_lr is None or base_lr == 0:
                     logger.info("FreqRouter: no base LR, skipping param group")
                 else:
-                    fr_lr = float(base_lr) * router_scale
+                    fr_lr = float(base_lr) * router_scale * freq_scale
                     all_params.append({"params": fr_params, "lr": fr_lr})
                     lr_descriptions.append("chimera freq router")
                     logger.info(
                         f"ChimeraHydra FreqRouter param group: lr={fr_lr:.2e} "
-                        f"({router_scale}x of unet_lr={base_lr})"
+                        f"({router_scale}x router_lr_scale × {freq_scale}x "
+                        f"freq_router_lr_scale of unet_lr={base_lr})"
                     )
 
         return all_params, lr_descriptions

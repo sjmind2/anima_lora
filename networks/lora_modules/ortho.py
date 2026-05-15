@@ -163,9 +163,9 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
     Disjoint subspaces make ``score_e`` genuinely different from step 0.
 
     Fallback when ``min(out, in) < E*r``: ``P_bases`` replicates the top-r
-    slice E times (warning logged). All experts start identical and rely on
-    ``expert_warmup_ratio`` for symmetry breaking — don't run narrow-layer
-    Hydra with ``expert_warmup_ratio=0``.
+    slice E times (warning logged). All experts start identical — narrow-
+    layer OrthoHydra relies entirely on the per-expert ``S_p`` rotations
+    diverging during training; if the router collapses they never will.
     """
 
     def __init__(
@@ -222,7 +222,7 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
             _logging.getLogger(__name__).warning(
                 f"{lora_name}: min(out={out_dim}, in={in_dim})={max_cols} < "
                 f"num_experts*lora_dim={target_cols}; falling back to shared "
-                "P_basis (experts rely on expert_warmup_ratio for differentiation)."
+                "P_basis (experts start identical, rely on S_p divergence)."
             )
             P_shared = U[:, :lora_dim].clone().contiguous()
             P_bases_init = (
@@ -236,8 +236,8 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
 
         self.S_q = torch.nn.Parameter(torch.zeros(lora_dim, lora_dim))
         # Per-expert P rotations. With disjoint P_bases zero-init still yields
-        # E distinct P_eff slices; in the narrow-layer fallback,
-        # expert_warmup_ratio is the only symmetry-breaker.
+        # E distinct P_eff slices; in the narrow-layer fallback all experts
+        # start identical and must diverge through training-time updates.
         self.S_p = torch.nn.Parameter(torch.zeros(num_experts, lora_dim, lora_dim))
         self.lambda_layer = torch.nn.Parameter(torch.zeros(1, lora_dim))
 
@@ -278,13 +278,6 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
             _register_sigma_band_partition(
                 self, num_experts, num_sigma_buckets, sigma_bucket_boundaries
             )
-        # Per-expert grad-scale mask gating S_p (per-expert P rotations).
-        # See HydraLoRAModule.__init__ for the unconditional-branch rationale.
-        self.register_buffer(
-            "_expert_grad_mask",
-            torch.ones(num_experts, dtype=torch.float32),
-            persistent=False,
-        )
 
         self.register_buffer(
             "_eye_r",
@@ -374,15 +367,9 @@ class OrthoHydraLoRAExpModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        # Expert-warmup mask folded into S_p_eff so it joins the batched solve
-        # (see HydraLoRAModule.forward for the autograd-equivalent unconditional
-        # branch).
-        expert_mask = self._expert_grad_mask.to(self.S_p.dtype).view(-1, 1, 1)
-        S_p_eff = self.S_p * expert_mask + self.S_p.detach() * (1.0 - expert_mask)
-
-        # Stack S_q with S_p_eff into one (E+1, r, r) solve — single LU+TRSM
+        # Stack S_q with S_p into one (E+1, r, r) solve — single LU+TRSM
         # launch covers shared Q rotation and all per-expert P rotations.
-        skew = torch.cat([self.S_q.unsqueeze(0), S_p_eff], dim=0)
+        skew = torch.cat([self.S_q.unsqueeze(0), self.S_p], dim=0)
         A = skew - skew.transpose(-2, -1)
         R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
         R_q = R[0]

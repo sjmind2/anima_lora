@@ -42,7 +42,7 @@ Use the **Anima Adapter Loader** node (`custom_nodes/comfyui-hydralora/`), which
 
 The `OrthoHydraLoRAExpModule` default (both `use_ortho = true` and `use_hydra = true`) is the structural deadlock fix described in `docs/structure/hydralora.md` §5. One operational detail worth knowing:
 
-**Fallback.** If `min(out_dim, in_dim) < num_experts · lora_dim` the disjoint SVD-slice partition can't fit, so `P_bases` degenerates to the legacy shared `P_basis` replicated `E` times (with a warning in the log). In that case all experts start identical (shared basis + zero `S_p` + zero `lambda_layer`); `expert_warmup_ratio` is the only symmetry-breaker — narrow-layer Hydra must not run with `expert_warmup_ratio = 0`. Implementation: `networks/lora_modules/ortho.py:OrthoHydraLoRAExpModule`.
+**Fallback.** If `min(out_dim, in_dim) < num_experts · lora_dim` the disjoint SVD-slice partition can't fit, so `P_bases` degenerates to the legacy shared `P_basis` replicated `E` times (with a warning in the log). In that case all experts start identical (shared basis + zero `S_p` + zero `lambda_layer`) and must diverge through training-time updates to `S_p` — if the router collapses they never will. Prefer to size `num_experts` so the partition fits. Implementation: `networks/lora_modules/ortho.py:OrthoHydraLoRAExpModule`.
 
 ## Composition with other variants
 

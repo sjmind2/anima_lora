@@ -67,7 +67,6 @@ def _make_minimal_stacked_experts_network(
     net.use_sigma_router = False
     net._channel_scale_misses = []
     net._channel_scale_hits = 0
-    net._last_expert_warmup_picks = None
     net._last_up_grad_stats = {}
     net._use_hydra = True
     net._balance_loss_weight = 0.0
@@ -397,7 +396,6 @@ def _make_minimal_hydra_global_router_network(
     net.use_sigma_router = False
     net._channel_scale_misses = []
     net._channel_scale_hits = 0
-    net._last_expert_warmup_picks = None
     net._last_up_grad_stats = {}
     net._use_hydra = True
     net._balance_loss_weight = 0.0

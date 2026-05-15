@@ -160,13 +160,8 @@ class ChimeraHydraLoRAExpModule(OrthoHydraLoRAExpModule):
         if self._skip_module():
             return org_forwarded
 
-        # Expert-warmup mask folded into S_p_eff so it joins the batched solve
-        # (autograd-equivalent unconditional branch — see HydraLoRAModule).
-        expert_mask = self._expert_grad_mask.to(self.S_p.dtype).view(-1, 1, 1)
-        S_p_eff = self.S_p * expert_mask + self.S_p.detach() * (1.0 - expert_mask)
-
         # One batched (E+1, r, r) solve covers R_q + all R_p[e].
-        skew = torch.cat([self.S_q.unsqueeze(0), S_p_eff], dim=0)
+        skew = torch.cat([self.S_q.unsqueeze(0), self.S_p], dim=0)
         A = skew - skew.transpose(-2, -1)
         R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
         R_q = R[0]

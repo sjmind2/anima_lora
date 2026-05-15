@@ -23,8 +23,10 @@ make lora-gui GUI_PRESETS=chimera_hydra
 python tasks.py lora-gui chimera_hydra
 
 # Inference against the latest *_chimera.safetensors —
-# the chimera-native format preserves the Cayley keys, so reload
-# rebuilds the same dual-pool network for chimera-native inference.
+# save distills the Cayley parameterization to the Hydra-MoE layout
+# (shared lora_down + per-expert lora_ups.{i}, q/k/v defused) plus the
+# top-level FreqRouter block; load rebuilds a HydraLoRAModule with
+# num_experts_content > 0 for the dual-pool runtime form.
 make test
 ```
 
@@ -108,12 +110,14 @@ The three-axis routing surface (plan2.md §three-axis-config) names the existing
 
 | File | Role |
 |------|------|
-| `networks/lora_modules/chimera.py` | `ChimeraHydraLoRAExpModule` — subclass of `OrthoHydraLoRAExpModule`. Owns content router (`Linear(r → K_c)` with small-std init), holds the broadcast `_freq_routing_weights` buffer (uniform 1/K_f placeholder, overwritten by the network), and overrides `forward` to issue the per-branch two-bmm composition. `_compute_gate` constructs `cat([π_c, π_f])`. |
-| `networks/lora_anima/network.py` | `FreqRouter` (Linear → SiLU → Linear → softmax/τ). `LoRANetwork.__init__` builds one when `cfg.use_chimera_hydra=True` and at least one chimera module was constructed; `_wire_shared_freq_routing_buffers` aliases every chimera module's buffer to a single network-level tensor; `set_fei` fires the router on `concat(FEI, σ-features)` and broadcasts `π_f` via `set_freq_routing_weights` (direct slot assignment — preserves grad_fn). `_get_chimera_balance_loss` splits each module's gate at `K_c` and accumulates two independent Switch losses weighted by `_balance_w_content` / `_balance_w_freq`. |
+| `networks/lora_modules/chimera.py` | `ChimeraHydraLoRAExpModule` (training-only) — subclass of `OrthoHydraLoRAExpModule`. Owns content router (`Linear(r → K_c)` with small-std init), holds the broadcast `_freq_routing_weights` buffer (uniform 1/K_f placeholder, overwritten by the network), and overrides `forward` to issue the per-branch two-bmm composition. `_compute_gate` constructs `cat([π_c, π_f])`. Save distills its Cayley params away; load goes through `HydraLoRAModule` instead, so this class is never instantiated at inference / resume. |
+| `networks/lora_modules/hydra.py` | `HydraLoRAModule` gained a `num_experts_content` kwarg. When `> 0` (load path from a distilled chimera file): narrows `self.router` to `(K_c, router_in_dim)`, registers a `_freq_routing_weights` buffer of size `K_f = E - K_c`, and `_compute_gate` cats `[π_c | π_f]`. `set_freq_routing_weights` / `clear_freq_routing_weights` mirror the slot-assign protocol. σ/FEI feature dims are rejected in this mode (the FreqRouter owns those axes). |
+| `networks/lora_anima/network.py` | `FreqRouter` (Linear → SiLU → Linear → softmax/τ). `LoRANetwork.__init__` builds one when `cfg.use_chimera_hydra=True` and at least one chimera-aware module was constructed; `_wire_shared_freq_routing_buffers` aliases every chimera module's buffer to a single network-level tensor; `set_fei` fires the router on `concat(FEI, σ-features)` and broadcasts `π_f` via `set_freq_routing_weights` (direct slot assignment — preserves grad_fn). `_get_chimera_balance_loss` splits each module's gate at `K_c` and accumulates two independent Switch losses weighted by `_balance_w_content` / `_balance_w_freq`. Module-construction loop passes `num_experts_content = cfg.num_experts_content` into `HydraLoRAModule` when `cfg.use_chimera_hydra=True`. |
 | `networks/lora_anima/config.py` | `LoRANetworkCfg.use_chimera_hydra` / `num_experts_content` / `num_experts_freq` / `balance_w_content` / `balance_w_freq` / `freq_router_init_std`. `from_kwargs` pins the three-axis fields when chimera is on; `from_weights` reconsumes the chimera-specific metadata stamps. |
-| `networks/lora_anima/factory.py` | `create_network` builds the chimera spec via `resolve_network_spec`; `create_network_from_weights` detects `ss_use_chimera_hydra="true"` at metadata load time, overrides the spec to `chimera_hydra`, and surfaces the chimera-specific σ/FEI dims into the cfg slots the FreqRouter reads (without these overrides the loader falls back to defaults and the FreqRouter ends up with the wrong input width). |
-| `networks/lora_save.py` | `chimera_hydra_native` save handler — writes the raw chimera state dict (S_p / S_q / P_bases / Q_basis / lambda_layer + per-layer content router + network-level `freq_router.*`) to `*_chimera.safetensors`. **Skips** the OrthoHydra → Hydra distillation step; the chimera structure survives intact on disk so reload reconstructs the same dual-pool network. |
-| `networks/__init__.py` | `NETWORK_REGISTRY["chimera_hydra"]`. `resolve_network_spec` short-circuits to chimera_hydra when `use_chimera_hydra=true`. `_post_init_hydra` stamps `_use_chimera_hydra` + per-pool balance weights on the network for the balance-loss handler to consume. |
+| `networks/lora_anima/factory.py` | `create_network` builds the chimera spec via `resolve_network_spec` (Cayley `ChimeraHydraLoRAExpModule` for training); `create_network_from_weights` detects `ss_use_chimera_hydra="true"` at metadata load time, keeps the `chimera_hydra` spec but **overrides** `module_class = HydraLoRAModule` (the dual-pool runtime form). It also surfaces the chimera-specific σ/FEI dims into the cfg slots the FreqRouter reads (without these overrides the loader falls back to defaults and the FreqRouter ends up with the wrong input width). |
+| `networks/lora_save.py` | `chimera_hydra_moe` save handler — runs `_convert_ortho_hydra_to_hydra` (Cayley → shared `lora_down` + stacked `lora_up_weight`) and `_build_hydra_moe_state_dict` (q/k/v defuse per-expert, clone per-Linear `router.*` into each component), then writes to `*_chimera.safetensors`. Top-level `freq_router.*` keys flow through both conversion steps unchanged. |
+| `networks/__init__.py` | `NETWORK_REGISTRY["chimera_hydra"]` with `save_variant="chimera_hydra_moe"`. `resolve_network_spec` short-circuits to chimera_hydra when `use_chimera_hydra=true`. `_post_init_hydra` stamps `_use_chimera_hydra` + per-pool balance weights on the network for the balance-loss handler to consume. |
+| `library/inference/models.py` | `_is_chimera_moe(path)` peeks `ss_use_chimera_hydra` from safetensors metadata. Chimera files take the existing Hydra-mode dynamic-hook branch but skip the `lora_unet_*` filter (so top-level `freq_router.*` survives) and pass `file=path` to `create_network_from_weights` so the metadata is read at the factory layer. |
 | `library/training/router_conditioning.py` | Already routes `set_sigma` → `set_fei` once per step. The chimera path force-enables `use_fei_router` in `LoRANetwork.__init__` so the FEI/σ pipeline fires every step regardless of `cfg.router_source`. |
 | `configs/methods/chimera.toml` | Method config driving `make exp-chimera`. |
 | `configs/gui-methods/chimera_hydra.toml` | Self-contained variant config driving `make lora-gui GUI_PRESETS=chimera_hydra`. |
@@ -174,25 +178,30 @@ Total scales like OrthoHydra at `E = K_c + K_f`: at the default `chimera.toml` r
 
 ```
 # Network-level FreqRouter — fp32
-freq_router.net.0.weight                   (router_hidden_dim, fei_feature_dim + sigma_feature_dim)
-freq_router.net.0.bias                     (router_hidden_dim,)
-freq_router.net.2.weight                   (num_experts_freq, router_hidden_dim)
-freq_router.net.2.bias                     (num_experts_freq,)
+freq_router.net.0.weight                              (router_hidden_dim, fei_feature_dim + sigma_feature_dim)
+freq_router.net.0.bias                                (router_hidden_dim,)
+freq_router.net.2.weight                              (num_experts_freq, router_hidden_dim)
+freq_router.net.2.bias                                (num_experts_freq,)
 
-# Per-adapted-Linear chimera Cayley state (full structure preserved)
-lora_unet_<dotted_path>.S_p                (E, r, r)       fp32
-lora_unet_<dotted_path>.S_q                (r, r)          fp32
-lora_unet_<dotted_path>.lambda_layer       (1, r)          fp32
-lora_unet_<dotted_path>.P_bases            (E, out, r)     fp32  (frozen buffer)
-lora_unet_<dotted_path>.Q_basis            (r, in)         fp32  (frozen buffer)
-lora_unet_<dotted_path>.router.weight      (K_c, r)        fp32
-lora_unet_<dotted_path>.router.bias        (K_c,)          fp32
-lora_unet_<dotted_path>.alpha              ()              fp32
+# Per-adapted-Linear distilled Hydra-MoE keys (q/k/v defused on attention prefixes)
+lora_unet_<dotted_path>.lora_down.weight              (r, in)         shared across experts
+lora_unet_<dotted_path>.lora_ups.0.weight             (out, r)        content expert 0
+lora_unet_<dotted_path>.lora_ups.1.weight             (out, r)        content expert 1
+...
+lora_unet_<dotted_path>.lora_ups.{K_c-1}.weight       (out, r)        content expert K_c-1
+lora_unet_<dotted_path>.lora_ups.{K_c}.weight         (out, r)        freq expert 0
+...
+lora_unet_<dotted_path>.lora_ups.{K_c+K_f-1}.weight   (out, r)        freq expert K_f-1
+lora_unet_<dotted_path>.router.weight                 (K_c, r)        content router (K_c-narrowed)
+lora_unet_<dotted_path>.router.bias                   (K_c,)
+lora_unet_<dotted_path>.alpha                         ()
 ```
 
-**Chimera saves are not OrthoHydra-distilled.** The existing `ortho_hydra_to_hydra` save variant collapses the Cayley structure into flat `(lora_down, lora_up)` keys — useful for ComfyUI / static merge, but it drops the dual-pool runtime semantics on reload. ChimeraHydra uses `chimera_hydra_native` (in `networks/lora_save.py`) which writes raw Cayley + freq-router keys to `*_chimera.safetensors`. Reload (`create_network_from_weights`) detects the `ss_use_chimera_hydra` stamp and rebuilds the same chimera module + FreqRouter.
+The expert axis runs `[content_0 … content_{K_c-1} | freq_0 … freq_{K_f-1}]` (content first, freq second). The on-disk layout matches the existing HydraLoRA MoE keyspace exactly — the only chimera-specific bits are (a) the K_c-narrowed `router` (vs. Hydra's E-wide router), (b) the top-level `freq_router.*` block, and (c) the `ss_use_chimera_hydra` metadata stamp.
 
-Verified round-trip on a stub network: zero missing/unexpected keys, `max_abs_diff = 0.0` on both `freq_router.net[-1].weight` and per-module `S_p` after save → load.
+**Distilled at save, dual-pool at load.** Save runs `_convert_ortho_hydra_to_hydra` to fold the Cayley `(S_p, S_q, P_bases, Q_basis, lambda_layer)` into shared `lora_down.weight` + per-expert `lora_ups.{i}.weight`, then `_build_hydra_moe_state_dict` defuses fused `qkv_proj` / `kv_proj` prefixes per-component (cloning the shared `lora_down`, `alpha`, `router.*` into each q/k/v split). Top-level `freq_router.*` passes through both steps untouched (neither matches `.S_p` / `.lora_up_weight` / a fused attention prefix). The chimera-specific save variant is `chimera_hydra_moe` in `networks/lora_save.py`.
+
+Load (`library/inference/models.py::_is_chimera_moe`) sniffs `ss_use_chimera_hydra="true"` from metadata, then `networks/lora_anima/factory.py` overrides `module_class = HydraLoRAModule` (instead of the Cayley `ChimeraHydraLoRAExpModule`) and passes `num_experts_content = K_c` through to the module construction loop. `HydraLoRAModule` narrows its router to K_c outputs and registers a `_freq_routing_weights` buffer of size K_f; `_compute_gate` cats `[π_c | π_f]` to recover the full (B, E) gate. The Cayley class is therefore **training-only** — checkpoint resume silently drops the orthogonal parameterization and continues on `HydraLoRAModule` (matches the OrthoHydra → Hydra precedent in `_convert_ortho_hydra_to_hydra`).
 
 **Metadata stamps:**
 
@@ -209,14 +218,14 @@ ss_route_per_layer             = "true"
 ss_router_source               = "input"
 ```
 
-The three-axis stamps fire under the standard MoE branch (chimera pins `("shared_A", True, "input")`), so the loader picks `ortho_hydra` first via the key-sniff `.S_p (3D)` → `has_ortho_hydra=True`, then the chimera stamp override re-targets the spec to `chimera_hydra` and rebuilds the dual-pool network.
+The three-axis stamps fire under the standard MoE branch (chimera pins `("shared_A", True, "input")`), so the loader picks `hydra` via the key-sniff `.lora_up_weight` (post-distillation, 3-D after `_stack_lora_ups`) → `has_hydra=True`, then the `ss_use_chimera_hydra` override re-targets `module_class` to `HydraLoRAModule` with `num_experts_content > 0` and the network attaches a `FreqRouter` (rebuilt fresh, weights loaded from disk).
 
 ## Compatibility
 
 | Component | Compat | Notes |
 |---|---|---|
 | Training loop | ✅ | `apply_router_conditioning` fires `set_sigma` → `set_fei` every step; chimera force-enables `use_fei_router` so the FEI/σ pipeline runs unconditionally. The FreqRouter executes with grad so `∂L_denoise/∂π_f` reaches its parameters via the slot-assigned `_freq_routing_weights` buffer (same contract as FeRA's GlobalRouter). |
-| Standard inference | ✅ | The chimera-native checkpoint reloads into a chimera network; `library/inference/generation.py` calls the same `set_fei` per Euler step. |
+| Standard inference | ✅ | `library/inference/models.py::_is_chimera_moe` routes the file through the Hydra-mode dynamic-hook path; the factory rebuilds a HydraLoRAModule(num_experts_content > 0) + FreqRouter, and `library/inference/adapters.py::compute_and_set_hydra_fei` fires `set_fei` per Euler step. |
 | Spectrum inference | ⚠ | Per-step `set_fei` is wired, but on a Spectrum cached step the FEI/gate is updated while the cached features may have been forecast from a different gate distribution. Bench against `--spectrum` before relying on it. Same caveat as FeRA. |
 | `torch.compile` | ✅ | Two bmm + the OrthoHydra batched Cayley solve. Shape-static under constant-token bucketing. The chimera forward issues two bmm calls regardless of mask state so dynamo doesn't recompile at the T-LoRA flip points. |
 | `blocks_to_swap` | ✅ | Each chimera module replaces its base Linear in-place; block swap moves it with its parameters. The network-level FreqRouter stays on the main device. |
@@ -225,7 +234,7 @@ The three-axis stamps fire under the standard MoE branch (chimera pins `("shared
 | T-LoRA | ✅ | Built-in (per-branch masking). |
 | OrthoLoRA / ReFT | ⚠ partial | `use_ortho=true` is the chimera default. ReFT is designed against shared-A / plain-LoRA layouts; verify on a small bench before stacking. |
 | DCW (scalar / v4) | ✅ orthogonal | Sampler-level correction; composes with anything upstream of the Euler step. |
-| ComfyUI | ❌ | The `comfyui-hydralora` node expects distilled `lora_ups.{i}.weight` keys + a per-layer router. Chimera's native save preserves the Cayley structure + the network-level FreqRouter — no node loader exists yet. ComfyUI mirror is a follow-up; the proposal §"What's in the repo, what's new" budgets ~60 lines. |
+| ComfyUI | ⚠ partial | The save now produces the Hydra-MoE on-disk layout the `comfyui-hydralora` node already understands (shared `lora_down` + `lora_ups.{i}` + q/k/v split + per-Linear `router.*`). What's still missing from the node: (a) reading `ss_use_chimera_hydra` + `ss_num_experts_content` to narrow the router to K_c outputs, (b) loading the top-level `freq_router.*` block and broadcasting `π_f` per step. Estimated ~60 lines of node-side work. |
 | Static merge into DiT | ❌ | `scripts/merge_to_dit.py` refuses MoE methods by default (the router is sample-dependent and can't be folded into Linear weights). `--allow-partial` would drop the chimera portion entirely. |
 | FeRA / hydra-moe loaded simultaneously | ❌ | One router scheme per checkpoint; `models.py` refuses two moe files in one `--lora_weight` list. |
 
@@ -272,7 +281,7 @@ ChimeraHydra's bet: structurally enforced input separation makes the freq pool l
 - [`networks/lora_anima/network.py`](../../networks/lora_anima/network.py) — `FreqRouter`, `_wire_shared_freq_routing_buffers`, `set_freq_routing_weights`, `_get_chimera_balance_loss`, FreqRouter param group.
 - [`networks/lora_anima/config.py`](../../networks/lora_anima/config.py) — chimera cfg fields + three-axis pin.
 - [`networks/lora_anima/factory.py`](../../networks/lora_anima/factory.py) — chimera stamp detection at reload.
-- [`networks/lora_save.py`](../../networks/lora_save.py) — `chimera_hydra_native` save variant (no distillation).
+- [`networks/lora_save.py`](../../networks/lora_save.py) — `chimera_hydra_moe` save variant: Cayley → distilled Hydra-MoE layout + q/k/v defuse, with top-level `freq_router.*` passed through.
 - [`networks/__init__.py`](../../networks/__init__.py) — `NETWORK_REGISTRY["chimera_hydra"]`, `resolve_network_spec` dispatch, `_post_init_hydra` per-pool stamping.
 - [`configs/methods/chimera.toml`](../../configs/methods/chimera.toml) — canonical method config (`make exp-chimera`).
 - [`configs/gui-methods/chimera_hydra.toml`](../../configs/gui-methods/chimera_hydra.toml) — GUI-friendly variant config.

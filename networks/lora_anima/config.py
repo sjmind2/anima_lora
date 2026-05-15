@@ -208,16 +208,12 @@ class LoRANetworkCfg:
     reft_alpha: Optional[float] = None
     reft_layers: object = "all"
 
-    # Hydra (MoE) / expert warmup
+    # Hydra (MoE)
     num_experts: int = 4
     # Gaussian perturb std applied to fused per-expert `lora_up_weight` at
     # init in plain HydraLoRA only (NOT OrthoHydra disjoint or fallback) —
-    # paper baseline knob; production training should leave at 0.0 and use
-    # `expert_warmup_ratio` instead.
+    # paper baseline knob; production training should leave at 0.0.
     expert_init_std: float = 0.0
-    expert_warmup_ratio: float = 0.0
-    expert_warmup_k: int = 1
-    expert_best_warmup_ratio: float = 0.0
     router_lr_scale: float = 1.0
     # Single regex that scopes which Linear modules participate in routed
     # adaptation. Matched modules become HydraLoRA leaves; non-matching
@@ -316,6 +312,15 @@ class LoRANetworkCfg:
     # immediately as FEI/σ vary across the batch — zero-weight init would
     # be a fixed point under the additive composition (see proposal §"Init").
     freq_router_init_std: float = 0.1
+    # Per-pool router LR multipliers (chimera-only). Stack on top of the
+    # global ``router_lr_scale``: effective LR = ``unet_lr × router_lr_scale
+    # × <pool>_router_lr_scale``. Default 1.0 = preserves the previous
+    # uniform scaling. Useful when the content pool stays near-uniform
+    # (small per-layer router LR with std=0.01 init can take many steps to
+    # leave the symmetric initialization) — bumping ``content`` to 5–10×
+    # is a faster lever than raising ``balance_w_content``.
+    content_router_lr_scale: float = 1.0
+    freq_router_lr_scale: float = 1.0
 
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -374,18 +379,6 @@ class LoRANetworkCfg:
         num_experts = kwargs.get("num_experts")
         num_experts = int(num_experts) if num_experts is not None else 4
         expert_init_std = float(kwargs.get("expert_init_std", 0.0))
-        expert_warmup_ratio = float(kwargs.get("expert_warmup_ratio", 0.0))
-        expert_warmup_k = int(kwargs.get("expert_warmup_k", 1))
-        expert_best_warmup_ratio = float(kwargs.get("expert_best_warmup_ratio", 0.0))
-        if expert_warmup_ratio > 0.0 and expert_best_warmup_ratio > 0.0:
-            logger.warning(
-                "Both expert_warmup_ratio (%.3f) and expert_best_warmup_ratio "
-                "(%.3f) are non-zero. The random path's pre-forward mask zeros "
-                "non-selected experts' grads, which makes the post-backward "
-                "top-k selection redundant. Set exactly one to >0.",
-                expert_warmup_ratio,
-                expert_best_warmup_ratio,
-            )
 
         router_lr_scale = kwargs.get("network_router_lr_scale")
         router_lr_scale = float(router_lr_scale) if router_lr_scale is not None else 1.0
@@ -471,6 +464,12 @@ class LoRANetworkCfg:
             float(balance_w_freq_raw) if balance_w_freq_raw is not None else None
         )
         freq_router_init_std = float(kwargs.get("freq_router_init_std", 0.1))
+        content_router_lr_scale = float(
+            kwargs.get("network_content_router_lr_scale", 1.0)
+        )
+        freq_router_lr_scale = float(
+            kwargs.get("network_freq_router_lr_scale", 1.0)
+        )
         if use_chimera_hydra:
             if num_experts_content <= 0 or num_experts_freq <= 0:
                 raise ValueError(
@@ -595,9 +594,6 @@ class LoRANetworkCfg:
             reft_layers=reft_layers,
             num_experts=num_experts,
             expert_init_std=expert_init_std,
-            expert_warmup_ratio=expert_warmup_ratio,
-            expert_warmup_k=expert_warmup_k,
-            expert_best_warmup_ratio=expert_best_warmup_ratio,
             router_lr_scale=router_lr_scale,
             router_targets=router_targets,
             per_bucket_balance_weight=per_bucket_balance_weight,
@@ -622,6 +618,8 @@ class LoRANetworkCfg:
             balance_w_content=balance_w_content,
             balance_w_freq=balance_w_freq,
             freq_router_init_std=freq_router_init_std,
+            content_router_lr_scale=content_router_lr_scale,
+            freq_router_lr_scale=freq_router_lr_scale,
             channel_scales_dict=channel_scales_dict,
             verbose=verbose,
         )

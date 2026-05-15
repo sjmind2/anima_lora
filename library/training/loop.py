@@ -441,16 +441,7 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
             torch.cuda.nvtx.range_pop()
 
         if accelerator.sync_gradients:
-            # HydraLoRA "best-expert" warmup: keep grads only on top-k experts
-            # by per-expert grad-norm during warmup. No-op unless
-            # expert_best_warmup_ratio > 0. Runs before clip_grad_norm so
-            # clipping sees the masked grads.
             net_unwrapped = accelerator.unwrap_model(network)
-            if hasattr(net_unwrapped, "step_expert_best_warmup_post_backward"):
-                net_unwrapped.step_expert_best_warmup_post_backward(
-                    int(getattr(trainer, "_hydra_warmup_step", 0)),
-                    int(getattr(args, "max_train_steps", 0) or 0),
-                )
             # Snapshot Hydra up-weight grad norms before zero_grad wipes them.
             # The metric ``hydra_up_grad`` reads this stash later in the step.
             # Also runs pre-clip so absolute magnitudes aren't distorted by

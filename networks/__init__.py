@@ -180,9 +180,6 @@ _HYDRA_KWARG_FLAGS: Tuple[str, ...] = (
     "balance_loss_weight",
     "balance_loss_warmup_ratio",
     "expert_init_std",
-    "expert_warmup_ratio",
-    "expert_warmup_k",
-    "expert_best_warmup_ratio",
     # Unified layer filter — scopes which Linears participate in routed
     # adaptation (Hydra MoE leaves + σ / FEI feature concatenation).
     "router_targets",
@@ -207,6 +204,11 @@ _CHIMERA_KWARG_FLAGS: Tuple[str, ...] = (
     # FreqRouter init magnitude (small N(0, std)) — non-zero so the freq
     # pool differentiates at step 0.
     "freq_router_init_std",
+    # Per-pool router LR multipliers — stack on top of network_router_lr_scale.
+    # Defaults to 1.0 (no-op). Bump content when the per-layer router stays
+    # near-uniform too long (std=0.01 init is slow to break symmetry).
+    "network_content_router_lr_scale",
+    "network_freq_router_lr_scale",
 )
 
 
@@ -236,18 +238,19 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         post_init=_post_init_hydra,
     ),
     # ChimeraHydra: dual-pool additive routing on the OrthoHydra Cayley
-    # parameterization (proposal: docs/proposal/chimera_hydra.md). Uses
-    # ``chimera_hydra_native`` save variant: the on-disk format preserves
-    # the Cayley params (S_p / S_q / P_bases / Q_basis / lambda_layer) and
-    # the network-level FreqRouter, so a saved chimera can be reloaded
-    # into a chimera module verbatim (resume training, chimera-native
-    # inference). ComfyUI compatibility is deferred — the chimera node
-    # would need its own freq-router branch to consume the dual-pool
-    # gates and is not part of this commit.
+    # parameterization (proposal: docs/proposal/chimera_hydra.md). Training
+    # builds Cayley params via ``ChimeraHydraLoRAExpModule``; save distills
+    # them to the Hydra-MoE on-disk layout (shared ``lora_down`` + per-expert
+    # ``lora_ups.{i}.weight``, q/k/v defused, top-level ``freq_router.*``)
+    # written to a ``*_chimera.safetensors`` sibling. Load goes through
+    # ``HydraLoRAModule`` with ``num_experts_content > 0`` (the dual-pool
+    # runtime form added in this commit), so the Cayley class is training-
+    # only — checkpoint resume silently loses the orthogonal parameterization
+    # (matches the OrthoHydra → Hydra trade-off).
     "chimera_hydra": NetworkSpec(
         name="chimera_hydra",
         module_class=ChimeraHydraLoRAExpModule,
-        save_variant="chimera_hydra_native",
+        save_variant="chimera_hydra_moe",
         kwarg_flags=_HYDRA_KWARG_FLAGS + _CHIMERA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),

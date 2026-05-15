@@ -658,7 +658,7 @@ class AnimaTrainer:
         timesteps = sampler_out.timesteps  # [0,1]-scaled, float32
         sigmas = sampler_out.sigmas
 
-        # Per-step network conditioning: timestep masks, σ/FEI routers, expert warmup.
+        # Per-step network conditioning: timestep masks, σ/FEI routers, balance-loss warmup.
         self._hydra_warmup_step = apply_router_conditioning(
             network=network,
             noisy_model_input=noisy_model_input,
@@ -2020,6 +2020,7 @@ class AnimaTrainer:
                         guidance_scale=cfg_scale,
                         flow_shift=flow_shift,
                         seed=seed_base + i,
+                        show_progress=False,
                     )
                     pixel_images.append(image.detach().cpu())
                     del image, crossattn_emb

@@ -51,6 +51,15 @@ class HydraLoRAModule(BaseLoRAModule):
     buffer from the network-level GlobalRouter. σ-band partition is rejected
     in this mode (no local logits to mask). Balance loss is silently inert —
     ``_last_gate`` is the detached broadcast.
+
+    ``num_experts_content > 0`` (ChimeraHydra runtime form): the E experts
+    split into a content pool (``num_experts_content``, routed by the local
+    per-Linear router on pooled rank-R) and a freq pool (``num_experts_freq
+    = num_experts - num_experts_content``, routed by the network-level
+    FreqRouter through a separate broadcast buffer ``_freq_routing_weights``).
+    The router is narrowed to K_c outputs; ``_compute_gate`` cats
+    ``[π_c | π_f]`` into the full (B, E) gate. σ/FEI feature dims must be 0
+    in this mode (the FreqRouter owns those axes — see chimera.py docstring).
     """
 
     def __init__(
@@ -72,6 +81,7 @@ class HydraLoRAModule(BaseLoRAModule):
         sigma_bucket_boundaries: Optional[List[float]] = None,
         fei_feature_dim: int = 0,
         use_global_router: bool = False,
+        num_experts_content: int = 0,
     ):
         super().__init__(
             lora_name,
@@ -95,10 +105,8 @@ class HydraLoRAModule(BaseLoRAModule):
         torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
 
         # Per-expert up projections, fused: (E, out, r). Zero-init → ΔW=0 at
-        # step 0. Symmetry is broken by `expert_warmup_ratio` (per-step
-        # expert-gradient masking, LoRANetwork.step_expert_warmup).
-        # `expert_init_std` is the paper-baseline knob (Tian et al. NeurIPS'24);
-        # production runs leave it at 0.0.
+        # step 0. `expert_init_std` is the paper-baseline knob (Tian et al.
+        # NeurIPS'24); production runs leave it at 0.0.
         self.lora_up_weight = torch.nn.Parameter(
             torch.zeros(num_experts, out_dim, self.lora_dim)
         )
@@ -106,6 +114,33 @@ class HydraLoRAModule(BaseLoRAModule):
             torch.nn.init.normal_(self.lora_up_weight, mean=0.0, std=expert_init_std)
 
         self.use_global_router = bool(use_global_router)
+        # ChimeraHydra dual-pool flag (load-time form): the per-Linear router
+        # produces K_c content gates; freq gates arrive via FreqRouter
+        # broadcast. Validated invariants:
+        #   * num_experts_content > 0 ⇒ num_experts_freq = E - K_c > 0
+        #   * Mutually exclusive with use_global_router (chimera owns its own
+        #     network-level router; FeRA's GlobalRouter is a different surface).
+        #   * σ/FEI feature dims must be 0 (FreqRouter takes those axes).
+        self.num_experts_content = int(num_experts_content)
+        self.num_experts_freq = (
+            num_experts - self.num_experts_content if self.num_experts_content > 0 else 0
+        )
+        if self.num_experts_content > 0:
+            if self.num_experts_freq <= 0:
+                raise ValueError(
+                    f"num_experts_content={self.num_experts_content} must be < "
+                    f"num_experts={num_experts} (freq pool would be empty)."
+                )
+            if self.use_global_router:
+                raise ValueError(
+                    "num_experts_content > 0 is incompatible with "
+                    "use_global_router=True (chimera owns its own freq router)."
+                )
+            if int(sigma_feature_dim) > 0 or int(fei_feature_dim) > 0:
+                raise ValueError(
+                    "num_experts_content > 0 requires sigma_feature_dim == 0 and "
+                    "fei_feature_dim == 0 — those axes belong to the FreqRouter."
+                )
         # Local router on pooled rank-R (not raw in_dim): raw DiT inputs have
         # 80–96× DC-bias outliers + 4096 tokens, mean-pool collapses to DC and
         # the router gets no trainable gradient. lora_down is trained jointly,
@@ -123,7 +158,12 @@ class HydraLoRAModule(BaseLoRAModule):
             router_in_dim = (
                 self.lora_dim + self.sigma_feature_dim + self.fei_feature_dim
             )
-            self.router = torch.nn.Linear(router_in_dim, num_experts, bias=True)
+            # Chimera narrows the router to K_c outputs (its forward output IS
+            # π_c); plain Hydra keeps the standard E-output router.
+            router_out_dim = (
+                self.num_experts_content if self.num_experts_content > 0 else num_experts
+            )
+            self.router = torch.nn.Linear(router_in_dim, router_out_dim, bias=True)
             # Split init: small-std on rank-R columns, zeros on σ/FEI columns.
             # Step-0 gate matches σ=off+FEI=off; conditioning emerges as those
             # columns train.
@@ -147,6 +187,19 @@ class HydraLoRAModule(BaseLoRAModule):
         _register_fei_feature_cache(self, self.fei_feature_dim)
         if self.use_global_router:
             _register_routing_weights_buffer(self, num_experts)
+        # ChimeraHydra freq-pool gate buffer. Uniform 1/K_f placeholder; the
+        # network-level FreqRouter overwrites via direct slot assignment
+        # (``set_freq_routing_weights`` — no .detach()/.copy_(), grad_fn
+        # preserved). Non-persistent (state_dict re-derives on construction).
+        if self.num_experts_content > 0:
+            placeholder = torch.full(
+                (1, self.num_experts_freq),
+                1.0 / max(self.num_experts_freq, 1),
+                dtype=torch.float32,
+            )
+            self.register_buffer(
+                "_freq_routing_weights", placeholder, persistent=False
+            )
         # σ-band partition: experts split into num_sigma_buckets bands;
         # out-of-band logits masked to -inf before softmax, soft routing
         # within each band. Independent of σ-feature router. Incompatible
@@ -162,16 +215,6 @@ class HydraLoRAModule(BaseLoRAModule):
             _register_sigma_band_partition(
                 self, num_experts, num_sigma_buckets, sigma_bucket_boundaries
             )
-        # Per-expert grad-scale mask (1.0 = full grad, 0.0 = stop-grad). All-
-        # ones default makes ``up*1 + up.detach()*0`` collapse to ``up``, so
-        # the forward branch is unconditional and dynamo doesn't recompile at
-        # the warmup→post-warmup transition. step_expert_warmup mutates
-        # in-place (dynamic, no recompile).
-        self.register_buffer(
-            "_expert_grad_mask",
-            torch.ones(num_experts, dtype=torch.float32),
-            persistent=False,
-        )
 
     def _compute_gate(self, lx: torch.Tensor) -> torch.Tensor:
         """RMS-pool rank-R signal, concat σ/FEI if enabled, router, softmax.
@@ -183,6 +226,11 @@ class HydraLoRAModule(BaseLoRAModule):
 
         Under ``use_global_router`` ``lx`` is ignored — gate is the broadcast
         ``_routing_weights`` buffer.
+
+        Under ``num_experts_content > 0`` (chimera) the router outputs K_c
+        content gates; ``_freq_routing_weights`` provides K_f freq gates from
+        the network-level FreqRouter; the two are concatenated into the
+        full (B, E) gate.
         """
         if self.use_global_router:
             B = lx.shape[0] if lx.dim() >= 1 else 1
@@ -209,12 +257,44 @@ class HydraLoRAModule(BaseLoRAModule):
             fei_feat = self._fei.to(pooled.dtype).expand(pooled.shape[0], -1)
             parts.append(fei_feat)
         router_in = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
-        logits = self.router(router_in)  # (B, E)
+        logits = self.router(router_in)  # (B, K_c) under chimera, (B, E) otherwise
         if self._sigma_band_partition:
             logits = _apply_sigma_band_mask(
                 logits, self._sigma, self._expert_band, self._sigma_edges
             )
+        if self.num_experts_content > 0:
+            # Chimera dual-pool: softmax each pool independently, concat.
+            pi_c = torch.softmax(logits, dim=-1)  # (B, K_c)
+            pi_f = self._freq_routing_weights
+            if pi_f.dim() == 1:
+                pi_f = pi_f.unsqueeze(0)
+            pi_f = pi_f.to(pi_c.dtype).expand(pi_c.shape[0], -1)
+            return torch.cat([pi_c, pi_f], dim=-1)  # (B, E)
         return torch.softmax(logits, dim=-1)
+
+    def set_freq_routing_weights(self, weights: torch.Tensor) -> None:
+        """Slot-assign the freq pool's gates (preserves grad_fn).
+
+        Direct slot assignment (NO .detach(), NO .copy_()) — the buffer
+        must carry the FreqRouter's grad_fn so ``∂L/∂π_f`` reaches the
+        FreqRouter parameters. Mirrors
+        ``router_state._set_routing_weights`` and the original
+        ChimeraHydraLoRAExpModule helper.
+        """
+        if self.num_experts_content <= 0:
+            return
+        buf = self._freq_routing_weights
+        w = weights.to(dtype=buf.dtype, device=buf.device)
+        if w.dim() == 1:
+            w = w.unsqueeze(0)
+        self._freq_routing_weights = w
+
+    def clear_freq_routing_weights(self) -> None:
+        """Reset to uniform 1/K_f without rebinding the pointer."""
+        if self.num_experts_content <= 0:
+            return
+        K_f = int(self._freq_routing_weights.shape[-1])
+        self._freq_routing_weights.fill_(1.0 / max(K_f, 1))
 
     def set_sigma(
         self, sigmas: torch.Tensor, sigma_features: torch.Tensor | None = None
@@ -280,17 +360,8 @@ class HydraLoRAModule(BaseLoRAModule):
 
         lx, scale = self._apply_rank_dropout(lx)
 
-        # Expert-warmup masking: gradient flows only into the chosen expert's
-        # slice during warmup, breaking the cold-start deadlock under a
-        # near-uniform router. Outside warmup the mask is all-ones and
-        # ``up*1 + up.detach()*0 == up`` (autograd-equivalent), so the branch
-        # is unconditional — no Python-bool guard for dynamo to recompile on.
-        up_weight = self.lora_up_weight
-        expert_mask = self._expert_grad_mask.to(up_weight.dtype).view(-1, 1, 1)
-        up_weight = up_weight * expert_mask + up_weight.detach() * (1.0 - expert_mask)
-
         # Gate-weighted up projection: (B, out, r) per batch element.
-        combined = torch.einsum("be,eod->bod", gate.float(), up_weight.float())
+        combined = torch.einsum("be,eod->bod", gate.float(), self.lora_up_weight.float())
         orig_shape = lx.shape
         B = orig_shape[0]
         lx_3d = lx.reshape(B, -1, orig_shape[-1])

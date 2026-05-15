@@ -603,24 +603,6 @@ def save_network_weights(
     if metadata is not None and len(metadata) == 0:
         metadata = None
 
-    # ChimeraHydra writes raw chimera-native keys (S_p / S_q / P_bases /
-    # Q_basis / lambda_layer + content router + network-level freq_router)
-    # so the round-trip preserves the dual-pool architecture. Skip every
-    # OrthoHydra → Hydra distillation step — those are forward-only and
-    # would collapse the chimera structure into a plain Hydra MoE.
-    if save_variant == "chimera_hydra_native":
-        chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
-        sd: Dict[str, torch.Tensor] = {}
-        for k, v in state_dict.items():
-            sd[k] = v.detach().clone().to("cpu")
-        if dtype is not None:
-            sd = {k: v.to(dtype) for k, v in sd.items()}
-        from safetensors.torch import save_file as sf_save
-
-        sf_save(sd, chimera_file, metadata or {})
-        logger.info(f"ChimeraHydra native format saved to {chimera_file}")
-        return
-
     # Steps 1–3: key-triggered conversions. Ordering is load-bearing:
     #   * ortho_stacked_experts runs first (3-D S_q only).
     #   * ortho_hydra_to_hydra (2-D S_q + 3-D S_p) then.
@@ -633,14 +615,22 @@ def save_network_weights(
 
     # Variant dispatch. ``stacked_experts_global_fei`` writes the
     # independent-A per-expert (lora_downs.{i}, lora_ups.{i}) layout;
-    # ``hydra_moe`` / ``ortho_hydra_to_hydra`` write the shared-A Hydra
-    # layout (single lora_down, lora_ups.{i}). Auto-fallback on any
-    # ``.lora_up_weight`` key for backward-compat with paths that don't
-    # plumb ``save_variant`` through.
+    # ``hydra_moe`` / ``ortho_hydra_to_hydra`` / ``chimera_hydra_moe``
+    # write the shared-A Hydra layout (single lora_down, lora_ups.{i}).
+    # ``chimera_hydra_moe`` mirrors hydra_moe but writes to a
+    # ``*_chimera.safetensors`` sibling (the chimera suffix distinguishes
+    # files carrying top-level ``freq_router.*`` keys and the K_c-narrowed
+    # per-Linear content router). Auto-fallback on any ``.lora_up_weight``
+    # key for backward-compat with paths that don't plumb ``save_variant``
+    # through.
     is_stacked_experts_variant = save_variant == "stacked_experts_global_fei"
+    is_chimera_variant = save_variant == "chimera_hydra_moe"
     is_hydra_variant = (
         save_variant in ("hydra_moe", "ortho_hydra_to_hydra")
-        or any(k.endswith(".lora_up_weight") for k in state_dict.keys())
+        or (
+            not is_chimera_variant
+            and any(k.endswith(".lora_up_weight") for k in state_dict.keys())
+        )
     ) and not is_stacked_experts_variant
 
     if is_stacked_experts_variant:
@@ -653,6 +643,21 @@ def save_network_weights(
 
         sf_save(se_sd, se_file, metadata or {})
         logger.info(f"StackedExperts full format saved to {se_file}")
+        return
+
+    if is_chimera_variant:
+        # ChimeraHydra writes the Hydra-MoE distilled layout (shared
+        # lora_down + per-expert lora_ups.{i}) with q/k/v defused, PLUS
+        # top-level ``freq_router.*`` keys for the network-level freq
+        # pool router. ``_build_hydra_moe_state_dict`` only touches
+        # ``lora_unet_*`` prefixes, so the freq_router.* keys flow through
+        # unchanged into the output payload.
+        chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
+        chimera_sd = _build_hydra_moe_state_dict(state_dict, dtype)
+        from safetensors.torch import save_file as sf_save
+
+        sf_save(chimera_sd, chimera_file, metadata or {})
+        logger.info(f"ChimeraHydra full format saved to {chimera_file}")
         return
 
     if is_hydra_variant:

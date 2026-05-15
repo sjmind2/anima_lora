@@ -704,12 +704,18 @@ def create_network_from_weights(
         else None
     )
     if is_chimera_hydra:
-        # Override spec → chimera_hydra (chimera-native save format means
-        # the on-disk keys ARE chimera Cayley params, so the
-        # ``has_ortho_hydra`` discriminator fires correctly; this branch
-        # just flips the module class).
+        # The on-disk format is the distilled Hydra-MoE layout (shared
+        # ``lora_down`` + per-expert ``lora_ups.{i}``, q/k/v defused, plus
+        # top-level ``freq_router.*``). The ``chimera_hydra`` spec's
+        # ``ChimeraHydraLoRAExpModule`` (Cayley) is training-only — load
+        # builds ``HydraLoRAModule`` with ``num_experts_content > 0`` for
+        # the dual-pool runtime form. The chimera_hydra spec stays selected
+        # so post_init / save_variant fire correctly; only the module class
+        # swaps.
         spec = NETWORK_REGISTRY["chimera_hydra"]
-        module_class = spec.module_class
+        from networks.lora_modules import HydraLoRAModule
+
+        module_class = HydraLoRAModule
         # Surface the chimera-specific σ/FEI dims into the cfg slots the
         # FreqRouter reads (``cfg.fei_feature_dim`` / ``cfg.sigma_feature_dim``).
         # Without these overrides the loader would fall back to the legacy

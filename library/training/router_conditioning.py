@@ -1,11 +1,11 @@
 """Per-step network conditioning hooks.
 
-Drives the timestep / σ / FEI routers and HydraLoRA expert warmup that
-live on the LoRA-family networks. Most calls are no-ops unless the active
-network exposes the corresponding ``set_*`` / ``step_*`` method.
+Drives the timestep / σ / FEI routers that live on the LoRA-family
+networks. Most calls are no-ops unless the active network exposes the
+corresponding ``set_*`` / ``step_*`` method.
 
 Same hookpoint order is preserved so cudagraph capture sees a stable
-sequence: timestep_mask → reft_timestep_mask → sigma → fei → warmup.
+sequence: timestep_mask → reft_timestep_mask → sigma → fei → balance.
 """
 
 from __future__ import annotations
@@ -49,12 +49,7 @@ def apply_router_conditioning(
         fei = compute_fei_2band(z, fei_sigma_low(h_lat, w_lat, div))
         network.set_fei(fei)
 
-    # HydraLoRA expert-warmup: during the first ``expert_warmup_ratio`` of
-    # training, only one randomly-chosen expert per module receives
-    # gradient (forward still uses all experts via the learned gate).
-    if is_train and hasattr(network, "step_expert_warmup"):
-        network.step_expert_warmup(warmup_step, max_train_steps)
-        if hasattr(network, "step_balance_loss_warmup"):
-            network.step_balance_loss_warmup(warmup_step, max_train_steps)
+    if is_train and hasattr(network, "step_balance_loss_warmup"):
+        network.step_balance_loss_warmup(warmup_step, max_train_steps)
         return warmup_step + 1
     return warmup_step
