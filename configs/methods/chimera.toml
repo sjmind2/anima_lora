@@ -92,7 +92,8 @@ freq_router_init_std = 0.1
 # leaf; non-matching layers fall back to OrthoLoRAExp (single-pool Cayley,
 # no router). Same default as the other hydra variants.
 router_targets = ".*(mlp\\.layer[12])$"
-
+compile_mode = "full"
+# compile_inductor_mode = "reduce-overhead"
 output_name = "anima_chimera"
 
 

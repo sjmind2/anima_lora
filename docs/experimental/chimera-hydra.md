@@ -1,11 +1,13 @@
 # ChimeraHydra — dual-pool additive routing for timestep-aware MoE
 
+> **For the structural walkthrough** (per-Linear architecture, two-router gate construction, T-LoRA per-branch composition, per-pool balance loss, file-format roundtrip), see **`docs/structure/chimera-hydra.md`**. This doc is the usage / config / ops reference.
+
 Proposal: [`docs/proposal/chimera_hydra.md`](../proposal/chimera_hydra.md).
 
 A single-phase MoE-LoRA recipe on top of the OrthoHydra Cayley parameterization. Two pools of B-heads share one A per adapted Linear:
 
 - **content pool** (`K_c=3` by default) — routed by the per-layer rank-R router on pooled `lx` (the same router OrthoHydra already runs).
-- **frequency pool** (`K_f=3` by default) — routed by a network-level `FreqRouter` fed `concat(FEI(z_t), sinusoidal-σ-features)`.
+- **frequency pool** (`K_f=3` by default) — routed by a network-level `FreqRouter` fed `concat(FEI(z_t), sinusoidal-σ-features)`. **The sinusoidal-σ slice is currently disabled** — `configs/methods/chimera.toml` ships `sigma_feature_dim = 0`, so the FreqRouter input is FEI-only (2-dim) at the canonical bench entry. The σ slice is wired through `set_fei` and remains a single config-edit away if FEI alone proves too narrow a signal.
 
 Pool outputs are **added**. No multiplicative gate, no σ-band overlap mask, no staged curriculum. Specialization is *structurally* enforced by router-input separation — the content router can't see σ; the freq router can't see pooled text features. Each pool's B-heads necessarily specialize along its router's available axis.
 
@@ -162,7 +164,7 @@ Total scales like OrthoHydra at `E = K_c + K_f`: at the default `chimera.toml` r
 | `balance_w_freq` | `2e-5` | `w_f`. Starts at the same value as `w_c`; raise if the freq pool collapses to uniform during the first 1k steps. |
 | `fei_feature_dim` | `2` | FEI simplex bands (`e_low, e_high`). Same as the FEI-on-Hydra default. |
 | `fei_sigma_low_div` | `4.0` | `σ_low = min(H_lat, W_lat) / div` for the DoG kernel. 2026-05-13 dataset sweep picked 4 over 8 (see [[project_fera_probe_2band_decision]]). |
-| `sigma_feature_dim` | `16` | Width of the sinusoidal-σ slice fed to the FreqRouter (same functional form as the DiT t_embedder). Combined with FEI = 18-dim router input. |
+| `sigma_feature_dim` | `0` *(bench)* / `16` *(GUI variant)* | Width of the sinusoidal-σ slice fed to the FreqRouter (same functional form as the DiT t_embedder). **Currently disabled on the canonical bench entry** (`configs/methods/chimera.toml`) — the FreqRouter sees FEI(2) only. The GUI variant ships `16` for a 2 + 16 = 18-dim router input. σ is reachable via FEI (a function of `z_t`) even with this slice off, so disabling it doesn't sever the freq router from noise level — it just removes the redundant direct view. |
 | `freq_router_init_std` | `0.1` | `N(0, std)` on the FreqRouter's output Linear weights. **Non-zero is load-bearing** — zero-init would make the freq pool a fixed point of the additive composition (uniform gates ⇒ no gradient signal on the router weights). See `chimera.py::FreqRouter` docstring. |
 | `router_hidden_dim` | `64` | FreqRouter MLP hidden width. Shared with `GlobalRouter` (FeRA), no chimera-specific knob. |
 | `router_tau` | `0.7` | Softmax temperature on the FreqRouter output. Lower → sharper freq-pool specialization. |
@@ -211,7 +213,7 @@ ss_use_chimera_hydra           = "true"
 ss_num_experts_content         = "3"
 ss_num_experts_freq            = "3"
 ss_chimera_fei_feature_dim     = "2"
-ss_chimera_sigma_feature_dim   = "16"
+ss_chimera_sigma_feature_dim   = "0"     # currently off; "16" in the GUI variant
 ss_chimera_fei_sigma_low_div   = "4.0"
 ss_use_moe_style               = "shared_A"
 ss_route_per_layer             = "true"
@@ -270,7 +272,7 @@ ChimeraHydra's bet: structurally enforced input separation makes the freq pool l
 | `balance_w_freq` | `2e-5` | `1e-6` … `5e-5` | Raise if freq pool stays uniform after warmup. |
 | `freq_router_init_std` | `0.1` | `0.05`, `0.1`, `0.3` | Higher → freq pool starts further from uniform but signal-to-noise drops. **Never zero** (fixed point). |
 | `router_tau` (FreqRouter) | `0.7` | `0.3`, `0.7`, `1.0`, `2.0` | Lower τ → sharper freq specialization, more sensitive to FEI noise. |
-| `sigma_feature_dim` | `16` | `8`, `16`, `32` | Higher → richer φ(σ) representation feeding the freq router; trades against router-input dim. |
+| `sigma_feature_dim` | `0` *(bench)* | `0`, `8`, `16`, `32` | Currently off in the bench config — FreqRouter sees FEI only. Re-enable (and sweep `8`/`16`/`32`) if freq-pool entropy stays pinned at uniform after warmup, suggesting FEI(2) isn't a wide enough router input. Higher → richer φ(σ); trades against router-input dim. |
 | `fei_sigma_low_div` | `4.0` | `2`, `4`, `8` | Same Pareto region as FEI-on-Hydra; 4 picked by the 2026-05-13 dataset sweep. |
 | `network_dim` | 32 | 16, 32, 64 | Slice width per expert = `min(out, in) / E`. At `network_dim=16, E=6` slices get narrow — verify expressivity vs single-pool at matched total rank. |
 | `multiplier` (inference) | 1.0 | 0.0, 0.5, 1.0, 1.5 | `0.0` short-circuits to frozen base for clean ablation. |
