@@ -43,3 +43,5 @@ sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
 output_name = "anima_hydra_sigma"
 
 blocks_to_swap = 0
+
+use_cmmd = false

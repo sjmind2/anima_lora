@@ -1823,7 +1823,17 @@ class DreamBoothDataset(BaseDataset):
                         validation_split_num=self.validation_split_num,
                     )
 
-            if subset.sample_ratio < 1.0 and len(img_paths) > 0:
+            # sample_ratio shrinks only the training pool. The validation pool
+            # is pinned by validation_split_num / validation_split — applying
+            # sample_ratio there would silently reduce the user-requested val
+            # count (e.g. PRESET=half + validation_split_num=16 → 8 items),
+            # which is surprising for CMMD where val size controls estimator
+            # variance.
+            if (
+                subset.sample_ratio < 1.0
+                and len(img_paths) > 0
+                and self.is_training_dataset
+            ):
                 sample_count = max(1, int(len(img_paths) * subset.sample_ratio))
                 dataset = list(zip(img_paths, sizes))
                 prevstate = random.getstate()

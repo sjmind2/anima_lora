@@ -28,3 +28,5 @@ save_every_n_epochs = 4
 checkpointing_epochs = 4
 
 blocks_to_swap = 0
+
+use_cmmd = false

@@ -120,3 +120,4 @@ def cmd_preprocess(extra):
     cmd_preprocess_resize(extra)
     cmd_preprocess_vae(extra)
     cmd_preprocess_te(extra)
+    cmd_preprocess_pe(extra)

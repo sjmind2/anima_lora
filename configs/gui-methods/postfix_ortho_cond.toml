@@ -37,3 +37,5 @@ cache_llm_adapter_outputs = true
 
 blocks_to_swap = 0
 gradient_accumulation_steps = 4
+
+use_cmmd = false

@@ -78,3 +78,5 @@ fera_fecl_weight = 0.0
 # compile_inductor_mode = "default"
 
 blocks_to_swap = 0
+
+use_cmmd = false

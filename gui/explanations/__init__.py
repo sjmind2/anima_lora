@@ -257,6 +257,10 @@ FIELD_HELP: dict[str, dict[str, str]] = {
         "en": "Skip validation of cached files on startup. Faster startup when caches are known to be valid.",
         "ko": "시작 시 캐시 파일 검증 건너뛰기. 캐시가 유효함을 알 때 빠른 시작.",
     },
+    "use_cmmd": {
+        "en": "Use CMMD (PE-Core MMD²) as the validation signal. Off by default in the GUI — CMMD adds the PE encoder + a sampling pass per held-out item, which costs extra VRAM and time. Off → falls back to the cheaper per-σ FM-MSE val pass (uninformative on Anima but free).",
+        "ko": "CMMD (PE-Core MMD²)를 검증 신호로 사용. GUI 기본값은 OFF — CMMD는 검증 항목마다 PE 인코더와 샘플링 패스를 추가해 VRAM과 시간 비용이 큼. OFF면 더 저렴한 σ별 FM-MSE 검증으로 대체 (Anima에서 유의미한 신호는 아니지만 무료).",
+    },
     # Paths
     "pretrained_model_name_or_path": {
         "en": "Path to the base DiT model weights (.safetensors).",

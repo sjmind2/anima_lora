@@ -217,7 +217,8 @@ _GROUPS = {
         "cache_text_encoder_outputs",
         "cache_text_encoder_outputs_to_disk",
         "skip_cache_check",
-        "layer_start"
+        "layer_start",
+        "use_cmmd",
     },
     "Paths": {
         "pretrained_model_name_or_path",

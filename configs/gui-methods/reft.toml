@@ -25,3 +25,5 @@ reft_layers = "last_8"
 output_name = "anima_reft"
 
 blocks_to_swap = 0
+
+use_cmmd = false

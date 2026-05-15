@@ -42,3 +42,5 @@ num_sigma_buckets = 3
 output_name = "anima_hydra_sigma"
 
 blocks_to_swap = 0
+
+use_cmmd = false

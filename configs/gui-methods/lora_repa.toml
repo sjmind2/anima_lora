@@ -28,3 +28,5 @@ use_repa = true
 repa_weight = 0.5    # paper default; lower (0.1-0.25) if it overpowers FM loss
 repa_layer = 8       # DiT block index (of 28); paper choice for SiT-XL
 repa_lr_scale = 1.0  # head LR = repa_lr_scale * unet_lr
+
+use_cmmd = false

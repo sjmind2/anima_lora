@@ -20,3 +20,5 @@ use_ortho = true
 output_name = "anima_ortho"
 
 blocks_to_swap = 0
+
+use_cmmd = false

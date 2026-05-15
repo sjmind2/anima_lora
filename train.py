@@ -1842,27 +1842,17 @@ class AnimaTrainer:
         logging_fn,
     ):
         """Validation = CMMD between the live model's samples and the held-out
-        reference's cached PE features.
+        reference's cached PE features, falling back to per-sigma FM-MSE on
+        ``val.dataloader`` if CMMD can't run (no PE/TE cache, sampling error).
 
-        Replaces the legacy FM-MSE per-sigma pass — that loss did not track
-        sample quality on Anima (see project_fm_val_loss_uninformative). For
-        each item in the validation split we load the cached TE outputs,
-        sample one image at the item's bucket resolution, pool its PE-Core
-        features, and report ``MMD²(ref_pool, gen_pool) × 1000`` against the
-        cached reference pool — same kernel/scale as Jayasumana et al. (CVPR
-        2024, google-research/cmmd).
+        CMMD is the primary signal (the legacy FM-MSE pass did not track
+        sample quality on Anima — see ``project_fm_val_loss_uninformative``),
+        but FM-MSE still produces *some* divergence number to log when the
+        sampling path is broken or the references aren't there, which keeps
+        validation visibility alive instead of going silent for the whole run.
         """
         args = ctx.args
         accelerator = ctx.accelerator
-
-        if val.dataset_group is None:
-            return
-
-        val_items: list = []
-        for ds in val.dataset_group.datasets:
-            val_items.extend(ds.image_data.values())
-        if not val_items:
-            return
 
         ctx.optimizer_eval_fn()
         accelerator.unwrap_model(ctx.network).eval()
@@ -1874,66 +1864,141 @@ class AnimaTrainer:
         )
 
         try:
-            # Reference PE features sit next to each val item's cached TE
-            # output (both produced by `make preprocess-pe` / `-te`).
-            ref_sidecars = []
-            ref_items = []
-            for item in val_items:
-                te_path = item.text_encoder_outputs_npz
-                if te_path is None:
-                    continue
-                cache_dir = os.path.dirname(te_path)
-                ref_sidecars.append(
-                    resolve_pe_sidecar(
-                        item.absolute_path, encoder="pe", cache_dir=cache_dir
-                    )
+            cmmd_ok = False
+            if getattr(args, "use_cmmd", True):
+                cmmd_ok = self._try_cmmd_validation(
+                    ctx=ctx,
+                    val=val,
+                    unwrapped_unet=unwrapped_unet,
+                    val_loss_recorder=val_loss_recorder,
+                    epoch=epoch,
+                    global_step=global_step,
+                    progress_desc=progress_desc,
+                    log_avg_key=log_avg_key,
+                    log_div_key=log_div_key,
+                    logging_fn=logging_fn,
                 )
-                ref_items.append(item)
-            if not ref_sidecars:
-                logger.warning(
-                    "CMMD val: no items had cached TE outputs; skipping."
+            if not cmmd_ok:
+                self._run_fm_validation(
+                    ctx=ctx,
+                    val=val,
+                    val_loss_recorder=val_loss_recorder,
+                    epoch=epoch,
+                    global_step=global_step,
+                    progress_desc=progress_desc,
+                    postfix_label=postfix_label,
+                    log_avg_key=log_avg_key,
+                    log_div_key=log_div_key,
+                    logging_fn=logging_fn,
                 )
-                return
-            try:
-                ref_pool = load_reference_features(ref_sidecars).to(
-                    accelerator.device
+        finally:
+            self._restore_rng_state(rng_states)
+            args.t_min = val.original_t_min
+            args.t_max = val.original_t_max
+            ctx.optimizer_train_fn()
+            accelerator.unwrap_model(ctx.network).train()
+            if hasattr(unwrapped_unet, "switch_block_swap_for_training"):
+                unwrapped_unet.switch_block_swap_for_training()
+            clean_memory_on_device(accelerator.device)
+
+    def _try_cmmd_validation(
+        self,
+        *,
+        ctx,
+        val,
+        unwrapped_unet,
+        val_loss_recorder,
+        epoch,
+        global_step,
+        progress_desc,
+        log_avg_key,
+        log_div_key,
+        logging_fn,
+    ) -> bool:
+        """Run CMMD-based validation. Returns True if it logged a value, False
+        if the caller should fall back to FM-MSE (no dataset group, no PE/TE
+        cache, ``load_reference_features`` failure, or any sampling exception).
+        """
+        args = ctx.args
+        accelerator = ctx.accelerator
+
+        if val.dataset_group is None:
+            return False
+
+        val_items: list = []
+        for ds in val.dataset_group.datasets:
+            val_items.extend(ds.image_data.values())
+        if not val_items:
+            return False
+
+        # Reference PE features sit next to each val item's cached TE
+        # output (both produced by `make preprocess-pe` / `-te`).
+        ref_sidecars = []
+        ref_items = []
+        for item in val_items:
+            te_path = item.text_encoder_outputs_npz
+            if te_path is None:
+                continue
+            cache_dir = os.path.dirname(te_path)
+            ref_sidecars.append(
+                resolve_pe_sidecar(
+                    item.absolute_path, encoder="pe", cache_dir=cache_dir
                 )
-            except RuntimeError as exc:
-                logger.warning(f"CMMD val skipped: {exc}")
-                return
-
-            # Reuse a single PE-Core load across val passes (cached on the
-            # trainer). load_pe_encoder is ~1GB so reloading every val is
-            # wasteful — and the encoder is frozen, so caching is safe.
-            from library.vision.encoder import (
-                encode_pe_from_imageminus1to1,
-                load_pe_encoder,
             )
-
-            if getattr(self, "_cmmd_pe_bundle", None) is None:
-                self._cmmd_pe_bundle = load_pe_encoder(accelerator.device)
-            bundle = self._cmmd_pe_bundle
-
-            sample_steps = int(getattr(args, "validation_sample_steps", 20))
-            cfg_scale = float(getattr(args, "validation_cfg_scale", 1.0))
-            flow_shift = float(getattr(args, "discrete_flow_shift", 1.0))
-
-            val_progress_bar = tqdm(
-                range(len(ref_items)),
-                smoothing=0,
-                disable=not accelerator.is_local_main_process,
-                desc=progress_desc,
+            ref_items.append(item)
+        if not ref_sidecars:
+            logger.warning(
+                "CMMD val: no items had cached TE outputs; falling back to FM-MSE."
             )
-
-            from safetensors.torch import load_file as _load_safetensors
-
-            gen_pooled: list[torch.Tensor] = []
-            seed_base = (
-                args.validation_seed
-                if args.validation_seed is not None
-                else args.seed
+            return False
+        try:
+            ref_pool = load_reference_features(ref_sidecars).to(
+                accelerator.device
             )
+        except RuntimeError as exc:
+            logger.warning(f"CMMD val ref load failed ({exc}); falling back to FM-MSE.")
+            return False
 
+        from library.vision.encoder import (
+            encode_pe_from_imageminus1to1,
+            load_pe_encoder,
+        )
+
+        if getattr(self, "_cmmd_pe_bundle", None) is None:
+            self._cmmd_pe_bundle = load_pe_encoder(accelerator.device)
+            # Park PE-Core (~600 MB bf16) on CPU between encodes so the DiT
+            # sample step has the full GPU budget. Bundle keeps device=cuda
+            # so encode_pe_from_imageminus1to1 still routes inputs correctly;
+            # we shuttle the underlying model to GPU only for the encode call.
+            self._cmmd_pe_bundle.encoder.inner.to("cpu")
+        bundle = self._cmmd_pe_bundle
+
+        sample_steps = int(getattr(args, "validation_sample_steps", 20))
+        cfg_scale = float(getattr(args, "validation_cfg_scale", 1.0))
+        flow_shift = float(getattr(args, "discrete_flow_shift", 1.0))
+
+        val_progress_bar = tqdm(
+            range(len(ref_items)),
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc=progress_desc,
+        )
+
+        from safetensors.torch import load_file as _load_safetensors
+
+        gen_pooled: list[torch.Tensor] = []
+        seed_base = (
+            args.validation_seed
+            if args.validation_seed is not None
+            else args.seed
+        )
+
+        # Two-phase val to keep DiT and PE-Core off the GPU at the same time:
+        # phase 1 generates every sample with DiT resident and parks the
+        # decoded pixels on CPU; phase 2 swaps DiT → CPU + PE → GPU and
+        # encodes them all. One DiT round-trip per val pass instead of N.
+        pixel_images: list[torch.Tensor] = []
+        try:
             with torch.no_grad(), accelerator.autocast():
                 unwrapped_unet.prepare_block_swap_before_forward()
                 for i, item in enumerate(ref_items):
@@ -1956,59 +2021,152 @@ class AnimaTrainer:
                         flow_shift=flow_shift,
                         seed=seed_base + i,
                     )
-
-                    feats_list = encode_pe_from_imageminus1to1(
-                        bundle, image.unsqueeze(0), same_bucket=True
-                    )
-                    gen_pooled.append(pool_and_normalize(feats_list[0]).cpu())
+                    pixel_images.append(image.detach().cpu())
+                    del image, crossattn_emb
+                    clean_memory_on_device(accelerator.device)
                     val_progress_bar.update(1)
                     val_progress_bar.set_postfix({"items": f"{i + 1}/{len(ref_items)}"})
 
                     self.on_validation_step_end(ctx, {})
 
+                # Hand the GPU to PE: park DiT on CPU, bring PE on.
+                unwrapped_unet.to("cpu")
+                clean_memory_on_device(accelerator.device)
+                bundle.encoder.inner.to(accelerator.device)
+                try:
+                    for image_cpu in pixel_images:
+                        image_gpu = image_cpu.to(accelerator.device)
+                        feats_list = encode_pe_from_imageminus1to1(
+                            bundle, image_gpu.unsqueeze(0), same_bucket=True
+                        )
+                        gen_pooled.append(pool_and_normalize(feats_list[0]).cpu())
+                        del image_gpu, feats_list
+                finally:
+                    bundle.encoder.inner.to("cpu")
+                    clean_memory_on_device(accelerator.device)
+                    unwrapped_unet.to(accelerator.device)
+        except (KeyError, RuntimeError, FileNotFoundError) as exc:
+            val_progress_bar.close()
+            logger.warning(
+                f"CMMD val sampling failed ({type(exc).__name__}: {exc}); "
+                "falling back to FM-MSE."
+            )
+            return False
+
+        val_progress_bar.close()
+
+        gen_pool = torch.stack(gen_pooled, dim=0).to(accelerator.device)
+        cmmd_value = cmmd_from_pools(ref_pool, gen_pool)
+        val_loss_recorder.add(epoch=epoch, step=global_step, loss=cmmd_value)
+
+        if ctx.is_tracking:
+            logs = {
+                log_avg_key: cmmd_value,
+                log_div_key: cmmd_value
+                - val.train_loss_recorder.moving_average,
+                log_avg_key.removesuffix("_average") + "_cmmd": cmmd_value,
+                log_avg_key.removesuffix("_average") + "_n": len(ref_items),
+            }
+            logging_fn(accelerator, logs, global_step, epoch + 1)
+        return True
+
+    def _run_fm_validation(
+        self,
+        *,
+        ctx,
+        val,
+        val_loss_recorder,
+        epoch,
+        global_step,
+        progress_desc,
+        postfix_label,
+        log_avg_key,
+        log_div_key,
+        logging_fn,
+    ) -> None:
+        """Legacy per-sigma FM-MSE validation, used as a fallback when CMMD
+        can't run. Pins ``args.t_{min,max}`` to each sigma in ``val.sigmas``
+        and runs ``process_batch`` over up to ``val.steps`` batches of
+        ``val.dataloader``. The caller owns RNG save/restore and eval-mode
+        switching; this helper only restores ``t_{min,max}`` since it mutates
+        them per sigma."""
+        args = ctx.args
+        accelerator = ctx.accelerator
+
+        if val.dataloader is None or len(val.dataloader) == 0 or not val.sigmas:
+            return
+
+        val_progress_bar = tqdm(
+            range(val.total_steps),
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc=f"{progress_desc} (fm-mse)",
+        )
+        val_timesteps_step = 0
+        per_sigma_losses = {s: [] for s in val.sigmas}
+
+        try:
+            for val_step, batch in enumerate(val.dataloader):
+                if val_step >= val.steps:
+                    break
+
+                for sigma in val.sigmas:
+                    self.on_step_start(ctx, batch, is_train=False)
+                    args.t_min = args.t_max = sigma
+
+                    loss = self.process_batch(ctx, batch, is_train=False)
+                    current_loss = loss.detach().item()
+                    val_loss_recorder.add(
+                        epoch=epoch, step=val_timesteps_step, loss=current_loss
+                    )
+                    per_sigma_losses[sigma].append(current_loss)
+                    val_progress_bar.update(1)
+                    val_progress_bar.set_postfix(
+                        {
+                            postfix_label: val_loss_recorder.moving_average,
+                            "sigma": f"{sigma:.2f}",
+                        }
+                    )
+                    self.on_validation_step_end(ctx, batch)
+                    val_timesteps_step += 1
+        finally:
             val_progress_bar.close()
 
-            gen_pool = torch.stack(gen_pooled, dim=0).to(accelerator.device)
-            cmmd_value = cmmd_from_pools(ref_pool, gen_pool)
-            val_loss_recorder.add(epoch=epoch, step=global_step, loss=cmmd_value)
-
-            if ctx.is_tracking:
-                logs = {
-                    log_avg_key: cmmd_value,
-                    log_div_key: cmmd_value
-                    - val.train_loss_recorder.moving_average,
-                    log_avg_key.removesuffix("_average") + "_cmmd": cmmd_value,
-                    log_avg_key.removesuffix("_average") + "_n": len(ref_items),
-                }
-                logging_fn(accelerator, logs, global_step, epoch + 1)
-        finally:
-            self._restore_rng_state(rng_states)
-            args.t_min = val.original_t_min
-            args.t_max = val.original_t_max
-            ctx.optimizer_train_fn()
-            accelerator.unwrap_model(ctx.network).train()
-            if hasattr(unwrapped_unet, "switch_block_swap_for_training"):
-                unwrapped_unet.switch_block_swap_for_training()
-            clean_memory_on_device(accelerator.device)
+        if ctx.is_tracking:
+            logs = {
+                log_avg_key: val_loss_recorder.moving_average,
+                log_div_key: val_loss_recorder.moving_average
+                - val.train_loss_recorder.moving_average,
+                log_avg_key.removesuffix("_average") + "_fm_fallback": 1.0,
+            }
+            for s, losses in per_sigma_losses.items():
+                if losses:
+                    logs[f"loss/validation/sigma_{s:.2f}"] = sum(losses) / len(
+                        losses
+                    )
+            logging_fn(accelerator, logs, global_step, epoch + 1)
 
     def _build_val_crossattn_emb(self, dit, sd, accelerator):
         """Construct the cross-attention embedding the DiT expects from a
         cached TE sidecar — using the saved post-LLM-adapter ``crossattn_emb``
         when present, otherwise running ``llm_adapter`` exactly like
         ``_sample_image_inference`` does. Pads to 512 tokens (the model's
-        fixed context length)."""
+        fixed context length). Multi-variant caches expose `<key>_v0` (pristine
+        caption) instead of `<key>`; pin to v0 for deterministic validation."""
         device = accelerator.device
         dtype = dit.dtype
-        if "crossattn_emb" in sd:
-            ce = sd["crossattn_emb"].unsqueeze(0).to(device, dtype=dtype)
+        suffix = "" if "prompt_embeds" in sd or "crossattn_emb" in sd else "_v0"
+        ce_key = f"crossattn_emb{suffix}"
+        if ce_key in sd:
+            ce = sd[ce_key].unsqueeze(0).to(device, dtype=dtype)
             if ce.shape[1] < 512:
                 ce = torch.nn.functional.pad(ce, (0, 0, 0, 512 - ce.shape[1]))
             return ce
 
-        prompt_embeds = sd["prompt_embeds"].unsqueeze(0).to(device, dtype=dtype)
-        attn_mask = sd["attn_mask"].unsqueeze(0).to(device)
-        t5_ids = sd["t5_input_ids"].unsqueeze(0).to(device, dtype=torch.long)
-        t5_attn_mask = sd["t5_attn_mask"].unsqueeze(0).to(device)
+        prompt_embeds = sd[f"prompt_embeds{suffix}"].unsqueeze(0).to(device, dtype=dtype)
+        attn_mask = sd[f"attn_mask{suffix}"].unsqueeze(0).to(device)
+        t5_ids = sd[f"t5_input_ids{suffix}"].unsqueeze(0).to(device, dtype=torch.long)
+        t5_attn_mask = sd[f"t5_attn_mask{suffix}"].unsqueeze(0).to(device)
 
         if getattr(dit, "use_llm_adapter", False):
             ce = dit.llm_adapter(
@@ -2560,6 +2718,15 @@ def setup_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="CFG scale used by CMMD validation. Default 1.0 (no CFG, fastest). Bump to 4.0 to match production sampling but generation cost ~2×.",
+    )
+    parser.add_argument(
+        "--use_cmmd",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use CMMD (PE-Core MMD²) as the validation signal. Set "
+        "`use_cmmd = false` in the method TOML (or pass `--no-use_cmmd`) to "
+        "skip CMMD and run only the legacy per-σ FM-MSE val pass — useful "
+        "on tight VRAM where the PE encoder + sampling path doesn't fit.",
     )
     parser.add_argument(
         "--unsloth_offload_checkpointing",

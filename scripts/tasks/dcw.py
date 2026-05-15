@@ -185,7 +185,7 @@ def cmd_dcw(extra):
     Other extra args pass through to every measure_bias invocation
     (--dit, --lora_weight, --pooled_text_proj '', --guidance_scale, etc.).
     """
-    n_images, extra = _pop_kv(extra, "--n_images", "2")
+    n_images, extra = _pop_kv(extra, "--n_images", "30")
     n_seeds, extra = _pop_kv(extra, "--n_seeds", "2")
     shuffle_seed, extra = _pop_kv(extra, "--shuffle_seed", "0")
     label, extra = _pop_kv(extra, "--label", "make-dcw")
@@ -255,7 +255,6 @@ def cmd_dcw(extra):
                 baseline_lambda,
                 "--dump_per_sample_gaps",
                 "--no-save_plot",
-                "--dcw_sweep",
                 "--label",
                 bucket_label,
                 "--out_root",

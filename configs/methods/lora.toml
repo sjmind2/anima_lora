@@ -32,15 +32,22 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
+# CMMD val (PE-Core MMD²) is the primary val signal. Set to false on
+# tight VRAM if the PE encoder + sampling path OOMs even after the
+# CPU-park / two-phase mitigations in `_try_cmmd_validation`. With
+# CMMD off, val falls back to the legacy per-σ FM-MSE pass (cheaper
+# but uninformative — see project_fm_val_loss_uninformative).
+use_cmmd = true
+
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-output_name = "anima_vr"
-vr_loss_weight = 1.0
-vr_fei_sigma_low_div = 4.0
+# output_name = "anima_vr"
+# vr_loss_weight = 1.0
+# vr_fei_sigma_low_div = 4.0
 
-compile_mode = "full"
-compile_inductor_mode = "reduce-overhead"
+# compile_mode = "full"
+# compile_inductor_mode = "reduce-overhead"
 
 # -------------
 # Ortho-lora
