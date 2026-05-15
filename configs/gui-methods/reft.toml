@@ -27,3 +27,9 @@ output_name = "anima_reft"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "reft"
+label = "ReFT"
+description = "Block-level residual-stream intervention only (no LoRA)."
+order = 10

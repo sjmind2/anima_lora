@@ -22,3 +22,9 @@ output_name = "anima_ortho"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "ortholora"
+label = "OrthoLoRA"
+description = "SVD-based orthogonal LoRA. Saves as plain LoRA via thin SVD."
+order = 10

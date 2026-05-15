@@ -29,3 +29,9 @@ output_name = "anima_tlora_ortho"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "tlora"
+label = "T-LoRA + OrthoLoRA"
+description = "T-LoRA stacked with OrthoLoRA — mergeable combo."
+order = 20

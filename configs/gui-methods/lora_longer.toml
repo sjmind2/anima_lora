@@ -13,3 +13,9 @@ compile_mode = "full"
 compile_inductor_mode = "reduce-overhead"
 
 use_cmmd = false
+
+[variant]
+family = "lora"
+label = "LoRA (longer run)"
+description = "Plain LoRA with full-graph compile for longer runs."
+order = 20

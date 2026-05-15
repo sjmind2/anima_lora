@@ -42,3 +42,9 @@ blocks_to_swap = 0
 compile_mode = "full"
 
 use_cmmd = false
+
+[variant]
+family = "easycontrol"
+label = "EasyControl"
+description = "Extended self-attention image conditioning."
+order = 10

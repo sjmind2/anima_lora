@@ -1,20 +1,13 @@
-# Memory-saving autograd functions for the LoRA down projection.
+# Memory-saving autograd for the LoRA down projection.
 #
-# Motivation: ``F.linear(x.float(), weight.float())`` causes autograd to save
-# the fp32-cast input for backward. With static_token_count=4096 that's
-# ~32 MiB per 2048-wide Linear and ~128 MiB for the 8192-wide MLP layer2 input,
-# accumulated across adapted modules. These two Functions save the original
-# low-precision ``x`` instead and recompute the fp32 cast in backward — a
-# targeted application of the gradient-checkpointing idea to a single op.
+# `F.linear(x.float(), weight.float())` saves the fp32-cast input for backward
+# (~32 MiB per 2048-wide Linear at 4096 tokens, ×N adapted modules). These
+# Functions save the bf16 `x` and recompute the cast in backward. Forward and
+# backward matmuls run in fp32 — bitwise-identical to the existing path for
+# deterministic kernels.
 #
-# The fp32 accumulation of the bottleneck matmul is preserved: forward still
-# runs ``F.linear(x_work.float(), weight.float())`` and backward runs the same
-# shape/precision matmuls (``go.float() @ w.float()`` / ``go.float().T @ x_f``),
-# so gradients are bitwise-identical to the existing path for deterministic
-# kernels.
-#
-# Two separate functions (scaled vs. unscaled) keep the graph shape fixed for
-# ``torch.compile`` — no optional tensors, no shape-dependent branches.
+# Two Functions (scaled / unscaled) instead of one with an optional tensor:
+# keeps the compile graph shape fixed.
 
 from __future__ import annotations
 
@@ -22,7 +15,6 @@ import torch
 
 
 class LoRADownProjectFn(torch.autograd.Function):
-    """``F.linear(x.float(), weight.float())`` without retaining the fp32 cast."""
 
     @staticmethod
     def forward(ctx, x, weight):

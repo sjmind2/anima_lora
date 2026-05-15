@@ -55,9 +55,17 @@ FIELD_HELP: dict[str, dict[str, str]] = {
         "en": "Enable OrthoLoRA: SVD-based orthogonal parameterization of the update matrix (linear layers only). Regularizes toward structured updates; saved as plain LoRA via thin SVD at checkpoint time.",
         "ko": "OrthoLoRA 활성화: 업데이트 행렬의 SVD 기반 직교 파라미터화 (선형 레이어 전용). 구조화된 업데이트로 정규화되며, 저장 시 thin SVD로 일반 LoRA로 변환.",
     },
-    "use_hydra": {
-        "en": "Enable HydraLoRA: MoE-style multi-head routing with shared lora_down and per-expert lora_up heads. Produces a *_moe.safetensors sibling for router-live inference. Requires cache_llm_adapter_outputs=true.",
-        "ko": "HydraLoRA 활성화: 공유 lora_down + 전문가별 lora_up 헤드를 가진 MoE 스타일 멀티헤드 라우팅. 라우터-라이브 추론용 *_moe.safetensors 동반 파일 생성. cache_llm_adapter_outputs=true 필요.",
+    "use_moe_style": {
+        "en": "MoE expert layout: 'shared_A' (HydraLoRA — one shared lora_down + N per-expert lora_up heads), 'independent_A' (FeRA — N fully-independent down/up pairs), or false (no MoE). Produces a *_moe.safetensors sibling for router-live inference; requires cache_llm_adapter_outputs=true.",
+        "ko": "MoE 전문가 레이아웃: 'shared_A' (HydraLoRA — 공유 lora_down + N개 전문가별 lora_up), 'independent_A' (FeRA — 독립적인 N쌍의 down/up), 또는 false (MoE 비활성화). 라우터-라이브 추론용 *_moe.safetensors 동반 파일 생성. cache_llm_adapter_outputs=true 필요.",
+    },
+    "route_per_layer": {
+        "en": "If true, each layer owns its own router (per-layer routing). If false, a single network-level GlobalRouter broadcasts gate weights to every routed module.",
+        "ko": "true이면 레이어별 라우터 사용 (per-layer routing). false이면 네트워크 전역 GlobalRouter 하나가 모든 라우팅 모듈에 게이트 가중치 브로드캐스트.",
+    },
+    "router_source": {
+        "en": "Routing signal: 'sigma' (sinusoidal embedding of the denoising timestep), 'fei' (mean-pooled rank features from preceding LoRA modules), or 'pooled_text' (pooled T5 caption embedding).",
+        "ko": "라우팅 신호: 'sigma' (디노이징 타임스텝의 sinusoidal 임베딩), 'fei' (선행 LoRA 모듈의 평균 풀링 랭크 특징), 또는 'pooled_text' (T5 캡션 풀링 임베딩).",
     },
     "num_experts": {
         "en": "HydraLoRA expert count. More experts = more capacity but more VRAM and slower training. Typical: 2–8.",
@@ -86,10 +94,6 @@ FIELD_HELP: dict[str, dict[str, str]] = {
     "reft_layers": {
         "en": "Which DiT blocks receive ReFT modules. 'all', 'last_8', 'first_4', 'stride_2', or comma-separated indices like '3,7,11,15'.",
         "ko": "ReFT 모듈이 적용될 DiT 블록. 'all', 'last_8', 'first_4', 'stride_2', 또는 '3,7,11,15'와 같은 쉼표 구분 인덱스.",
-    },
-    "use_sigma_router": {
-        "en": "Add a tiny sinusoidal(σ)→E bias MLP to each HydraLoRA router, letting expert routing vary with denoising timestep. Zero-init at final layer → step-0 identical to base HydraLoRA.",
-        "ko": "각 HydraLoRA 라우터에 sinusoidal(σ)→E 바이어스 MLP 추가하여 타임스텝에 따라 전문가 라우팅 변동. 최종 레이어 zero-init → 초기에는 기본 HydraLoRA와 동일.",
     },
     "sigma_feature_dim": {
         "en": "Sinusoidal σ feature dimension fed into the σ-router bias MLP. Typical: 128.",

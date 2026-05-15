@@ -44,3 +44,9 @@ output_name = "anima_hydra_sigma"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "hydralora"
+label = "HydraLoRA (sigma router)"
+description = "Shared-A Hydra with sigma-conditioned per-layer router."
+order = 10

@@ -50,3 +50,9 @@ output_name = "anima_hydra_fei"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "hydralora"
+label = "HydraLoRA (FEI router)"
+description = "Shared-A Hydra with FEI-conditioned per-layer router."
+order = 30

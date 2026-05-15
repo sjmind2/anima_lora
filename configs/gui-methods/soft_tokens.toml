@@ -30,3 +30,10 @@ checkpointing_epochs = 4
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "soft_tokens"
+label = "Soft Tokens"
+description = "SoftREPA-style per-layer x per-t soft tokens (training-only v1)."
+order = 10
+experimental = true

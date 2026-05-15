@@ -30,3 +30,9 @@ repa_layer = 8       # DiT block index (of 28); paper choice for SiT-XL
 repa_lr_scale = 1.0  # head LR = repa_lr_scale * unet_lr
 
 use_cmmd = false
+
+[variant]
+family = "lora"
+label = "LoRA + REPA"
+description = "Classic LoRA with REPA auxiliary alignment loss (Yu et al., arXiv:2410.06940)."
+order = 40

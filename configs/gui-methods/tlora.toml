@@ -26,3 +26,9 @@ output_name = "anima_tlora"
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "tlora"
+label = "T-LoRA"
+description = "Timestep-dependent rank masking — full rank at high noise, reduced at low."
+order = 10

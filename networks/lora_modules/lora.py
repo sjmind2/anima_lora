@@ -1,6 +1,5 @@
-# Classic LoRA — single class for both training and inference, with merge
-# (per-LoRA state-dict slice into the base weight) and fuse (delta baked into
-# the base weight at runtime, forward becomes a no-op) helpers.
+# Classic LoRA. `merge_to` bakes a checkpoint slice into the base Linear/Conv2d
+# weight; `fuse_weight` bakes the live delta and turns forward into a no-op.
 
 import math
 
@@ -60,43 +59,33 @@ class LoRAModule(BaseLoRAModule):
 
         self._register_channel_scale(self.lora_down.weight.data, channel_scale)
 
-        # Opt-in: save bf16 x instead of retaining fp32 x_lora for backward.
-        # Linear-only (Conv2d takes the legacy path). Set externally by the
-        # network factory when use_custom_down_autograd is enabled.
+        # Opt-in (Linear-only): save bf16 x instead of fp32 x_lora for backward.
+        # Set by the network factory.
         self.use_custom_down_autograd = False
 
-        # Held in a list so PyTorch's nn.Module __setattr__ does not register
-        # org_module as a submodule (would double-count params and pollute
-        # state_dict). apply_to() in BaseLoRAModule deletes self.org_module
-        # after rerouting forward, so this list is the only handle the LoRA
-        # object retains for fuse/unfuse.
+        # List wrapping prevents nn.Module from registering org_module as a
+        # submodule (would double-count params). apply_to() deletes
+        # self.org_module after rerouting forward, leaving this as the only
+        # handle for fuse/unfuse.
         self.org_module_ref = [org_module]
         self._fused = False
 
     def forward(self, x):
-        # Inference fast path: delta is fused into the base weight, or the
-        # adapter has been disabled — skip the LoRA branch entirely.
         if not self.enabled or self._fused:
             return self.org_forward(x)
 
         org_forwarded = self.org_forward(x)
 
         if not self.training:
-            # Inference: native-dtype matmuls via the nn.Linear/Conv2d wrappers.
             x_lora = self._rebalance(x)
             lx = self.lora_up(self.lora_down(x_lora))
             return org_forwarded + lx * self.multiplier * self.scale
 
-        # Training. Policy: bf16 storage, fp32 for the bottleneck matmuls. The
-        # down-proj accumulates over embed_dim (large) and the up-proj output
-        # is added back to the bf16 base; running both matmuls in fp32 recovers
-        # mantissa precision that bf16 would shed.
+        # Training: bf16 storage, fp32 bottleneck matmuls — recovers mantissa
+        # precision that bf16 sheds across the large-embed_dim accumulation.
         if self._skip_module():
             return org_forwarded
 
-        # Per-channel input rebalancing (SmoothQuant-style). Absorbed scale is
-        # baked into lora_down at init; we divide x here so the net forward is
-        # unchanged but per-column gradients are balanced.
         if self.use_custom_down_autograd and isinstance(
             self.lora_down, torch.nn.Linear
         ):
@@ -108,10 +97,6 @@ class LoRAModule(BaseLoRAModule):
                 x_lora.float(), self.lora_down.weight.float()
             )
 
-        # Timestep-dependent rank masking. Mask is always a Tensor (default
-        # all-ones buffer → identity); LoRANetwork.set_timestep_mask rebinds
-        # it to a shared live-updated mask when T-LoRA is active. No None-vs-
-        # Tensor guard means no recompile under compile_mode=full.
         lx = lx * self._timestep_mask
 
         if self.dropout is not None:
@@ -130,8 +115,7 @@ class LoRAModule(BaseLoRAModule):
         up_weight = self.lora_up.weight.to(torch.float)
         down_weight = self.lora_down.weight.to(torch.float)
 
-        # Undo per-channel absorption so the merged weight is equivalent to the
-        # LoRA delta applied to raw (unscaled) inputs.
+        # Undo channel absorption so the merged delta applies to raw inputs.
         if self._has_channel_scale and down_weight.dim() == 2:
             down_weight = down_weight * self.inv_scale.to(down_weight).unsqueeze(0)
 
@@ -156,10 +140,9 @@ class LoRAModule(BaseLoRAModule):
     def merge_to(self, sd, dtype, device):
         """Merge a per-LoRA state-dict slice into org_module.weight in-place.
 
-        Used by the alternative-to-apply_to inference path: deltas land directly
-        on the base model's Linear/Conv2d weight, no forward hooks. The sd
-        parameter holds the raw checkpoint slice because the LoRA modules
-        themselves haven't been load_state_dict'd at this point.
+        Alternative to apply_to: delta lands on the base weight, no forward
+        hook. `sd` is the raw checkpoint slice — the LoRA module hasn't been
+        load_state_dict'd at this point.
         """
         with torch.no_grad():
             weight = self.org_module.weight
@@ -174,8 +157,7 @@ class LoRAModule(BaseLoRAModule):
             down_weight = sd["lora_down.weight"].to(torch.float).to(device)
             up_weight = sd["lora_up.weight"].to(torch.float).to(device)
 
-            # Undo per-channel absorption before merging into the base weight so
-            # that the merged forward (no x rebalancing) produces the same output.
+            # Merged forward has no x rebalancing — undo absorption first.
             if "inv_scale" in sd:
                 inv_scale = sd["inv_scale"].to(torch.float).to(device)
                 if down_weight.dim() == 2:

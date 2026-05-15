@@ -80,3 +80,9 @@ fera_fecl_weight = 0.0
 blocks_to_swap = 0
 
 use_cmmd = false
+
+[variant]
+family = "fera"
+label = "FeRA"
+description = "Author-faithful FeRA — independent-A stacked experts + FEI router."
+order = 10
