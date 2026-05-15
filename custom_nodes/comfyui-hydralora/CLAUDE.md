@@ -55,17 +55,32 @@ Routing is data-driven: `router = Linear(rank + sigma_dim + fei_dim, E)` with th
 
 ## ChimeraHydra (dual-pool additive routing)
 
-`ss_use_chimera_hydra="true"` flips `AnimaAdapterLoader` to a dual-pool path. Shape contract is HydraLoRA-MoE (shared `lora_down` + per-expert `lora_ups.{i}`) **plus** top-level `freq_router.net.*` keys, where:
+`ss_use_chimera_hydra="true"` flips `AnimaAdapterLoader` to a dual-pool path. Two on-disk formats exist:
+
+### Legacy single-A (pre-c4851b6, single `lora_down` shared across both pools)
+
+Shape contract is HydraLoRA-MoE (shared `lora_down` + per-expert `lora_ups.{i}`) **plus** top-level `freq_router.net.*` keys, where:
 
 - The per-Linear router shrinks to `(K_c, rank)` — `K_c = ss_num_experts_content`, no σ/FEI columns. Reads pooled rank-R `lx` only.
+- Per-Linear hook concatenates `[π_c, π_f]` over `E = K_c + K_f` experts and dispatches the standard Hydra einsum/bmm.
+
+Detection / dispatch: `load_adapter` writes `bundle["hydra"]["chimera"]`; `_apply_hydra_live_to_model` swaps `_make_router_pre_hook` for `_make_chimera_pre_hook` and `_make_hydra_hook` for `_make_chimera_hook`.
+
+### Dual-A (post-c4851b6, two independent `lora_down_{c,f}` per Linear)
+
+Shape contract is per-pool: `lora_down_c.weight` + `lora_down_f.weight` (each `(r, in)`), per-pool stacked ups `lora_ups_c.{i}.weight` / `lora_ups_f.{j}.weight` (each `(out, r)`), K_c-narrow content router, top-level `freq_router.net.*`. The two pools each carry their own SVD-partitioned subspace (Q_basis_c.row ⊥ Q_basis_f.row, P_bases_c.col ⊥ P_bases_f.col) and bake `lambda_{c,f}` into the saved weights via the sqrt-split in `_convert_chimera_dual_a_to_hydra`.
+
+- Per-Linear hook (`_make_chimera_dual_a_hook`): down-projects `x` separately to `lx_c` and `lx_f`, runs the content router on pooled `lx_c` only, sums gate-weighted `out_c + out_f`. No `alpha/rank` scale at inference (mirrors training where the chimera modules ignore `alpha` and bake all scaling into `lambda_{c,f}`).
+- FreqRouter pre-hook is unchanged (`_make_chimera_pre_hook` — same input shape, same `[FEI, sinusoidal(σ)]` concat order).
+
+Detection / dispatch: `load_adapter` writes `bundle["chimera_dual_a"]` (a top-level sibling of `bundle["hydra"]` — distinct from the legacy `bundle["hydra"]["chimera"]`); `_apply_chimera_dual_a_to_model` installs the dual-A hooks. The two paths are mutually exclusive by key shape — a single checkpoint cannot mix legacy and dual-A on the same prefix.
+
+### Shared invariants
+
 - The network-level FreqRouter MLP (`Linear → SiLU → Linear → softmax/τ`, weights `freq_router.net.{0,2}.weight/bias`) runs once per denoising step on `concat(FEI(z_t), sinusoidal(σ))` and emits `π_f ∈ (B, K_f)`. Concat order matches `networks/lora_anima/network.py::set_fei` chimera branch (`[FEI, σ]`).
-- Per-Linear hook concatenates `[π_c, π_f]` over `E = K_c + K_f` experts and dispatches the standard Hydra einsum/bmm. σ-band partition is unsupported (the FreqRouter owns the σ axis) and force-skipped even if metadata claims it.
-
-Detection / dispatch live in `adapter.py`: `load_adapter` writes `bundle["hydra"]["chimera"]` with the captured pool sizes + FreqRouter state dict; `_apply_hydra_live_to_model` swaps `_make_router_pre_hook` for `_make_chimera_pre_hook` (which also runs the FreqRouter) and `_make_hydra_hook` for `_make_chimera_hook`. Mutually exclusive at runtime with the σ/FEI-only Hydra path on the same Linear — chimera files cannot mix.
-
-T-LoRA's content-branch rank mask is training-only and intentionally not applied at inference — same rationale as plain T-LoRA (`[[project_tlora_inference_full_rank]]`).
-
-Old `sigma_mlp.*` checkpoints are not supported (see README §2.1.0).
+- σ-band partition is unsupported (the FreqRouter owns the σ axis) and force-skipped even if metadata claims it.
+- T-LoRA's content-branch rank mask is training-only and intentionally not applied at inference — same rationale as plain T-LoRA (`[[project_tlora_inference_full_rank]]`).
+- Old `sigma_mlp.*` checkpoints are not supported (see README §2.1.0).
 
 ## Author-faithful FeRA (`fera.py`)
 

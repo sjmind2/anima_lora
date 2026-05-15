@@ -243,3 +243,186 @@ def test_chimera_hook_dispatches_dual_pool(tmp_path):
     # Both deltas should be non-trivial (the content router contributes too).
     assert delta_a.abs().mean() > 1e-3
     assert delta_b.abs().mean() > 1e-3
+
+
+# ---------------------------------------------------------------------------
+# Dual-A chimera (post-c4851b6 format): two independent A's per Linear, two
+# per-pool B stacks. _parse_chimera_dual_a / _make_chimera_dual_a_hook /
+# _apply_chimera_dual_a_to_model exercise paths in adapter.py.
+# ---------------------------------------------------------------------------
+
+
+def _write_chimera_dual_a_checkpoint(
+    path: Path,
+    *,
+    K_c: int,
+    K_f: int,
+    rank: int,
+    in_dim: int,
+    out_dim: int,
+    fei_dim: int,
+    sigma_dim: int,
+    fr_hidden: int = 8,
+    prefix: str = "lora_unet_blocks_0_mlp_layer1",
+) -> None:
+    """Synth a minimal dual-A chimera ``_chimera.safetensors`` file.
+
+    Mirrors what ``_build_chimera_moe_state_dict`` writes after the
+    dual-A SVD distillation: per-pool ``lora_down_{c,f}.weight`` +
+    per-pool stacked ups ``lora_ups_{c,f}.{i}.weight``, K_c-narrow
+    content router, top-level ``freq_router.net.*``.
+    """
+    torch.manual_seed(321)
+    sd = {
+        f"{prefix}.lora_down_c.weight": torch.randn(rank, in_dim),
+        f"{prefix}.lora_down_f.weight": torch.randn(rank, in_dim),
+        f"{prefix}.alpha": torch.tensor(float(rank)),
+        f"{prefix}.router.weight": torch.randn(K_c, rank) * 0.01,
+        f"{prefix}.router.bias": torch.zeros(K_c),
+        "freq_router.net.0.weight": torch.randn(fr_hidden, fei_dim + sigma_dim),
+        "freq_router.net.0.bias": torch.zeros(fr_hidden),
+        "freq_router.net.2.weight": torch.randn(K_f, fr_hidden) * 0.5,
+        "freq_router.net.2.bias": torch.zeros(K_f),
+    }
+    for i in range(K_c):
+        sd[f"{prefix}.lora_ups_c.{i}.weight"] = torch.randn(out_dim, rank)
+    for j in range(K_f):
+        sd[f"{prefix}.lora_ups_f.{j}.weight"] = torch.randn(out_dim, rank)
+
+    metadata = {
+        "ss_use_chimera_hydra": "true",
+        "ss_num_experts_content": str(K_c),
+        "ss_num_experts_freq": str(K_f),
+        "ss_chimera_fei_feature_dim": str(fei_dim),
+        "ss_chimera_sigma_feature_dim": str(sigma_dim),
+        "ss_chimera_fei_sigma_low_div": "4.0",
+        "ss_use_moe_style": "shared_A",
+        "ss_route_per_layer": "true",
+        "ss_router_source": "input",
+    }
+    save_file(sd, str(path), metadata=metadata)
+
+
+def test_load_adapter_recognizes_chimera_dual_a(tmp_path):
+    """``load_adapter`` populates ``bundle['chimera_dual_a']`` with the
+    pool split + FreqRouter state when dual-A keys are present.
+    """
+    adapter = _load_adapter_module()
+    adapter._adapter_cache.clear()
+
+    path = tmp_path / "anima_chimera_dual_chimera.safetensors"
+    _write_chimera_dual_a_checkpoint(
+        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
+        fei_dim=2, sigma_dim=0,
+    )
+
+    bundle = adapter.load_adapter(str(path))
+    # Dual-A files have no shared-A `.lora_ups.{i}.weight` keys, so the
+    # legacy hydra parser returns None.
+    assert bundle["hydra"] is None
+    cd = bundle["chimera_dual_a"]
+    assert cd is not None
+    assert cd["num_experts_content"] == 3
+    assert cd["num_experts_freq"] == 2
+    assert cd["fei_feature_dim"] == 2
+    assert cd["sigma_feature_dim"] == 0
+    fr = cd["freq_router_sd"]
+    assert fr["net.0.weight"].shape == (8, 2)
+    assert fr["net.2.weight"].shape == (2, 8)
+    # Plain-LoRA extraction must NOT pick up dual-A keys.
+    assert bundle["lora"] is None
+    # Module map keyed by prefix.
+    assert "lora_unet_blocks_0_mlp_layer1" in cd["modules"]
+    mod = cd["modules"]["lora_unet_blocks_0_mlp_layer1"]
+    assert mod["lora_down_c"].shape == (4, 8)
+    assert mod["lora_down_f"].shape == (4, 8)
+    assert len(mod["lora_ups_c"]) == 3
+    assert len(mod["lora_ups_f"]) == 2
+
+
+def test_chimera_dual_a_hook_dispatches_two_pools(tmp_path):
+    """Per-Linear dual-A hook routes the content + freq pools through
+    independent A's and sums their contributions. Verifies (a) the freq
+    gate reaches the freq B-stack einsum and (b) the content gate reaches
+    the content B-stack einsum — both via per-pool one-hot swaps.
+    """
+    adapter = _load_adapter_module()
+    adapter._adapter_cache.clear()
+    rank, in_dim, out_dim = 4, 8, 8
+    K_c, K_f = 3, 2
+    path = tmp_path / "anima_chimera_dual.safetensors"
+    _write_chimera_dual_a_checkpoint(
+        path, K_c=K_c, K_f=K_f, rank=rank, in_dim=in_dim, out_dim=out_dim,
+        fei_dim=2, sigma_dim=0,
+    )
+    bundle = adapter.load_adapter(str(path))
+    cd = bundle["chimera_dual_a"]
+    mod = cd["modules"]["lora_unet_blocks_0_mlp_layer1"]
+    ups_c_stacked = torch.stack(
+        [mod["lora_ups_c"][i] for i in sorted(mod["lora_ups_c"].keys())], dim=0
+    )
+    ups_f_stacked = torch.stack(
+        [mod["lora_ups_f"][i] for i in sorted(mod["lora_ups_f"].keys())], dim=0
+    )
+    params = {
+        "lora_down_c": mod["lora_down_c"],
+        "lora_down_f": mod["lora_down_f"],
+        "lora_up_c_stack": ups_c_stacked,
+        "lora_up_f_stack": ups_f_stacked,
+        "router_w": mod["router_w"],
+        "router_b": mod["router_b"],
+        "inv_scale": None,
+        "num_experts_content": K_c,
+        "num_experts_freq": K_f,
+    }
+
+    state: dict = {}
+    hook = adapter._make_chimera_dual_a_hook(params, strength=1.0, router_state=state)
+
+    linear = torch.nn.Linear(in_dim, out_dim, bias=False)
+    x = torch.randn(2, 5, in_dim)
+    base_out = linear(x)
+
+    # Case A: freq one-hot on expert 0.
+    state["pi_f"] = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+    out_a = hook(linear, (x,), base_out.clone())
+    delta_a = out_a - base_out
+
+    # Case B: freq one-hot on expert 1 — content path unchanged, so
+    # only the freq-pool contribution to delta should differ.
+    state["pi_f"] = torch.tensor([[0.0, 1.0], [0.0, 1.0]])
+    out_b = hook(linear, (x,), base_out.clone())
+    delta_b = out_b - base_out
+
+    assert delta_a.shape == base_out.shape
+    assert not torch.allclose(delta_a, delta_b, atol=1e-5), (
+        "Swapping π_f one-hot mass between freq experts produced "
+        "identical deltas — FreqRouter gate is not reaching the freq "
+        "B-stack einsum."
+    )
+    assert delta_a.abs().mean() > 1e-3
+    assert delta_b.abs().mean() > 1e-3
+
+
+def test_chimera_dual_a_metadata_mismatch_rejected(tmp_path):
+    """If ``ss_num_experts_content`` disagrees with the actual
+    ``lora_ups_c.*`` count, ``load_adapter`` raises rather than silently
+    routing on a mis-shaped gate.
+    """
+    adapter = _load_adapter_module()
+    adapter._adapter_cache.clear()
+    path = tmp_path / "bad_dual_chimera.safetensors"
+    _write_chimera_dual_a_checkpoint(
+        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
+        fei_dim=2, sigma_dim=0,
+    )
+    # Rewrite metadata with bogus K_c so loader can catch it.
+    from safetensors.torch import load_file
+    from safetensors import safe_open
+    sd = load_file(str(path))
+    with safe_open(str(path), framework="pt") as f:
+        meta = dict(f.metadata() or {})
+    meta["ss_num_experts_content"] = "99"
+    save_file(sd, str(path), metadata=meta)
+    with pytest.raises(ValueError, match="ss_num_experts_content=99"):
+        adapter.load_adapter(str(path))
