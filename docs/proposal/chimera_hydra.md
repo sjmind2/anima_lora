@@ -1,8 +1,8 @@
-# KimeraHydra — Dual-pool additive routing for timestep-aware MoE
+# ChimeraHydra — Dual-pool additive routing for timestep-aware MoE
 
 A single-phase MoE-LoRA recipe for Anima's ortho-hydra setup. Two pools
 of B-heads share one A per adapted Linear — a **content** pool and a
-**frequency** pool (the two heads of the kimera). Each pool is routed by
+**frequency** pool (the two heads of the chimera). Each pool is routed by
 a small router whose **input** structurally owns one axis: content
 (pooled `lx` / text) or frequency-stage (FEI + logSNR + t_emb). Pool
 outputs are added. No staging, no σ-band overlap mask, no multiplicative
@@ -13,7 +13,7 @@ gate.
 > `docs/proposal/staged_2d_experts.md`. Staging existed to break
 > gradient confounding in the multiplicative gate `g_c ⊙ g_t`. Additive
 > composition removes the confounding directly, so the curriculum is
-> solving a problem KimeraHydra doesn't have.
+> solving a problem ChimeraHydra doesn't have.
 
 ## TL;DR
 

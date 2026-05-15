@@ -236,6 +236,12 @@ def create_network(
             f"OrthoHydraLoRA: Cayley + MoE, num_experts={cfg.num_experts}, "
             f"balance_loss_weight={network._balance_loss_weight}"
         )
+    elif spec.name == "chimera_hydra":
+        logger.info(
+            f"ChimeraHydra: dual-pool additive, K_c={cfg.num_experts_content}, "
+            f"K_f={cfg.num_experts_freq}, balance(w_c={network._balance_w_content}, "
+            f"w_f={network._balance_w_freq}), outer={network._balance_loss_weight}"
+        )
     elif spec.name == "ortho":
         logger.info("OrthoLoRA: Cayley parameterization + SVD-informed init")
     elif spec.name == "hydra":
@@ -661,6 +667,62 @@ def create_network_from_weights(
         new_router_source if new_router_source else None
     )
 
+    # ChimeraHydra stamps. Presence of ``ss_use_chimera_hydra="true"``
+    # flips the loader to the chimera spec. The chimera-native save format
+    # preserves the Cayley params (S_p / S_q / P_bases / Q_basis /
+    # lambda_layer) so the reload directly rebuilds a chimera network from
+    # the same kwargs the trainer used. The FreqRouter input dim depends
+    # on FEI + σ feature dims, both stamped via the chimera-specific keys
+    # (``router_source="input"`` for chimera, so the standard
+    # ``ss_fei_feature_dim`` stamp is not fired).
+    is_chimera_hydra = (
+        str(file_metadata.get("ss_use_chimera_hydra", "")).strip().lower() == "true"
+    )
+    chimera_num_experts_content: Optional[int] = (
+        int(file_metadata["ss_num_experts_content"])
+        if is_chimera_hydra and "ss_num_experts_content" in file_metadata
+        else None
+    )
+    chimera_num_experts_freq: Optional[int] = (
+        int(file_metadata["ss_num_experts_freq"])
+        if is_chimera_hydra and "ss_num_experts_freq" in file_metadata
+        else None
+    )
+    chimera_fei_feature_dim: Optional[int] = (
+        int(file_metadata["ss_chimera_fei_feature_dim"])
+        if is_chimera_hydra and "ss_chimera_fei_feature_dim" in file_metadata
+        else None
+    )
+    chimera_sigma_feature_dim: Optional[int] = (
+        int(file_metadata["ss_chimera_sigma_feature_dim"])
+        if is_chimera_hydra and "ss_chimera_sigma_feature_dim" in file_metadata
+        else None
+    )
+    chimera_fei_sigma_low_div: Optional[float] = (
+        float(file_metadata["ss_chimera_fei_sigma_low_div"])
+        if is_chimera_hydra and "ss_chimera_fei_sigma_low_div" in file_metadata
+        else None
+    )
+    if is_chimera_hydra:
+        # Override spec → chimera_hydra (chimera-native save format means
+        # the on-disk keys ARE chimera Cayley params, so the
+        # ``has_ortho_hydra`` discriminator fires correctly; this branch
+        # just flips the module class).
+        spec = NETWORK_REGISTRY["chimera_hydra"]
+        module_class = spec.module_class
+        # Surface the chimera-specific σ/FEI dims into the cfg slots the
+        # FreqRouter reads (``cfg.fei_feature_dim`` / ``cfg.sigma_feature_dim``).
+        # Without these overrides the loader would fall back to the legacy
+        # auto-detected ``sigma_feature_dim_detected`` (default 128) and the
+        # FreqRouter would be built with the wrong input width — load_state_dict
+        # then fails with a Linear weight shape mismatch.
+        if chimera_sigma_feature_dim is not None:
+            sigma_feature_dim_detected = chimera_sigma_feature_dim
+        if chimera_fei_feature_dim is not None:
+            fei_feature_dim_detected = chimera_fei_feature_dim
+        if chimera_fei_sigma_low_div is not None:
+            fei_sigma_low_div_meta = chimera_fei_sigma_low_div
+
     cfg = LoRANetworkCfg.from_weights(
         modules_dim=modules_dim,
         modules_alpha=modules_alpha,
@@ -685,6 +747,9 @@ def create_network_from_weights(
         new_use_moe_style=new_use_moe_style,
         new_route_per_layer=new_route_per_layer,
         new_router_source=new_router_source_stamp,
+        is_chimera_hydra=is_chimera_hydra,
+        num_experts_content=chimera_num_experts_content,
+        num_experts_freq=chimera_num_experts_freq,
     )
 
     network = LoRANetwork(text_encoders, unet, cfg, multiplier=multiplier)

@@ -193,6 +193,11 @@ COMMANDS = {
         exp_training.cmd_soft_tokens,
         "[experimental] SoftREPA-style per-layer × per-t soft tokens (training-only v1)",
     ),
+    "exp-chimera": (
+        exp_training.cmd_chimera,
+        "[experimental] ChimeraHydra dual-pool additive routing "
+        "(content + freq pools on OrthoHydra; configs/methods/chimera.toml)",
+    ),
     "exp-ip-adapter": (
         exp_training.cmd_ip_adapter,
         "[experimental] IP-Adapter training (decoupled image cross-attention)",

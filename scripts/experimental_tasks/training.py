@@ -32,6 +32,19 @@ def cmd_soft_tokens(extra):
     train("soft_tokens", extra)
 
 
+def cmd_chimera(extra):
+    """ChimeraHydra (dual-pool additive routing — docs/proposal/chimera_hydra.md).
+
+    Drives ``configs/methods/chimera.toml``: OrthoHydra split into a content
+    pool (K_c=3, per-layer rank-R router on pooled lx) and a freq pool
+    (K_f=3, network-level FreqRouter on concat(FEI, σ-features)). Pool
+    outputs are added (no multiplicative gate, no σ-band overlap mask).
+    Single-phase co-training; per-pool balance loss; T-LoRA mask on the
+    content branch only.
+    """
+    train("chimera", extra)
+
+
 def cmd_ip_adapter(extra):
     train("ip_adapter", extra)
 

@@ -298,6 +298,25 @@ class LoRANetworkCfg:
     fera_fecl_weight: float = 0.0
     fera_num_bands: int = 3
 
+    # ChimeraHydra (dual-pool additive routing — see
+    # ``docs/proposal/chimera_hydra.md``). ``use_chimera_hydra=True`` swaps
+    # the OrthoHydra path for the chimera module, which splits ``num_experts``
+    # into a content pool (``num_experts_content``, routed by the per-layer
+    # rank-R router) and a freq pool (``num_experts_freq``, routed by the
+    # network-level ``FreqRouter`` fed by FEI + sinusoidal-σ features). Total
+    # E = K_c + K_f. Per-pool balance loss weights are tracked separately so
+    # each pool spreads under independent pressure (a single combined term
+    # would let one pool flatten to uniform while the other concentrates).
+    use_chimera_hydra: bool = False
+    num_experts_content: int = 3
+    num_experts_freq: int = 3
+    balance_w_content: Optional[float] = None  # falls back to balance_loss_weight
+    balance_w_freq: Optional[float] = None  # falls back to balance_loss_weight
+    # FreqRouter init magnitude. Non-zero so the freq pool differentiates
+    # immediately as FEI/σ vary across the batch — zero-weight init would
+    # be a fixed point under the additive composition (see proposal §"Init").
+    freq_router_init_std: float = 0.1
+
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
 
@@ -437,6 +456,33 @@ class LoRANetworkCfg:
         fera_fecl_weight = float(kwargs.get("fera_fecl_weight", 0.0))
         fera_num_bands = int(kwargs.get("fera_num_bands", kwargs.get("num_bands", 3)))
 
+        # ChimeraHydra knobs. ``num_experts`` (parent Hydra cfg) is treated
+        # as a derived value when ``use_chimera_hydra=True`` — recomputed
+        # below so users only set K_c / K_f.
+        use_chimera_hydra = _as_bool(kwargs.get("use_chimera_hydra"))
+        num_experts_content = int(kwargs.get("num_experts_content", 3))
+        num_experts_freq = int(kwargs.get("num_experts_freq", 3))
+        balance_w_content_raw = kwargs.get("balance_w_content")
+        balance_w_content = (
+            float(balance_w_content_raw) if balance_w_content_raw is not None else None
+        )
+        balance_w_freq_raw = kwargs.get("balance_w_freq")
+        balance_w_freq = (
+            float(balance_w_freq_raw) if balance_w_freq_raw is not None else None
+        )
+        freq_router_init_std = float(kwargs.get("freq_router_init_std", 0.1))
+        if use_chimera_hydra:
+            if num_experts_content <= 0 or num_experts_freq <= 0:
+                raise ValueError(
+                    "use_chimera_hydra=True requires num_experts_content > 0 "
+                    f"and num_experts_freq > 0 (got K_c={num_experts_content}, "
+                    f"K_f={num_experts_freq})."
+                )
+            # Derive total E from the pool split so the rest of the
+            # cfg machinery (warmup masks, balance loss accumulators, etc.)
+            # sees a consistent num_experts.
+            num_experts = num_experts_content + num_experts_freq
+
         # Three-axis routing resolution (plan2.md §three-axis-config). The
         # legacy ``use_hydra`` / ``use_sigma_router`` / ``use_fei_router``
         # kwargs were retired in plan2 task #6 — every shipped TOML uses the
@@ -474,6 +520,35 @@ class LoRANetworkCfg:
         else:
             # No-MoE means no router at all; Hydra defaults to per-layer.
             route_per_layer = use_moe_style is not False
+
+        # ChimeraHydra: pin the three-axis cells to (shared_A, per-layer,
+        # input) regardless of TOML wiring. The chimera content router IS
+        # a per-layer shared_A Hydra router on pooled lx; the freq router
+        # adds a second routing source on top via a dedicated network-level
+        # mechanism. Stamping these three values means the save metadata
+        # flows through the standard MoE branch and the loader can detect
+        # the chimera-specific stamps without a parallel three-axis path.
+        if use_chimera_hydra:
+            if use_moe_style not in (False, "shared_A"):
+                raise ValueError(
+                    "use_chimera_hydra=True is only compatible with "
+                    "use_moe_style='shared_A' (or unset); got "
+                    f"use_moe_style={use_moe_style!r}."
+                )
+            if raw_route_per_layer is not None and not _as_bool(raw_route_per_layer):
+                raise ValueError(
+                    "use_chimera_hydra=True requires route_per_layer=True "
+                    "(content router is per-layer)."
+                )
+            if raw_router_source is not None and raw_router_source != "input":
+                raise ValueError(
+                    "use_chimera_hydra=True requires router_source='input' "
+                    "(content router reads pooled lx); σ/FEI are owned by "
+                    "the network-level FreqRouter."
+                )
+            use_moe_style = "shared_A"
+            route_per_layer = True
+            router_source = "input"
 
         # Validate impossible combos.
         if use_moe_style is False and (
@@ -541,6 +616,12 @@ class LoRANetworkCfg:
             ortho_init_std=ortho_init_std,
             fera_fecl_weight=fera_fecl_weight,
             fera_num_bands=fera_num_bands,
+            use_chimera_hydra=use_chimera_hydra,
+            num_experts_content=num_experts_content,
+            num_experts_freq=num_experts_freq,
+            balance_w_content=balance_w_content,
+            balance_w_freq=balance_w_freq,
+            freq_router_init_std=freq_router_init_std,
             channel_scales_dict=channel_scales_dict,
             verbose=verbose,
         )
@@ -574,6 +655,12 @@ class LoRANetworkCfg:
         new_use_moe_style: Optional[str] = None,
         new_route_per_layer: Optional[bool] = None,
         new_router_source: Optional[str] = None,
+        # ChimeraHydra stamps. Present only on chimera checkpoints — when
+        # set the loader builds ``ChimeraHydraLoRAExpModule`` instead of
+        # ``OrthoHydraLoRAExpModule`` and the network attaches a FreqRouter.
+        is_chimera_hydra: bool = False,
+        num_experts_content: Optional[int] = None,
+        num_experts_freq: Optional[int] = None,
     ) -> "LoRANetworkCfg":
         """Build cfg from a checkpoint key-sniff (warm-start / inference path).
 
@@ -615,6 +702,24 @@ class LoRANetworkCfg:
             route_per_layer = False
             router_source = "none"
 
+        # ChimeraHydra requires both pool sizes to be stamped at save time;
+        # absence on a flagged checkpoint indicates malformed metadata.
+        if is_chimera_hydra:
+            if num_experts_content is None or num_experts_freq is None:
+                raise RuntimeError(
+                    "ChimeraHydra checkpoint missing ss_num_experts_content / "
+                    "ss_num_experts_freq metadata — checkpoint is malformed."
+                )
+            if (
+                hydra_num_experts
+                and hydra_num_experts != num_experts_content + num_experts_freq
+            ):
+                raise RuntimeError(
+                    "ChimeraHydra checkpoint K_c + K_f mismatch: stamped "
+                    f"K_c={num_experts_content}, K_f={num_experts_freq}, "
+                    f"detected num_experts={hydra_num_experts}."
+                )
+
         return cls(
             lora_dim=4,
             alpha=1.0,
@@ -643,4 +748,11 @@ class LoRANetworkCfg:
                 float(fei_sigma_low_div) if fei_sigma_low_div is not None else 4.0
             ),
             fei_router_names=fei_router_names,
+            use_chimera_hydra=is_chimera_hydra,
+            num_experts_content=(
+                int(num_experts_content) if num_experts_content is not None else 3
+            ),
+            num_experts_freq=(
+                int(num_experts_freq) if num_experts_freq is not None else 3
+            ),
         )

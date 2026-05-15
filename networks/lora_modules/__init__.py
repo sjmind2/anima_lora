@@ -2,6 +2,7 @@
 # `from networks.lora_modules import LoRAModule, ...` works unchanged.
 
 from networks.lora_modules.base import BaseLoRAModule, _absorb_channel_scale
+from networks.lora_modules.chimera import ChimeraHydraLoRAExpModule
 from networks.lora_modules.hydra import HydraLoRAModule, _sigma_sinusoidal_features
 from networks.lora_modules.lora import LoRAModule
 from networks.lora_modules.ortho import (
@@ -13,6 +14,7 @@ from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
 
 __all__ = [
     "BaseLoRAModule",
+    "ChimeraHydraLoRAExpModule",
     "HydraLoRAModule",
     "LoRAModule",
     "OrthoHydraLoRAExpModule",

@@ -603,6 +603,24 @@ def save_network_weights(
     if metadata is not None and len(metadata) == 0:
         metadata = None
 
+    # ChimeraHydra writes raw chimera-native keys (S_p / S_q / P_bases /
+    # Q_basis / lambda_layer + content router + network-level freq_router)
+    # so the round-trip preserves the dual-pool architecture. Skip every
+    # OrthoHydra → Hydra distillation step — those are forward-only and
+    # would collapse the chimera structure into a plain Hydra MoE.
+    if save_variant == "chimera_hydra_native":
+        chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
+        sd: Dict[str, torch.Tensor] = {}
+        for k, v in state_dict.items():
+            sd[k] = v.detach().clone().to("cpu")
+        if dtype is not None:
+            sd = {k: v.to(dtype) for k, v in sd.items()}
+        from safetensors.torch import save_file as sf_save
+
+        sf_save(sd, chimera_file, metadata or {})
+        logger.info(f"ChimeraHydra native format saved to {chimera_file}")
+        return
+
     # Steps 1–3: key-triggered conversions. Ordering is load-bearing:
     #   * ortho_stacked_experts runs first (3-D S_q only).
     #   * ortho_hydra_to_hydra (2-D S_q + 3-D S_p) then.

@@ -7,6 +7,7 @@ class it instantiates and a ``save_variant`` label consumed by
 
 Flag precedence (evaluated top to bottom, first match wins):
 
+    use_chimera_hydra                    → chimera_hydra
     use_moe_style="independent_A"        → stacked_experts_global_fei
     use_moe_style="shared_A" + use_ortho → ortho_hydra
     use_moe_style="shared_A"             → hydra
@@ -27,6 +28,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type
 
 from networks.lora_deprecated import DoRAModule
 from networks.lora_modules import (
+    ChimeraHydraLoRAExpModule,
     HydraLoRAModule,
     LoRAModule,
     OrthoHydraLoRAExpModule,
@@ -156,6 +158,22 @@ def _post_init_hydra(network: Any, kwargs: Mapping[str, Any]) -> None:
     else:
         network.fecl_weight = float(kwargs.get("fera_fecl_weight", 0.0) or 0.0)
 
+    # ChimeraHydra: stamp the chimera flag + per-pool balance weights for
+    # ``get_balance_loss`` to consume. Falls back to the shared
+    # ``balance_loss_weight`` (the OrthoHydra default) when the user didn't
+    # set explicit per-pool weights — matches the proposal §"Balance loss"
+    # ("``w_c`` keeps the current ortho-hydra value; ``w_f`` starts at the
+    # same value, tunable").
+    cfg = getattr(network, "cfg", None)
+    if cfg is not None and getattr(cfg, "use_chimera_hydra", False):
+        network._use_chimera_hydra = True
+        w_c = cfg.balance_w_content if cfg.balance_w_content is not None else target
+        w_f = cfg.balance_w_freq if cfg.balance_w_freq is not None else target
+        network._balance_w_content = float(w_c)
+        network._balance_w_freq = float(w_f)
+    else:
+        network._use_chimera_hydra = False
+
 
 _HYDRA_KWARG_FLAGS: Tuple[str, ...] = (
     "num_experts",
@@ -177,6 +195,18 @@ _HYDRA_KWARG_FLAGS: Tuple[str, ...] = (
     # FEI-conditional router (router_source="fei"; FeRA-style content-aware)
     "fei_feature_dim",
     "fei_sigma_low_div",
+)
+
+_CHIMERA_KWARG_FLAGS: Tuple[str, ...] = (
+    "use_chimera_hydra",
+    "num_experts_content",
+    "num_experts_freq",
+    # Per-pool balance weights. Fall back to balance_loss_weight when unset.
+    "balance_w_content",
+    "balance_w_freq",
+    # FreqRouter init magnitude (small N(0, std)) — non-zero so the freq
+    # pool differentiates at step 0.
+    "freq_router_init_std",
 )
 
 
@@ -203,6 +233,22 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         module_class=OrthoHydraLoRAExpModule,
         save_variant="ortho_hydra_to_hydra",
         kwarg_flags=_HYDRA_KWARG_FLAGS,
+        post_init=_post_init_hydra,
+    ),
+    # ChimeraHydra: dual-pool additive routing on the OrthoHydra Cayley
+    # parameterization (proposal: docs/proposal/chimera_hydra.md). Uses
+    # ``chimera_hydra_native`` save variant: the on-disk format preserves
+    # the Cayley params (S_p / S_q / P_bases / Q_basis / lambda_layer) and
+    # the network-level FreqRouter, so a saved chimera can be reloaded
+    # into a chimera module verbatim (resume training, chimera-native
+    # inference). ComfyUI compatibility is deferred — the chimera node
+    # would need its own freq-router branch to consume the dual-pool
+    # gates and is not part of this commit.
+    "chimera_hydra": NetworkSpec(
+        name="chimera_hydra",
+        module_class=ChimeraHydraLoRAExpModule,
+        save_variant="chimera_hydra_native",
+        kwarg_flags=_HYDRA_KWARG_FLAGS + _CHIMERA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
     # FeRA paper-faithful: independent-A stacked experts, single network-level
@@ -260,9 +306,19 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     ``"shared_A"`` routes to ``hydra``. The legacy ``use_hydra`` kwarg was
     retired in plan2 task #6 — ``LoRANetworkCfg.from_kwargs`` raises if a
     TOML still carries it.
+
+    ``use_chimera_hydra=True`` short-circuits to the chimera variant. The
+    chimera config requires ``use_moe_style="shared_A"`` semantics under
+    the hood (OrthoHydra parameterization), but uses K_c + K_f instead of
+    a single ``num_experts`` — the user only sets the chimera flag.
     """
     use_dora = _parse_bool_flag(kwargs, "use_dora")
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
+    use_chimera = _parse_bool_flag(kwargs, "use_chimera_hydra")
+    if use_chimera and use_dora:
+        raise ValueError("use_chimera_hydra is mutually exclusive with use_dora")
+    if use_chimera:
+        return NETWORK_REGISTRY["chimera_hydra"]
 
     raw_moe = kwargs.get("use_moe_style")
     if isinstance(raw_moe, str):
