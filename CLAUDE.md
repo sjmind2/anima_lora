@@ -153,7 +153,7 @@ On Windows, use `python tasks.py <command>` instead of `make <command>`. Extra a
 | `scripts/tasks/` | Per-domain task implementations (`training`, `inference`, `preprocess`, `masking`, `gui`, `downloads`, `utilities`, `tagger`, `dcw`) — where command bodies actually live; `_common.py` holds shared helpers. |
 | `scripts/experimental_tasks/` | Bodies for the `exp-*` commands (postfix, ip-adapter, easycontrol training + their `exp-test-*` inference). Reuses helpers from `scripts/tasks/_common.py`. |
 
-Method deep-dives in `docs/methods/` (shipped); experimental method docs in `docs/experimental/`; active proposals in `docs/proposal/`. Retired material lives under `archive/`.
+Method deep-dives in `docs/methods/` (shipped); experimental method docs in `docs/experimental/`; active proposals in `docs/proposal/`. Retired material lives under `_archive/`.
 
 ## Config flow
 
@@ -220,7 +220,7 @@ Training-free, sampler-level correction that mixes each Euler step's `prev_sampl
 
 Calibration (`make dcw`) runs `scripts/dcw/measure_bias.py` against 5 aspect buckets at the production env (CFG=4, mod_w=3.0), then chains `train_fusion_head.py`. Incremental: each run drops a `manifest.json`, and subsequent runs grow the pool via `--exclude_stems`. End artifact `<run>/fusion_head.safetensors` (~285k params + per-aspect bucket profile + standardization stats). `make test-dcw-v4` auto-resolves the newest by mtime under `post_image_dataset/dcw/` then `bench/dcw/results/`. The trainer is **bucket-agnostic** by design (single population μ_g, aspect_emb pinned to zero — see `project_dcw_bucket_prior_cosmetic` memory); per-bucket sampling is kept only to balance the prompt pool. Final Euler step (σ_{i+1}=0) is always skipped — DCW is a numerical no-op there.
 
-Code: `library/inference/dcw_calibrator.py`, `networks/dcw.py`, `scripts/dcw/`, `scripts/tasks/dcw.py`, `bench/dcw/`. See `docs/methods/dcw.md` and `archive/dcw-learnable-calibrator/proposals/dcw-learnable-calibrator-v4.md`.
+Code: `library/inference/dcw_calibrator.py`, `networks/dcw.py`, `scripts/dcw/`, `scripts/tasks/dcw.py`, `bench/dcw/`. See `docs/methods/dcw.md` and `_archive/dcw-learnable-calibrator/proposals/dcw-learnable-calibrator-v4.md`.
 
 ## DirectEdit + Anima Tagger
 

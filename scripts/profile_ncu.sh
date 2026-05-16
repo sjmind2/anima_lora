@@ -75,7 +75,7 @@ exec ncu \
         --num_cpu_threads_per_process 3 \
         --mixed_precision bf16 \
         train.py \
-        --method lora --preset default \
+        --method chimera --preset default \
         --profile_steps "${PROFILE_START}-${PROFILE_END}" \
         --max_train_steps "$((PROFILE_END + 2))" \
         --compile_inductor_mode "${INDUCTOR_MODE:-default}"

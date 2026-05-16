@@ -37,7 +37,7 @@ caption_dropout_rate = 0.1
 # CPU-park / two-phase mitigations in `_try_cmmd_validation`. With
 # CMMD off, val falls back to the legacy per-σ FM-MSE pass (cheaper
 # but uninformative — see project_fm_val_loss_uninformative).
-use_cmmd = true
+use_cmmd = false
 
 logging_dir = "output/logs"
 log_with = "tensorboard"
