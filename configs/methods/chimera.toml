@@ -74,9 +74,10 @@ balance_w_freq = 5e-7
 network_content_router_lr_scale = 10
 network_freq_router_lr_scale = 2.0
 
-# FreqRouter input. FEI = 2-band simplex (e_low, e_high); σ-features =
-# 16-dim sinusoidal (same functional form as the DiT t_embedder). Total
-# input dim = 18, within the proposal's "F ≈ 32" target.
+# FreqRouter input. FEI = 2-band simplex (e_low, e_high). σ-features
+# disabled by default (sigma_feature_dim = 0), so the FreqRouter input
+# dim = 2. Flip sigma_feature_dim > 0 to add sinusoidal σ features (same
+# functional form as the DiT t_embedder); the proposal targets "F ≈ 32".
 
 fei_feature_dim = 2
 fei_sigma_low_div = 4.0

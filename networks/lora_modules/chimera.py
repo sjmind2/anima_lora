@@ -387,9 +387,16 @@ class ChimeraHydraLoRAExpModule(BaseLoRAModule):
         B = orig_shape[0]
         lx_c_3d = lx_c.reshape(B, -1, orig_shape[-1])
         lx_f_3d = lx_f.reshape(B, -1, orig_shape[-1])
-        out_c = torch.bmm(lx_c_3d, P_combined_c.transpose(1, 2))
-        out_f = torch.bmm(lx_f_3d, P_combined_f.transpose(1, 2))
-        out = (out_c * scale_c + out_f * scale_f).reshape(*orig_shape[:-1], -1)
+        # Cat along the rank axis and run ONE bmm instead of two — only one
+        # full hidden-size tensor is live at a time. scale_c == scale_f always
+        # (both come from ``_apply_rank_dropout`` which returns the same scalar
+        # for both calls), so the shared scale folds out of the sum.
+        lx_cat = torch.cat([lx_c_3d, lx_f_3d], dim=-1)          # (B, L, 2r)
+        P_combined_cat = torch.cat(
+            [P_combined_c, P_combined_f], dim=-1
+        )                                                       # (B, out, 2r)
+        out = torch.bmm(lx_cat, P_combined_cat.transpose(1, 2))
+        out = (out * scale_c).reshape(*orig_shape[:-1], -1)
 
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)
 
@@ -517,12 +524,9 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
             return org_forwarded
 
         x_lora = self._rebalance(x)
-        lx_c = torch.nn.functional.linear(
-            x_lora.float(), self.lora_down_c.weight.float()
-        )
-        lx_f = torch.nn.functional.linear(
-            x_lora.float(), self.lora_down_f.weight.float()
-        )
+        x_f32 = x_lora.float()
+        lx_c = torch.nn.functional.linear(x_f32, self.lora_down_c.weight.float())
+        lx_f = torch.nn.functional.linear(x_f32, self.lora_down_f.weight.float())
 
         pi_c = self._compute_content_gate(lx_c)  # (B, K_c)
         pi_f = self._freq_routing_weights
@@ -548,8 +552,13 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
         B = orig_shape[0]
         lx_c_3d = lx_c.reshape(B, -1, orig_shape[-1])
         lx_f_3d = lx_f.reshape(B, -1, orig_shape[-1])
-        out_c = torch.bmm(lx_c_3d, comb_c.transpose(1, 2))
-        out_f = torch.bmm(lx_f_3d, comb_f.transpose(1, 2))
-        out = (out_c * scale_c + out_f * scale_f).reshape(*orig_shape[:-1], -1)
+        # Cat along the rank axis → one bmm instead of two. Peak full hidden-
+        # size fp32 tensor count drops from 2 (out_c, out_f) to 1. scale_c ==
+        # scale_f at inference (rank_dropout is training-only), so the shared
+        # scale folds out of the sum.
+        lx_cat = torch.cat([lx_c_3d, lx_f_3d], dim=-1)          # (B, L, 2r)
+        comb_cat = torch.cat([comb_c, comb_f], dim=-1)          # (B, out, 2r)
+        out = torch.bmm(lx_cat, comb_cat.transpose(1, 2))
+        out = (out * scale_c).reshape(*orig_shape[:-1], -1)
 
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)
