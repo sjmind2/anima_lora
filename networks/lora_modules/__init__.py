@@ -4,13 +4,13 @@
 from networks.lora_modules.base import BaseLoRAModule, _absorb_channel_scale
 from networks.lora_modules.chimera import (
     ChimeraHydraInferenceModule,
-    ChimeraHydraLoRAExpModule,
+    ChimeraHydraLoRAModule,
 )
 from networks.lora_modules.hydra import HydraLoRAModule, _sigma_sinusoidal_features
 from networks.lora_modules.lora import LoRAModule
 from networks.lora_modules.ortho import (
-    OrthoHydraLoRAExpModule,
-    OrthoLoRAExpModule,
+    OrthoHydraLoRAModule,
+    OrthoLoRAModule,
 )
 from networks.lora_modules.reft import ReFTModule
 from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
@@ -18,11 +18,11 @@ from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
 __all__ = [
     "BaseLoRAModule",
     "ChimeraHydraInferenceModule",
-    "ChimeraHydraLoRAExpModule",
+    "ChimeraHydraLoRAModule",
     "HydraLoRAModule",
     "LoRAModule",
-    "OrthoHydraLoRAExpModule",
-    "OrthoLoRAExpModule",
+    "OrthoHydraLoRAModule",
+    "OrthoLoRAModule",
     "ReFTModule",
     "StackedExpertsLoRAModule",
     "_absorb_channel_scale",

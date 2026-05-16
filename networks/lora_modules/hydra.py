@@ -280,7 +280,7 @@ class HydraLoRAModule(BaseLoRAModule):
         must carry the FreqRouter's grad_fn so ``∂L/∂π_f`` reaches the
         FreqRouter parameters. Mirrors
         ``router_state._set_routing_weights`` and the original
-        ChimeraHydraLoRAExpModule helper.
+        ChimeraHydraLoRAModule helper.
         """
         if self.num_experts_content <= 0:
             return
@@ -350,7 +350,7 @@ class HydraLoRAModule(BaseLoRAModule):
             # Plain STORE_ATTR (NOT @compiler.disable): a disabled helper
             # forces a graph break per LoRA forward and explodes
             # saved-for-backward memory under compile_mode=full (observed
-            # OOM at 56 MoE + 140 OrthoLoRAExp modules on T4-class budget).
+            # OOM at 56 MoE + 140 OrthoLoRA modules on T4-class budget).
             self._last_gate = gate
 
         if self.training:
@@ -386,7 +386,7 @@ class HydraLoRAModule(BaseLoRAModule):
         """Build the Hydra ``*_moe.safetensors`` payload.
 
         Expects the state_dict to already be in the training-runtime form
-        (stacked ``.lora_up_weight``) — :meth:`OrthoHydraLoRAExpModule.distill_save_state_dict`
+        (stacked ``.lora_up_weight``) — :meth:`OrthoHydraLoRAModule.distill_save_state_dict`
         runs first if the live checkpoint came from the ortho-hydra path.
 
         Two transforms:

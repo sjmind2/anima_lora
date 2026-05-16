@@ -36,7 +36,6 @@ EXPECTED_VARIANTS = {
     "ortho",
     "hydra",
     "ortho_hydra",
-    "dora",
 }
 
 
@@ -103,7 +102,6 @@ def test_hydra_router_kwargs_registered():
         ({"use_moe_style": "shared_A"}, "hydra"),
         ({"use_moe_style": "shared_A", "use_ortho": "true"}, "ortho_hydra"),
         ({"use_moe_style": "independent_A"}, "stacked_experts_global_fei"),
-        ({"use_dora": "true"}, "dora"),
         # Falsey forms of use_moe_style resolve to plain LoRA.
         ({"use_moe_style": False}, "lora"),
         ({"use_moe_style": "false"}, "lora"),
@@ -113,18 +111,6 @@ def test_hydra_router_kwargs_registered():
 def test_resolve_precedence(kwargs, expected):
     spec = resolve_network_spec(kwargs)
     assert spec.name == expected
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"use_dora": "true", "use_moe_style": "shared_A"},
-        {"use_dora": "true", "use_ortho": "true"},
-    ],
-)
-def test_resolve_ambiguous_raises(kwargs):
-    with pytest.raises(ValueError):
-        resolve_network_spec(kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +288,7 @@ def test_save_hydra_moe_mixed_with_plain_lora_qkv_defuses_up(tmp_path: Path):
 def test_save_ortho_hydra_roundtrip(tmp_path: Path):
     E, r, in_dim, out_dim = 4, 4, 8, 12
     prefix = "lora_unet_blocks_0_self_attn_qkv_proj"
-    # OrthoHydraLoRAExp runtime keys: S_p is 3-D (E, r, r); P_bases is (E, out, r)
+    # OrthoHydraLoRA runtime keys: S_p is 3-D (E, r, r); P_bases is (E, out, r)
     sd = {
         f"{prefix}.S_p": torch.randn(E, r, r),
         f"{prefix}.S_q": torch.randn(r, r),

@@ -2,17 +2,6 @@
 
 ## LoRA Variants
 
-### DoRA (Weight-Decomposed Low-Rank Adaptation)
-
-Separates magnitude and direction in weight updates for improved learning efficiency at lower ranks ([arXiv:2402.09353](https://arxiv.org/abs/2402.09353)).
-
-```toml
-# network_args
-use_dora = true
-```
-
-During inference/merge, the magnitude vector is exported as `dora_scale` for ComfyUI compatibility. Not compatible with `use_ortho` or `use_hydra`.
-
 ### OrthoLoRA (Cayley + PSOFT-inspired)
 
 Cayley-parameterized orthogonal rotation of frozen SVD bases with a zero-init guarantee. Orthogonality is structural — no regularization hyperparameter.
@@ -26,7 +15,7 @@ Linear layers only (no Conv2d). See [`../methods/psoft-integrated-ortholora.md`]
 
 ### T-LoRA (Timestep-Dependent Rank Masking)
 
-Dynamically adjusts effective LoRA rank based on the denoising timestep. Early (high-noise) steps use full rank; later steps use reduced rank. Composes with LoRA, DoRA, OrthoLoRA, HydraLoRA, and ReFT. See [`../methods/timestep_mask.md`](../methods/timestep_mask.md).
+Dynamically adjusts effective LoRA rank based on the denoising timestep. Early (high-noise) steps use full rank; later steps use reduced rank. Composes with LoRA, OrthoLoRA, HydraLoRA, and ReFT. See [`../methods/timestep_mask.md`](../methods/timestep_mask.md).
 
 ```toml
 # network_args

@@ -39,7 +39,7 @@ log_with = "tensorboard"
 # Ortho-lora — Cayley-rotated SVD basis on the shared-A leg. ChimeraHydra
 # inherits the OrthoHydra parameterization; ``use_ortho=true`` is implicit
 # in the chimera module but kept here for the unrouted-fallback Linears
-# (router_targets-excluded modules become OrthoLoRAExp).
+# (router_targets-excluded modules become OrthoLoRA).
 
 use_ortho = true
 
@@ -90,7 +90,7 @@ sigma_feature_dim = 0
 freq_router_init_std = 0.02
 
 # Routing scope. Every Linear matched by this regex becomes a chimera
-# leaf; non-matching layers fall back to OrthoLoRAExp (single-pool Cayley,
+# leaf; non-matching layers fall back to OrthoLoRA (single-pool Cayley,
 # no router). Same default as the other hydra variants.
 router_targets = ".*(mlp\\.layer[12])$"
 output_name = "anima_chimera"

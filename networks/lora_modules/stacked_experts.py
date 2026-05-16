@@ -257,7 +257,7 @@ class StackedExpertsLoRAModule(BaseLoRAModule):
         both 3-D ``(E, r, r)`` for the same prefix. OrthoHydra's ``S_q`` is
         2-D, so its dimensionality is the only thing that separates the two
         ortho-flavored MoE variants; this method must run BEFORE
-        :meth:`OrthoHydraLoRAExpModule.distill_save_state_dict`.
+        :meth:`OrthoHydraLoRAModule.distill_save_state_dict`.
         """
         prefixes = set()
         for key in list(state_dict.keys()):

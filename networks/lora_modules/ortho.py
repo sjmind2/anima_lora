@@ -22,7 +22,7 @@ from networks.lora_modules.router_state import (
 )
 
 
-class OrthoLoRAExpModule(BaseLoRAModule):
+class OrthoLoRAModule(BaseLoRAModule):
     """OrthoLoRA: Cayley-rotated SVD basis (no orthogonality reg hyperparameter).
 
     Frozen P_basis (out, r) / Q_basis (r, in) from the base weight's top-r SVD,
@@ -227,7 +227,7 @@ class OrthoLoRAExpModule(BaseLoRAModule):
                 state_dict[f"{prefix}.alpha"] = alpha
 
 
-class OrthoHydraLoRAExpModule(BaseLoRAModule):
+class OrthoHydraLoRAModule(BaseLoRAModule):
     """OrthoLoRA + HydraLoRA: Cayley-rotated MoE with disjoint per-expert P-bases.
 
     Shared Q_basis + trainable S_q (down). Up takes the top E*r singular

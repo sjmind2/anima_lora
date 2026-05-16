@@ -2,19 +2,19 @@
 
 The per-variant save logic — Cayley distillation, MoE write layout,
 DoRA/qkv defuse — lives on the variant's module class in
-``networks/lora_modules/`` (``OrthoLoRAExpModule.distill_save_state_dict``,
+``networks/lora_modules/`` (``OrthoLoRAModule.distill_save_state_dict``,
 ``HydraLoRAModule.build_moe_state_dict``, etc). This file is the thin
 ordering layer that calls them and writes the resulting file(s).
 
 Ordering of the conversion pipeline is load-bearing:
 
-  1. ``ChimeraHydraLoRAExpModule.distill_save_state_dict``
+  1. ``ChimeraHydraLoRAModule.distill_save_state_dict``
      (gated on co-located ``.S_q_c`` + ``.S_q_f``)
   2. ``StackedExpertsLoRAModule.distill_save_state_dict``
      (gated on 3-D ``.S_p`` AND 3-D ``.S_q``)
-  3. ``OrthoHydraLoRAExpModule.distill_save_state_dict``
+  3. ``OrthoHydraLoRAModule.distill_save_state_dict``
      (gated on 3-D ``.S_p`` AND 2-D ``.S_q``)
-  4. ``OrthoLoRAExpModule.distill_save_state_dict``
+  4. ``OrthoLoRAModule.distill_save_state_dict``
      (gated on 2-D ``.S_p``)
   5. legacy sig-type OrthoLoRA → standard LoRA
      (gated on ``.base_lambda``; kept here because it touches the
@@ -38,10 +38,10 @@ import torch
 
 from library.log import setup_logging
 from networks.lora_modules import (
-    ChimeraHydraLoRAExpModule,
+    ChimeraHydraLoRAModule,
     HydraLoRAModule,
-    OrthoHydraLoRAExpModule,
-    OrthoLoRAExpModule,
+    OrthoHydraLoRAModule,
+    OrthoLoRAModule,
     StackedExpertsLoRAModule,
 )
 from networks.lora_modules.lora import rename_dora_and_defuse_standard
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Legacy: sig-type OrthoLoRA → standard LoRA via 2r-dim SVD.
 #
-# Kept here (not on a module class) because the live ``OrthoLoRAExpModule``
+# Kept here (not on a module class) because the live ``OrthoLoRAModule``
 # never emits these keys — they belong to the deprecated
 # ``lora_deprecated.OrthoLoRAModule``, which is gone from the runtime path.
 # ---------------------------------------------------------------------------
@@ -162,10 +162,10 @@ def save_network_weights(
         metadata = None
 
     # Distill chain. Order is load-bearing — see module docstring.
-    ChimeraHydraLoRAExpModule.distill_save_state_dict(state_dict, dtype)
+    ChimeraHydraLoRAModule.distill_save_state_dict(state_dict, dtype)
     StackedExpertsLoRAModule.distill_save_state_dict(state_dict, dtype)
-    OrthoHydraLoRAExpModule.distill_save_state_dict(state_dict, dtype)
-    OrthoLoRAExpModule.distill_save_state_dict(state_dict, dtype)
+    OrthoHydraLoRAModule.distill_save_state_dict(state_dict, dtype)
+    OrthoLoRAModule.distill_save_state_dict(state_dict, dtype)
     _convert_legacy_ortho_to_lora(state_dict, dtype)
 
     # Variant dispatch.
@@ -201,7 +201,7 @@ def save_network_weights(
 
     if is_chimera_variant:
         chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
-        chimera_sd = ChimeraHydraLoRAExpModule.build_moe_state_dict(
+        chimera_sd = ChimeraHydraLoRAModule.build_moe_state_dict(
             state_dict, dtype
         )
         from safetensors.torch import save_file as sf_save

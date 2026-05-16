@@ -95,7 +95,7 @@ for the same reason — one zero per shared tensor instead of 56 × 2.
 
 ### 1. `_eye_r` buffer — `networks/lora_modules/ortho.py`
 
-`OrthoLoRAExpModule.__init__` and `OrthoHydraLoRAExpModule.__init__`
+`OrthoLoRAModule.__init__` and `OrthoHydraLoRAModule.__init__`
 register a non-persistent `_eye_r` buffer (`lora_dim × lora_dim`, fp32).
 The forward path reads it directly; broadcasting handles the
 `(r,r) + (E,r,r)` addition, so the prior `eye.unsqueeze(0).expand_as(A)`
@@ -121,9 +121,9 @@ Bit-equivalent to a fresh recompute (verified `0.0` max diff).
 Both forwards now do a single `torch.linalg.solve` per call by
 concatenating the skew matrices:
 
-- `OrthoLoRAExpModule.forward`: `stack([S_q, S_p])` → `(2, r, r)` →
+- `OrthoLoRAModule.forward`: `stack([S_q, S_p])` → `(2, r, r)` →
   one solve → split into `R_q`, `R_p`.
-- `OrthoHydraLoRAExpModule.forward`:
+- `OrthoHydraLoRAModule.forward`:
   `cat([S_q.unsqueeze(0), S_p])` → `(E+1, r, r)` → one solve →
   `R_q = R[0]`, `R_p = R[1:]`.
 
@@ -136,7 +136,7 @@ Verified parity vs. the previous separate `_cayley(S_q)` /
 `_cayley(S_p)` path to ~1e-7 (bf16-clean); gradients still reach `S_q`
 and `S_p`.
 
-`OrthoLoRAExpModule._cayley` and `OrthoHydraLoRAExpModule._cayley` are
+`OrthoLoRAModule._cayley` and `OrthoHydraLoRAModule._cayley` are
 kept as static methods because `networks/lora_save.py` calls them at
 save-time SVD distillation.
 

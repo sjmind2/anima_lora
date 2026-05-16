@@ -1,5 +1,5 @@
 # Shared σ / FEI / routing-weights buffer protocol for HydraLoRAModule,
-# OrthoHydraLoRAExpModule, and StackedExpertsLoRAModule. Lives here so the
+# OrthoHydraLoRAModule, and StackedExpertsLoRAModule. Lives here so the
 # global-router gradient path stays identical across all three (the proposal
 # flagged a drift where OrthoHydra had detached its routing buffer).
 #

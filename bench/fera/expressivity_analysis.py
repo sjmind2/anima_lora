@@ -34,7 +34,7 @@ H1. SUBSPACE PROJECTION ERROR  — load-bearing test
 
       r_OH(M, R_OH)   = ‖ΔW − Π_OH(ΔW)‖_F / ‖ΔW‖_F
 
-         OrthoHydra(`OrthoHydraLoRAExpModule`) reachable operators are
+         OrthoHydra(`OrthoHydraLoRAModule`) reachable operators are
          constrained to:
            - col space ⊂ span(U_base[:, :M·R_OH])    (disjoint per-expert
              slices of the pretrained W's SVD — see ortho.py:240-269)

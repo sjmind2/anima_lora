@@ -260,17 +260,17 @@ def test_hydra_sigma_feature_cache_updates_and_clears():
 
 
 def test_ortho_flag_on_matches_legacy_gradients():
-    """OrthoLoRAExpModule: custom fn treats Q_eff as the 'weight' input.
+    """OrthoLoRAModule: custom fn treats Q_eff as the 'weight' input.
     grad_Q_eff must propagate through R_q @ Q_basis into S_q, and through
     the P path into S_p + lambda_layer — all bitwise equal to the legacy
     path."""
-    from networks.lora_modules.ortho import OrthoLoRAExpModule
+    from networks.lora_modules.ortho import OrthoLoRAModule
 
     def run(use_custom: bool):
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = OrthoLoRAExpModule("o", base, multiplier=1.0, lora_dim=4, alpha=4)
+        module = OrthoLoRAModule("o", base, multiplier=1.0, lora_dim=4, alpha=4)
         module.apply_to()
         module.train()
         module.use_custom_down_autograd = use_custom
@@ -300,16 +300,16 @@ def test_ortho_flag_on_matches_legacy_gradients():
 
 
 def test_ortho_hydra_flag_on_matches_legacy_gradients():
-    """OrthoHydraLoRAExpModule: Cayley-on-Q + MoE per-expert P. Flag toggles
+    """OrthoHydraLoRAModule: Cayley-on-Q + MoE per-expert P. Flag toggles
     only the shared Q_eff projection; router / P_eff / λ paths are unchanged.
     """
-    from networks.lora_modules.ortho import OrthoHydraLoRAExpModule
+    from networks.lora_modules.ortho import OrthoHydraLoRAModule
 
     def run(use_custom: bool):
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = OrthoHydraLoRAExpModule(
+        module = OrthoHydraLoRAModule(
             "oh", base, multiplier=1.0, lora_dim=4, alpha=4,
             num_experts=3, sigma_feature_dim=0,
         )
@@ -437,8 +437,8 @@ def test_hydra_channel_scale_flag_on_matches_legacy_gradients():
 
 
 def test_ortho_channel_scale_flag_on_matches_legacy_gradients():
-    """OrthoLoRAExpModule + channel_scale."""
-    from networks.lora_modules.ortho import OrthoLoRAExpModule
+    """OrthoLoRAModule + channel_scale."""
+    from networks.lora_modules.ortho import OrthoLoRAModule
 
     cs = _make_channel_scale(32)
 
@@ -446,7 +446,7 @@ def test_ortho_channel_scale_flag_on_matches_legacy_gradients():
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = OrthoLoRAExpModule(
+        module = OrthoLoRAModule(
             "o", base, multiplier=1.0, lora_dim=4, alpha=4,
             channel_scale=cs.clone(),
         )
@@ -475,8 +475,8 @@ def test_ortho_channel_scale_flag_on_matches_legacy_gradients():
 
 
 def test_ortho_hydra_channel_scale_flag_on_matches_legacy_gradients():
-    """OrthoHydraLoRAExpModule + channel_scale."""
-    from networks.lora_modules.ortho import OrthoHydraLoRAExpModule
+    """OrthoHydraLoRAModule + channel_scale."""
+    from networks.lora_modules.ortho import OrthoHydraLoRAModule
 
     cs = _make_channel_scale(32)
 
@@ -484,7 +484,7 @@ def test_ortho_hydra_channel_scale_flag_on_matches_legacy_gradients():
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = OrthoHydraLoRAExpModule(
+        module = OrthoHydraLoRAModule(
             "oh", base, multiplier=1.0, lora_dim=4, alpha=4,
             num_experts=3, sigma_feature_dim=0,
             channel_scale=cs.clone(),
@@ -514,17 +514,17 @@ def test_ortho_hydra_channel_scale_flag_on_matches_legacy_gradients():
 
 
 def test_chimera_flag_on_matches_legacy_gradients():
-    """ChimeraHydraLoRAExpModule (no channel_scale): two down-projections per
+    """ChimeraHydraLoRAModule (no channel_scale): two down-projections per
     Linear go through ``lora_down_project``. Flag toggle must leave forward,
     every trainable grad, and grad_x bitwise identical.
     """
-    from networks.lora_modules.chimera import ChimeraHydraLoRAExpModule
+    from networks.lora_modules.chimera import ChimeraHydraLoRAModule
 
     def run(use_custom: bool):
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = ChimeraHydraLoRAExpModule(
+        module = ChimeraHydraLoRAModule(
             "c", base, multiplier=1.0, lora_dim=4, alpha=4,
             num_experts_content=3, num_experts_freq=3,
         )
@@ -559,11 +559,11 @@ def test_chimera_flag_on_matches_legacy_gradients():
 
 
 def test_chimera_channel_scale_flag_on_matches_legacy_gradients():
-    """ChimeraHydraLoRAExpModule + channel_scale: both pools share the same
+    """ChimeraHydraLoRAModule + channel_scale: both pools share the same
     inv_scale, applied per-pool in the custom path. Pre-fix this would have
     silently broken — there were no Chimera channel_scale tests.
     """
-    from networks.lora_modules.chimera import ChimeraHydraLoRAExpModule
+    from networks.lora_modules.chimera import ChimeraHydraLoRAModule
 
     cs = _make_channel_scale(32)
 
@@ -571,7 +571,7 @@ def test_chimera_channel_scale_flag_on_matches_legacy_gradients():
         torch.manual_seed(0)
         base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
         base.weight.requires_grad_(False)
-        module = ChimeraHydraLoRAExpModule(
+        module = ChimeraHydraLoRAModule(
             "c", base, multiplier=1.0, lora_dim=4, alpha=4,
             num_experts_content=3, num_experts_freq=3,
             channel_scale=cs.clone(),

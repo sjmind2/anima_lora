@@ -44,7 +44,7 @@ from networks.lora_modules.lora import defuse_standard_qkv
 logger = logging.getLogger(__name__)
 
 
-class ChimeraHydraLoRAExpModule(BaseLoRAModule):
+class ChimeraHydraLoRAModule(BaseLoRAModule):
     """ChimeraHydra training-time module: two Cayley A's, two B-pools,
     one per-Linear content router, one shared freq buffer.
 
@@ -531,9 +531,9 @@ class ChimeraHydraLoRAExpModule(BaseLoRAModule):
         frag suffix).
 
         After the per-pool split, the remaining fused-qkv prefixes are
-        the OrthoLoRAExp fallbacks for attention projections excluded
+        the OrthoLoRA fallbacks for attention projections excluded
         from ``router_targets`` (already distilled to plain LoRA by
-        :meth:`OrthoLoRAExpModule.distill_save_state_dict`). Run them
+        :meth:`OrthoLoRAModule.distill_save_state_dict`). Run them
         through the shared :func:`defuse_standard_qkv` so they emerge
         in the split q/k/v layout that ComfyUI's cosmos backbone
         expects — otherwise they surface as ``lora key not loaded``

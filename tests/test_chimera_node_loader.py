@@ -14,7 +14,7 @@ matching that layout and verifies:
      formed (correct shapes, dual-pool gate sums to ~2, σ/FEI input
      reaches the per-Linear delta).
 
-End-to-end equivalence against ``ChimeraHydraLoRAExpModule.forward``
+End-to-end equivalence against ``ChimeraHydraLoRAModule.forward``
 needs the Cayley distillation pass and is out of scope here — this is a
 loader/runtime smoke test, not a numerics-parity test. We deliberately
 do NOT exercise ``_apply_hydra_live_to_model`` end-to-end because that

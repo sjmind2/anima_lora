@@ -246,7 +246,7 @@ def defuse_standard_qkv(state_dict: Dict[str, torch.Tensor]) -> None:
       * the Hydra write path's "plain-LoRA leg" (modules excluded from
         ``router_targets`` save under the plain layout),
       * the Chimera write path's plain-LoRA leg (router_targets excludes
-        attention projections by default — OrthoLoRAExp fallback lands as
+        attention projections by default — OrthoLoRA fallback lands as
         plain LoRA after the ortho distill step).
     """
     fused_groups: List[tuple] = []

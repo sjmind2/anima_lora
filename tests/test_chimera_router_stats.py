@@ -14,7 +14,7 @@ import torch
 
 from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.network import FreqRouter, LoRANetwork
-from networks.lora_modules import ChimeraHydraLoRAExpModule
+from networks.lora_modules import ChimeraHydraLoRAModule
 
 
 def _make_minimal_chimera_network(
@@ -76,7 +76,7 @@ def _make_minimal_chimera_network(
 
     for i in range(2):
         org = torch.nn.Linear(8, 8, bias=False)
-        mod = ChimeraHydraLoRAExpModule(
+        mod = ChimeraHydraLoRAModule(
             lora_name=f"m{i}",
             org_module=org,
             lora_dim=cfg.lora_dim,

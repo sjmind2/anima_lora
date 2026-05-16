@@ -217,7 +217,7 @@ class LoRANetworkCfg:
     router_lr_scale: float = 1.0
     # Single regex that scopes which Linear modules participate in routed
     # adaptation. Matched modules become HydraLoRA leaves; non-matching
-    # modules fall back to plain LoRA / OrthoLoRAExp. Sigma- and FEI-feature
+    # modules fall back to plain LoRA / OrthoLoRA. Sigma- and FEI-feature
     # router inputs piggyback on the same set — there is no separate sub-
     # filter for σ vs FEI vs Hydra anymore. ``None`` = apply MoE everywhere.
     router_targets: Optional[str] = None
@@ -257,7 +257,7 @@ class LoRANetworkCfg:
     # ``ortho`` mode on ``StackedExpertsLoRAModule`` when paired with
     # ``use_moe_style="independent_A"``; for the non-MoE / shared_A cells the
     # ``ortho``-ness is already encoded in the chosen module class
-    # (``OrthoLoRAExp`` / ``OrthoHydra``) and this field is informational.
+    # (``OrthoLoRA`` / ``OrthoHydra``) and this field is informational.
     use_ortho: bool = False
     ortho_init_std: float = 0.02
 
@@ -654,8 +654,8 @@ class LoRANetworkCfg:
         new_route_per_layer: Optional[bool] = None,
         new_router_source: Optional[str] = None,
         # ChimeraHydra stamps. Present only on chimera checkpoints — when
-        # set the loader builds ``ChimeraHydraLoRAExpModule`` instead of
-        # ``OrthoHydraLoRAExpModule`` and the network attaches a FreqRouter.
+        # set the loader builds ``ChimeraHydraLoRAModule`` instead of
+        # ``OrthoHydraLoRAModule`` and the network attaches a FreqRouter.
         is_chimera_hydra: bool = False,
         num_experts_content: Optional[int] = None,
         num_experts_freq: Optional[int] = None,

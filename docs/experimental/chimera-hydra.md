@@ -134,10 +134,10 @@ ChimeraHydra is a fourth dispatch cell on top of the shared-A row, opt-in via `u
 
 | File | Role |
 |------|------|
-| `networks/lora_modules/chimera.py` | **`ChimeraHydraLoRAExpModule`** (training): owns `(Q_basis_c, S_q_c)` + `(Q_basis_f, S_q_f)` + `(P_bases_c, S_p_c)` + `(P_bases_f, S_p_f)` + `lambda_c` + `lambda_f` + content `router` (Linear `r → K_c`) + `_freq_routing_weights` buffer. One batched `(2 + K_c + K_f, r, r)` Cayley solve per forward. **`ChimeraHydraInferenceModule`**: free-form (`lora_down_c`, `lora_up_c_weight`, `lora_down_f`, `lora_up_f_weight`, `router`) twin built at load from a distilled chimera checkpoint. |
+| `networks/lora_modules/chimera.py` | **`ChimeraHydraLoRAModule`** (training): owns `(Q_basis_c, S_q_c)` + `(Q_basis_f, S_q_f)` + `(P_bases_c, S_p_c)` + `(P_bases_f, S_p_f)` + `lambda_c` + `lambda_f` + content `router` (Linear `r → K_c`) + `_freq_routing_weights` buffer. One batched `(2 + K_c + K_f, r, r)` Cayley solve per forward. **`ChimeraHydraInferenceModule`**: free-form (`lora_down_c`, `lora_up_c_weight`, `lora_down_f`, `lora_up_f_weight`, `router`) twin built at load from a distilled chimera checkpoint. |
 | `networks/lora_anima/network.py` | `FreqRouter` (network-level), `_wire_shared_freq_routing_buffers` aliases every chimera module's freq buffer to one tensor; `set_fei` fires the router and broadcasts `π_f` via direct slot assignment (preserves grad_fn — `∂L_denoise/∂π_f → FreqRouter params`). `_get_chimera_balance_loss` splits each module's gate at `K_c` into independent Switch losses weighted by `_balance_w_content` / `_balance_w_freq`. Module construction passes `num_experts_content` + `num_experts_freq` into both chimera classes. |
 | `networks/lora_anima/config.py` | `LoRANetworkCfg.use_chimera_hydra` / `num_experts_content` / `num_experts_freq` / `balance_w_content` / `balance_w_freq` / `freq_router_init_std` / `content_router_lr_scale` / `freq_router_lr_scale`. `from_kwargs` pins the three-axis fields when chimera is on; `from_weights` reconsumes the chimera-specific metadata stamps. |
-| `networks/lora_anima/factory.py` | `create_network` builds the chimera spec via `resolve_network_spec` (`ChimeraHydraLoRAExpModule` for training); `create_network_from_weights` detects `ss_use_chimera_hydra="true"` + sniffs `.lora_up_c_weight` / `.lora_up_f_weight` keys to confirm dual-A format, then keeps the `chimera_hydra` spec but overrides `module_class = ChimeraHydraInferenceModule`. Surfaces the chimera-specific σ/FEI dims into the cfg slots the FreqRouter reads. |
+| `networks/lora_anima/factory.py` | `create_network` builds the chimera spec via `resolve_network_spec` (`ChimeraHydraLoRAModule` for training); `create_network_from_weights` detects `ss_use_chimera_hydra="true"` + sniffs `.lora_up_c_weight` / `.lora_up_f_weight` keys to confirm dual-A format, then keeps the `chimera_hydra` spec but overrides `module_class = ChimeraHydraInferenceModule`. Surfaces the chimera-specific σ/FEI dims into the cfg slots the FreqRouter reads. |
 | `networks/lora_anima/loading.py` | `_stack_chimera_lora_ups` folds per-expert `.lora_ups_c.{i}.weight` / `.lora_ups_f.{j}.weight` into stacked Parameters; `_refuse_split_chimera_keys` undoes the per-pool q/k/v split. |
 | `networks/lora_save.py` | `_convert_chimera_dual_a_to_hydra` distills both pools' Cayley layout to free-form (`lora_down_{c,f}.weight` + `lora_up_{c,f}_weight`); `_build_chimera_moe_state_dict` expands to per-expert `lora_ups_{c,f}.{i}.weight` + per-pool q/k/v defuse + writes `*_chimera.safetensors`. Top-level `freq_router.*` passes through both steps. |
 | `networks/__init__.py` | `NETWORK_REGISTRY["chimera_hydra"]` with `save_variant="chimera_hydra_moe"`. `_post_init_hydra` stamps `_use_chimera_hydra` + per-pool balance weights on the network. |
@@ -191,10 +191,10 @@ Total at default `chimera.toml` regex (`*mlp.layer[12]`) on Anima's 28 blocks ×
 | `router_tau` | `0.7` | Softmax temperature on FreqRouter output. Lower → sharper freq specialization. |
 | `network_content_router_lr_scale` | `10` | Multiplier on `unet_lr × router_lr_scale` for the per-Linear content router. The std=0.01 init can take many steps to leave symmetry — bumping to 5–10× is a faster lever than raising `balance_w_content`. |
 | `network_freq_router_lr_scale` | `1.0` | Multiplier for the FreqRouter. Independent of `content_router_lr_scale`. |
-| `use_ortho` | `true` | Cayley-rotated SVD basis. Implicit in the chimera class; this flag governs the unrouted-fallback Linears (router_targets-excluded → OrthoLoRAExp at training; saved as plain LoRA after distill). |
+| `use_ortho` | `true` | Cayley-rotated SVD basis. Implicit in the chimera class; this flag governs the unrouted-fallback Linears (router_targets-excluded → OrthoLoRA at training; saved as plain LoRA after distill). |
 | `use_timestep_mask` | `true` | T-LoRA. Applied to the **content half only** inside the chimera forward. |
 | `min_rank` | `8` | T-LoRA floor — content half retains at least this many ranks at every t. |
-| `router_targets` | `.*(mlp\\.layer[12])$` | Regex matching which Linears become chimera leaves. Non-matching layers fall back to OrthoLoRAExp at training, plain LoRA at inference (after the OrthoLoRA → LoRA save-time distill). |
+| `router_targets` | `.*(mlp\\.layer[12])$` | Regex matching which Linears become chimera leaves. Non-matching layers fall back to OrthoLoRA at training, plain LoRA at inference (after the OrthoLoRA → LoRA save-time distill). |
 
 ## Save format
 
@@ -298,7 +298,7 @@ ChimeraHydra's bet: dual-A + structurally-enforced router-input separation makes
 
 ## Files
 
-- [`networks/lora_modules/chimera.py`](../../networks/lora_modules/chimera.py) — `ChimeraHydraLoRAExpModule` (training) + `ChimeraHydraInferenceModule` (load-time free-form twin).
+- [`networks/lora_modules/chimera.py`](../../networks/lora_modules/chimera.py) — `ChimeraHydraLoRAModule` (training) + `ChimeraHydraInferenceModule` (load-time free-form twin).
 - [`networks/lora_anima/network.py`](../../networks/lora_anima/network.py) — `FreqRouter`, `_wire_shared_freq_routing_buffers`, `set_freq_routing_weights`, `_get_chimera_balance_loss`, FreqRouter param group.
 - [`networks/lora_anima/loading.py`](../../networks/lora_anima/loading.py) — `_stack_chimera_lora_ups`, `_refuse_split_chimera_keys`.
 - [`networks/lora_anima/config.py`](../../networks/lora_anima/config.py) — chimera cfg fields + three-axis pin.

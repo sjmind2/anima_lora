@@ -18,7 +18,7 @@ from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.network import GlobalRouter, LoRANetwork
 from networks.lora_modules import (
     HydraLoRAModule,
-    OrthoHydraLoRAExpModule,
+    OrthoHydraLoRAModule,
     StackedExpertsLoRAModule,
 )
 
@@ -477,7 +477,7 @@ def test_ortho_hydra_global_router_receives_gradient_from_expert_forward():
     torch.manual_seed(0)
     # in/out ≥ E*r = 12 so OrthoHydra's disjoint-slice SVD path is taken.
     net = _make_minimal_hydra_global_router_network(
-        module_cls=OrthoHydraLoRAExpModule,
+        module_cls=OrthoHydraLoRAModule,
         num_experts=3,
         fei_dim=2,
         in_dim=16,
@@ -526,9 +526,9 @@ def test_clear_routing_weights_restores_uniform_hydra():
 
 
 def test_clear_routing_weights_restores_uniform_ortho_hydra():
-    """Same contract for ``OrthoHydraLoRAExpModule(use_global_router=True)``."""
+    """Same contract for ``OrthoHydraLoRAModule(use_global_router=True)``."""
     net = _make_minimal_hydra_global_router_network(
-        module_cls=OrthoHydraLoRAExpModule,
+        module_cls=OrthoHydraLoRAModule,
         num_experts=4,
         fei_dim=2,
         in_dim=16,

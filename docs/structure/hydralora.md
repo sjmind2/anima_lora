@@ -109,7 +109,7 @@ The supported fix is the structural one in §5.2 (OrthoHydra disjoint subspaces)
 
 ### 5.2 Orthogonalized experts
 
-`OrthoHydraLoRAExpModule` (`networks/lora_modules/ortho.py:137–404`) is the structural fix. It combines HydraLoRA with the OrthoLoRA Cayley re-parameterization (`ortholora.md`) and adds one crucial change: **per-expert disjoint output subspaces**.
+`OrthoHydraLoRAModule` (`networks/lora_modules/ortho.py:137–404`) is the structural fix. It combines HydraLoRA with the OrthoLoRA Cayley re-parameterization (`ortholora.md`) and adds one crucial change: **per-expert disjoint output subspaces**.
 
 Recall from `ortholora.md` that OrthoLoRA freezes the top-$r$ SVD singular vectors as `P_basis` (output-side) and `Q_basis` (input-side), then rotates them with Cayley-parameterized $r \times r$ matrices. OrthoHydra keeps `Q_basis` shared (because `lora_down` is shared) but partitions the **top-$(E \cdot r)$** left singular vectors of $W_0$ into $E$ disjoint slices of $r$ columns each:
 
@@ -169,7 +169,7 @@ The **Anima Adapter Loader** node installs per-Linear `forward_hook`s that repro
 | Stacks with              | How it composes                                                                                  |
 | ------------------------ | ------------------------------------------------------------------------------------------------ |
 | **T-LoRA**               | Mask applies to shared `lora_down`, before the router already cached its gate. Default on.       |
-| **OrthoLoRA**            | Supported via `OrthoHydraLoRAExpModule`. Per-expert Cayley rotations, disjoint output subspaces. |
+| **OrthoLoRA**            | Supported via `OrthoHydraLoRAModule`. Per-expert Cayley rotations, disjoint output subspaces. |
 | **ReFT**                 | Orthogonal side-channel. No interaction.                                                         |
 | **DoRA**                 | Not supported — would require per-expert magnitude vectors, unimplemented.                       |
 | **Spectrum**             | Cached steps skip all transformer blocks (router included) — hydra just runs fewer times.        |

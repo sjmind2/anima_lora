@@ -960,7 +960,7 @@ def _make_chimera_hook(params: dict, strength: float, router_state: dict):
       * σ-band partition is unsupported by construction — chimera trains
         with ``specialize_experts_by_sigma_buckets=False``.
 
-    Matches ``networks/lora_modules/chimera.py::ChimeraHydraLoRAExpModule
+    Matches ``networks/lora_modules/chimera.py::ChimeraHydraLoRAModule
     .forward`` (minus the T-LoRA mask, which is training-only — see
     ``[[project_tlora_inference_full_rank]]``).
     """
@@ -1014,7 +1014,7 @@ def _make_chimera_hook(params: dict, strength: float, router_state: dict):
         if pi_f is None:
             # FreqRouter pre-hook didn't fire (e.g. compile cache miss
             # before the first step) — fall back to uniform 1/K_f. Matches
-            # ChimeraHydraLoRAExpModule's placeholder buffer init.
+            # ChimeraHydraLoRAModule's placeholder buffer init.
             pi_f = torch.full(
                 (B, state["K_f"]),
                 1.0 / max(state["K_f"], 1),

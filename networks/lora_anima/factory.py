@@ -253,7 +253,7 @@ def create_network(
     if spec.name in ("hydra", "ortho_hydra") and (
         network._hydra_router_re is not None or network._hydra_router_names is not None
     ):
-        fallback_name = "OrthoLoRAExp" if spec.name == "ortho_hydra" else "LoRA"
+        fallback_name = "OrthoLoRA" if spec.name == "ortho_hydra" else "LoRA"
         logger.info(
             f"HydraLoRA layer filter: {network._hydra_router_hits} MoE modules, "
             f"{network._hydra_router_misses} fell back to plain {fallback_name} "
@@ -347,7 +347,6 @@ def create_network_from_weights(
     modules_dim = {}
     modules_alpha = {}
     train_llm_adapter = False
-    has_dora = False
     has_ortho = False
     has_ortho_hydra = False
     has_hydra = False
@@ -363,7 +362,7 @@ def create_network_from_weights(
     reft_dim = None
     reft_block_indices: set[int] = set()
     # Per-module hydra flag: which lora_names were trained as MoE (Hydra) vs
-    # plain LoRA / OrthoLoRAExp. Populated below by key sniff, then passed
+    # plain LoRA / OrthoLoRA. Populated below by key sniff, then passed
     # through as `hydra_router_names` so create_modules can pick the right
     # class per module in mixed checkpoints (result of router_targets).
     hydra_module_names: set[str] = set()
@@ -457,9 +456,6 @@ def create_network_from_weights(
                 has_ortho = True
                 modules_dim[lora_name] = value.size(0)
                 plain_module_names.add(lora_name)
-        elif "dora_scale" in key:
-            has_dora = True
-
         if "llm_adapter" in lora_name:
             train_llm_adapter = True
 
@@ -563,13 +559,12 @@ def create_network_from_weights(
                     f"{sigma_feature_dim_detected}, found {extra} at {k!r}."
                 )
     elif for_inference:
-        # Force the plain LoRA spec even for dora/ortho checkpoints — the
-        # merge_to / fuse_weight path expects flat down/up weights, and dora /
+        # Force the plain LoRA spec even for ortho checkpoints — the
+        # merge_to / fuse_weight path expects flat down/up weights, and
         # ortho checkpoints are distilled to LoRA shape at save time.
+        # External ``.dora_scale`` keys also flow through this branch and
+        # are applied by the merge helper in ``lora_utils.merge_to``.
         spec = NETWORK_REGISTRY["lora"]
-        module_class = spec.module_class
-    elif has_dora:
-        spec = NETWORK_REGISTRY["dora"]
         module_class = spec.module_class
     elif has_ortho:
         spec = NETWORK_REGISTRY["ortho"]
@@ -618,7 +613,7 @@ def create_network_from_weights(
     # hydra class everywhere, legacy behaviour). For chimera dual-A files,
     # use ``chimera_dual_a_modules`` as the routing-aware set so unrouted
     # Linears (saved as OrthoLoRA fallback with ``.S_p`` keys) fall back to
-    # ``OrthoLoRAExpModule`` instead of being mis-typed as chimera.
+    # ``OrthoLoRAModule`` instead of being mis-typed as chimera.
     _is_chimera_meta = (
         str(file_metadata.get("ss_use_chimera_hydra", "")).strip().lower() == "true"
     )

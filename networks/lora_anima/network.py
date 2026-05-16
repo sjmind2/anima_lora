@@ -23,11 +23,11 @@ from networks.lora_anima.loading import (
 )
 from networks.lora_modules import (
     ChimeraHydraInferenceModule,
-    ChimeraHydraLoRAExpModule,
+    ChimeraHydraLoRAModule,
     HydraLoRAModule,
     LoRAModule,
-    OrthoHydraLoRAExpModule,
-    OrthoLoRAExpModule,
+    OrthoHydraLoRAModule,
+    OrthoLoRAModule,
     ReFTModule,
     StackedExpertsLoRAModule,
     _sigma_sinusoidal_features,
@@ -325,7 +325,7 @@ class LoRANetwork(torch.nn.Module):
         )
 
         # Per-module HydraLoRA gating. Matching modules get the Hydra class;
-        # non-matching modules fall back to plain LoRA / OrthoLoRAExp so MoE
+        # non-matching modules fall back to plain LoRA / OrthoLoRA so MoE
         # capacity is concentrated where specialization is actually learnable.
         # Fresh path: regex over `original_name`. From-weights path: explicit
         # name set detected from checkpoint keys. Explicit set wins. None on
@@ -514,15 +514,15 @@ class LoRANetwork(torch.nn.Module):
                 # Per-module class resolution: when the network's nominal class
                 # is Hydra (MoE), narrow it to only the layers in the hydra
                 # filter. Non-matching layers fall back to plain LoRA /
-                # OrthoLoRAExp so router overhead + balance-loss pressure are
+                # OrthoLoRA so router overhead + balance-loss pressure are
                 # concentrated on sites where specialization is learnable.
                 effective_module_class = module_class
                 if (
                     module_class
                     in (
                         HydraLoRAModule,
-                        OrthoHydraLoRAExpModule,
-                        ChimeraHydraLoRAExpModule,
+                        OrthoHydraLoRAModule,
+                        ChimeraHydraLoRAModule,
                         ChimeraHydraInferenceModule,
                     )
                     and is_unet
@@ -546,15 +546,15 @@ class LoRANetwork(torch.nn.Module):
                             # ``_convert_ortho_to_lora``).
                             effective_module_class = LoRAModule
                         else:
-                            # Train path (ChimeraHydraLoRAExpModule) and
-                            # OrthoHydra: unrouted leg uses the OrthoLoRAExp
+                            # Train path (ChimeraHydraLoRAModule) and
+                            # OrthoHydra: unrouted leg uses the OrthoLoRA
                             # Cayley parameterization.
-                            effective_module_class = OrthoLoRAExpModule
+                            effective_module_class = OrthoLoRAModule
 
                 extra_kwargs = {}
-                if effective_module_class == OrthoLoRAExpModule:
+                if effective_module_class == OrthoLoRAModule:
                     pass  # no extra kwargs — SVD init reads from org_module directly
-                elif effective_module_class == ChimeraHydraLoRAExpModule:
+                elif effective_module_class == ChimeraHydraLoRAModule:
                     # Pool split is the chimera's only constructor surface;
                     # σ/FEI feature dims are 0 by design (the network-level
                     # FreqRouter owns those axes — see chimera.py module
@@ -569,7 +569,7 @@ class LoRANetwork(torch.nn.Module):
                     # ``cfg.from_weights``.
                     extra_kwargs["num_experts_content"] = cfg.num_experts_content
                     extra_kwargs["num_experts_freq"] = cfg.num_experts_freq
-                elif effective_module_class == OrthoHydraLoRAExpModule:
+                elif effective_module_class == OrthoHydraLoRAModule:
                     extra_kwargs["num_experts"] = cfg.num_experts
                     if self._use_global_router_for_hydra:
                         extra_kwargs["use_global_router"] = True
@@ -609,7 +609,7 @@ class LoRANetwork(torch.nn.Module):
                 if (
                     cfg.specialize_experts_by_sigma_buckets
                     and effective_module_class
-                    in (HydraLoRAModule, OrthoHydraLoRAExpModule)
+                    in (HydraLoRAModule, OrthoHydraLoRAModule)
                     and is_unet
                 ):
                     extra_kwargs["specialize_experts_by_sigma_buckets"] = True
@@ -633,7 +633,7 @@ class LoRANetwork(torch.nn.Module):
                     and effective_module_class
                     in (
                         HydraLoRAModule,
-                        OrthoHydraLoRAExpModule,
+                        OrthoHydraLoRAModule,
                     )
                     and is_unet
                     and not self._use_global_router_for_hydra
@@ -660,7 +660,7 @@ class LoRANetwork(torch.nn.Module):
                     and effective_module_class
                     in (
                         HydraLoRAModule,
-                        OrthoHydraLoRAExpModule,
+                        OrthoHydraLoRAModule,
                     )
                     and is_unet
                     and not self._use_global_router_for_hydra
@@ -706,9 +706,9 @@ class LoRANetwork(torch.nn.Module):
         self.text_encoder_loras: List[LoRAModule] = []
         skipped_te = []
         if text_encoders is not None and module_class not in (
-            OrthoLoRAExpModule,
-            OrthoHydraLoRAExpModule,
-            ChimeraHydraLoRAExpModule,
+            OrthoLoRAModule,
+            OrthoHydraLoRAModule,
+            ChimeraHydraLoRAModule,
             ChimeraHydraInferenceModule,
         ):
             for i, text_encoder in enumerate(text_encoders):
@@ -861,7 +861,7 @@ class LoRANetwork(torch.nn.Module):
         # exclusively (the per-layer content router never sees σ/FEI). Built
         # only when at least one chimera module was actually constructed; the
         # router_targets regex can narrow the chimera class to a subset of
-        # layers (others fall back to OrthoLoRAExp).
+        # layers (others fall back to OrthoLoRA).
         self.freq_router: Optional[FreqRouter] = None
         if cfg.use_chimera_hydra and self._chimera_aware_loras:
             freq_input_dim = int(cfg.fei_feature_dim) + int(cfg.sigma_feature_dim)
