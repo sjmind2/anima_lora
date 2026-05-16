@@ -87,7 +87,7 @@ class ConfigTab(QWidget):
 
         # Top bar: method + save + preprocess + train + stop
         # The preset combo is intentionally absent — gui-methods variants
-        # (lora-8gb, lora_longer, etc.) already encode the hardware/perf knobs
+        # (lora-8gb, tlora, etc.) already encode the hardware/perf knobs
         # users used to pick via presets, and all saves now write directly to
         # the current variant file (no preset/variant routing distinction).
         # `methods=` lets callers restrict the picker (e.g. the standard tab
