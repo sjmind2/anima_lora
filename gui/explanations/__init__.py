@@ -173,8 +173,8 @@ FIELD_HELP: dict[str, dict[str, str]] = {
         "ko": "샘플별로 캡션을 비울(빈 텍스트 임베딩으로 대체) 확률. LoRA를 무조건부(unconditional) 방향으로 학습시켜, 프롬프트와 무관하게 항상 적용되는 \"스타일\"을 학습할 때 유리. 일반적: 캐릭터/컨셉 LoRA는 0.0–0.05, 그림체 학습은 0.1–0.25. 너무 높이면 캡션이 담당하던 다양성(포즈/구도)까지 함께 약해짐.",
     },
     "optimizer_type": {
-        "en": "Optimizer algorithm. AdamW8bit: memory-efficient 8-bit Adam. Others: AdamW, Lion, Prodigy, etc.",
-        "ko": "옵티마이저 알고리즘. AdamW8bit: 메모리 효율적 8비트 Adam. 기타: AdamW, Lion, Prodigy 등.",
+        "en": "Optimizer algorithm. AdamW (default, fused). Adopt_Adv: stable training, recommend atan2=True. Prodigy_Adv: auto LR tuning via D-Adaptation, set lr≈1.0. Others: Lion, Prodigy, Adafactor, ScheduleFree, etc.",
+        "ko": "옵티마이저 알고리즘. AdamW (기본, fused). Adopt_Adv: 안정적 학습, atan2=True 권장. Prodigy_Adv: D-Adaptation 자동 LR 조정, lr≈1.0 설정. 기타: Lion, Prodigy, Adafactor, ScheduleFree 등.",
     },
     "lr_scheduler": {
         "en": "Learning rate schedule. constant: fixed LR. Others: cosine, cosine_with_restarts, polynomial.",

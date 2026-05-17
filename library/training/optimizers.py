@@ -42,9 +42,26 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
 
     optimizer_kwargs = {}
     if args.optimizer_args is not None and len(args.optimizer_args) > 0:
-        for arg in args.optimizer_args:
-            key, value = arg.split("=")
-            value = ast.literal_eval(value)
+        opt_args = args.optimizer_args
+        if isinstance(opt_args, str):
+            try:
+                opt_args = ast.literal_eval(opt_args)
+            except (ValueError, SyntaxError):
+                logger.warning(f"optimizer_args is a string but could not be parsed as a list: {opt_args}")
+                opt_args = [opt_args]
+        if not isinstance(opt_args, list):
+            opt_args = [opt_args]
+        for arg in opt_args:
+            parts = arg.split("=", 1)
+            if len(parts) != 2:
+                logger.warning(f"Skipping optimizer_arg without '=': {arg}")
+                continue
+            key, value = parts
+            try:
+                value = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                logger.warning(f"Could not evaluate optimizer_arg value for '{key}': {value}")
+                continue
             optimizer_kwargs[key] = value
 
     lr = args.learning_rate
@@ -266,6 +283,48 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
                 logger.warning("clip_threshold=1.0 will be good")
 
         optimizer_class = transformers.optimization.Adafactor
+        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
+    elif optimizer_type == "Adopt_Adv".lower():
+        try:
+            import adv_optm
+        except ImportError:
+            raise ImportError("No adv_optm. Install with: uv pip install adv_optm==2.2.3")
+        logger.info(f"use Adopt_Adv optimizer | {optimizer_kwargs}")
+        if "use_atan2" not in optimizer_kwargs:
+            logger.info(
+                "Adopt_Adv: consider enabling use_atan2=True for stable bounded updates (recommended by adv_optm)"
+            )
+        optimizer_class = adv_optm.Adopt_adv
+        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
+    elif optimizer_type == "Prodigy_Adv".lower():
+        try:
+            import adv_optm
+        except ImportError:
+            raise ImportError("No adv_optm. Install with: uv pip install adv_optm==2.2.3")
+
+        actual_lr = lr
+        lr_count = 1
+        if isinstance(trainable_params, list) and isinstance(trainable_params[0], dict):
+            lrs = set()
+            actual_lr = trainable_params[0].get("lr", actual_lr)
+            for group in trainable_params:
+                lrs.add(group.get("lr", actual_lr))
+            lr_count = len(lrs)
+
+        if actual_lr <= 0.1:
+            logger.warning(
+                f"learning rate is too low. If using D-Adaptation or Prodigy, set learning rate around 1.0: lr={actual_lr}"
+            )
+            logger.warning("recommend option: lr=1.0")
+        if lr_count > 1:
+            logger.warning(
+                f"when multiple learning rates are specified with dadaptation, only the first one will take effect: lr={actual_lr}"
+            )
+
+        logger.info(f"use Prodigy_Adv optimizer | {optimizer_kwargs}")
+        optimizer_class = adv_optm.Prodigy_adv
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "AdamW".lower():
