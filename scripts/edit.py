@@ -57,7 +57,7 @@ from library.inference.edit_dispatcher import (  # noqa: E402
 )
 from library.inference.models import load_dit_model, load_text_encoder  # noqa: E402
 from library.inference.output import save_images  # noqa: E402
-from library.inference.text import prepare_text_inputs  # noqa: E402
+from library.inference.text import MAX_CROSSATTN_TOKENS, prepare_text_inputs  # noqa: E402
 from library.log import setup_logging  # noqa: E402
 from library.models import qwen_vae as qwen_image_autoencoder_kl  # noqa: E402
 from library.runtime.device import clean_memory_on_device  # noqa: E402
@@ -443,8 +443,8 @@ def main() -> None:
     tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
         qwen3_path=args.text_encoder,
         t5_tokenizer_path=None,
-        qwen3_max_length=512,
-        t5_max_length=512,
+        qwen3_max_length=MAX_CROSSATTN_TOKENS,
+        t5_max_length=MAX_CROSSATTN_TOKENS,
     )
     text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
     text_strategies.TextEncodingStrategy.set_strategy(

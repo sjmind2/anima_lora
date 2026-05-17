@@ -103,6 +103,58 @@ def denoise_one(
     return latents.float().squeeze(2).cpu()
 
 
+def _filter_and_cap_pairs(
+    pairs: list,
+    buckets: list[tuple[int, int]] | None,
+    n_per_bucket: int | None,
+    shuffle_seed: int | None,
+    get_latent_resolution,
+) -> list:
+    """Restrict pairs to a (H_pix, W_pix) allowlist and cap N per bucket.
+
+    Mirrors DCW's ``pick_cached_samples`` stratification: shuffle-seeded
+    selection across the bucket's full candidate pool so incremental re-runs
+    grow coverage instead of resampling the same prompts.
+    """
+    import numpy as np
+
+    if buckets is None and n_per_bucket is None:
+        return pairs
+
+    allowed_latent: set[tuple[int, int]] | None = (
+        {(h // 8, w // 8) for h, w in buckets} if buckets is not None else None
+    )
+    by_bucket: dict[tuple[int, int], list] = {}
+    for p in pairs:
+        try:
+            res = get_latent_resolution(p.npz_path)  # "HxW"
+            H_lat, W_lat = (int(x) for x in res.split("x"))
+        except Exception:
+            continue
+        key = (H_lat, W_lat)
+        if allowed_latent is not None and key not in allowed_latent:
+            continue
+        by_bucket.setdefault(key, []).append(p)
+
+    if shuffle_seed is not None:
+        rng = np.random.default_rng(int(shuffle_seed))
+        for items in by_bucket.values():
+            rng.shuffle(items)
+
+    out: list = []
+    for key in sorted(by_bucket):
+        items = by_bucket[key]
+        if n_per_bucket is not None:
+            items = items[: int(n_per_bucket)]
+        out.extend(items)
+        H_lat, W_lat = key
+        logger.info(
+            f"  bucket {H_lat * 8}x{W_lat * 8} (latent {H_lat}x{W_lat}): "
+            f"{len(items)} pair(s)"
+        )
+    return out
+
+
 def generate_synthetic_latents(
     cache_dir: Path,
     synth_dir: Path,
@@ -118,6 +170,10 @@ def generate_synthetic_latents(
     max_samples: int | None,
     blocks_to_swap: int,
     overwrite: bool,
+    buckets: list[tuple[int, int]] | None = None,
+    n_per_bucket: int | None = None,
+    shuffle_seed: int | None = None,
+    compile_core: bool = True,
 ) -> None:
     """Phase 2 entry point. Iterates TE caches, runs teacher denoising, dumps NPZs."""
     from library.anima import weights as anima_utils
@@ -136,6 +192,18 @@ def generate_synthetic_latents(
         return
 
     synth_dir.mkdir(parents=True, exist_ok=True)
+
+    if buckets is not None or n_per_bucket is not None:
+        bucket_str = (
+            ", ".join(f"{h}x{w}" for h, w in buckets) if buckets else "(all)"
+        )
+        logger.info(
+            f"Phase 2 bucket filter: buckets=[{bucket_str}], "
+            f"n_per_bucket={n_per_bucket}, shuffle_seed={shuffle_seed}"
+        )
+        pairs = _filter_and_cap_pairs(
+            pairs, buckets, n_per_bucket, shuffle_seed, get_latent_resolution
+        )
 
     if max_samples is not None:
         pairs = pairs[: int(max_samples)]
@@ -163,6 +231,17 @@ def generate_synthetic_latents(
         model.to(device)
     model.set_static_token_count(4096)
     model.eval()
+
+    # Compile the constant-shape block stack — set_static_token_count(4096)
+    # above is the precondition. Traces once; one CUDAGraph serves every
+    # bucket in pairs, and both CFG branches reuse it.
+    if compile_core and blocks_to_swap == 0:
+        try:
+            model.compile_core(mode="default")
+        except Exception as e:
+            logger.warning(f"compile_core failed ({e}); falling back to eager.")
+    elif compile_core and blocks_to_swap > 0:
+        logger.info("compile_core skipped: incompatible with blocks_to_swap>0.")
 
     crossattn_neg = _load_uncond_for_synth(uncond_path, device, dtype)
 

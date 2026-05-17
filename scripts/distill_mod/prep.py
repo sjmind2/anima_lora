@@ -49,6 +49,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from library.datasets.buckets import DCW_ASPECT_NAMES  # noqa: E402
 from scripts.distill_mod.synth import generate_synthetic_latents  # noqa: E402
 from scripts.distill_mod.uncond import (  # noqa: E402
     DEFAULT_SEQ_LEN,
@@ -102,13 +103,13 @@ def main() -> None:
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=28,
+        default=20,
         help="Denoising steps for synthesis (default 28 = Anima production).",
     )
     parser.add_argument(
         "--cfg_scale",
         type=float,
-        default=4.0,
+        default=2.5,
         help="CFG scale for synthesis (default 4.0 = Anima production).",
     )
     parser.add_argument(
@@ -139,6 +140,46 @@ def main() -> None:
         type=int,
         default=None,
         help="Cap the number of synthetic latents (None = all discovered pairs).",
+    )
+    parser.add_argument(
+        "--buckets",
+        type=str,
+        default=",".join(DCW_ASPECT_NAMES),
+        help=(
+            "Comma-separated (H_pix x W_pix) resolution allowlist for synthesis. "
+            "Default = library.datasets.buckets.DCW_ASPECT_NAMES (top-5 by "
+            "frequency in post_image_dataset/lora/; same set `make dcw` covers). "
+            "Pass empty string to disable the filter and synthesize every "
+            "cached resolution."
+        ),
+    )
+    parser.add_argument(
+        "--n_per_bucket",
+        type=int,
+        default=100,
+        help=(
+            "Cap synthesized stems per bucket (None = use every stem in the "
+            "allowlist's buckets). With --shuffle_seed, picks deterministically "
+            "across the bucket's full candidate pool."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle_seed",
+        type=int,
+        default=0,
+        help=(
+            "Deterministic shuffle seed for per-bucket selection when "
+            "--n_per_bucket is set. Same convention as `make dcw`."
+        ),
+    )
+    parser.add_argument(
+        "--no_compile",
+        action="store_true",
+        help=(
+            "Disable torch.compile of the DiT block stack. Compile is on by "
+            "default (one CUDAGraph across every bucket via set_static_token_count); "
+            "auto-skipped when --blocks_to_swap > 0."
+        ),
     )
     parser.add_argument(
         "--blocks_to_swap",
@@ -188,6 +229,21 @@ def main() -> None:
         logger.info("--skip_synth set; not generating synthetic latents.")
         return
 
+    buckets: list[tuple[int, int]] | None = None
+    if args.buckets.strip():
+        try:
+            buckets = [
+                tuple(int(x) for x in tok.split("x"))
+                for tok in (s.strip() for s in args.buckets.split(","))
+                if tok
+            ]
+            if any(len(b) != 2 for b in buckets):
+                raise ValueError
+        except ValueError:
+            raise SystemExit(
+                f"--buckets must be comma-separated HxW (got {args.buckets!r})"
+            )
+
     generate_synthetic_latents(
         cache_dir,
         synth_dir,
@@ -202,6 +258,10 @@ def main() -> None:
         max_samples=args.max_samples,
         blocks_to_swap=args.blocks_to_swap,
         overwrite=args.overwrite,
+        buckets=buckets,
+        n_per_bucket=args.n_per_bucket,
+        shuffle_seed=args.shuffle_seed,
+        compile_core=not args.no_compile,
     )
 
 

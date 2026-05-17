@@ -31,6 +31,7 @@ from library.inference import (
     save_latent,
     save_output,
 )
+from library.inference.text import MAX_CROSSATTN_TOKENS
 
 # Side-effect import: registers spectrum_denoise with library.inference.generation
 # so --spectrum dispatches without library.inference holding a hard edge into networks/.
@@ -918,8 +919,8 @@ def main():
         tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
             qwen3_path=args.text_encoder,
             t5_tokenizer_path=None,
-            qwen3_max_length=512,
-            t5_max_length=512,
+            qwen3_max_length=MAX_CROSSATTN_TOKENS,
+            t5_max_length=MAX_CROSSATTN_TOKENS,
         )
         text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
 

@@ -19,10 +19,12 @@ import torch.nn.functional as F
 from safetensors.torch import load_file as _load_safetensors
 from safetensors.torch import save_file
 
+from library.inference.text import MAX_CROSSATTN_TOKENS
+
 logger = logging.getLogger(__name__)
 
 UNCOND_TE_FILENAME = "_anima_uncond_te.safetensors"
-DEFAULT_SEQ_LEN = 512  # matches library/inference/text.py CFG-uncond padding
+DEFAULT_SEQ_LEN = MAX_CROSSATTN_TOKENS  # matches library/inference/text.py CFG-uncond padding
 
 
 def encode_uncond_crossattn(
