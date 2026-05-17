@@ -4,6 +4,7 @@ from dataclasses import (
     dataclass,
 )
 import functools
+import os
 import random
 from textwrap import dedent, indent
 import json
@@ -27,6 +28,7 @@ from library.datasets import (
     DreamBoothSubset,
     DreamBoothDataset,
     DatasetGroup,
+    glob_images,
 )
 from library.training import (
     add_dataset_arguments,
@@ -386,6 +388,35 @@ class BlueprintGenerator:
         return default_value
 
 
+# Below this raw image count we auto-disable validation_split_num /
+# validation_split: carving off any held-out slice from a small pool
+# materially shrinks the training set (e.g. base.toml's default
+# validation_split_num=16 against 30 images leaves only 14 for training)
+# and the resulting CMMD estimator is too noisy to be useful.
+_MIN_TRAIN_IMAGES_FOR_VALIDATION = 100
+
+
+def _count_training_image_paths(dataset_blueprint: "DatasetBlueprint") -> int:
+    """Sum raw (non-reg, pre-split, pre-sample_ratio) image counts across a
+    blueprint's subsets — uses the same `glob_images` discovery as
+    `load_dreambooth_dir` so the count matches what training would see.
+    """
+    total = 0
+    for subset_blueprint in dataset_blueprint.subsets:
+        params = subset_blueprint.params
+        if getattr(params, "is_reg", False):
+            continue
+        image_dir = getattr(params, "image_dir", None)
+        if not image_dir or not os.path.isdir(image_dir):
+            continue
+        total += len(
+            glob_images(
+                image_dir, "*", recursive=bool(getattr(params, "recursive", False))
+            )
+        )
+    return total
+
+
 def generate_dataset_group_by_blueprint(
     dataset_group_blueprint: DatasetGroupBlueprint,
     constant_token_buckets: bool = False,
@@ -393,6 +424,25 @@ def generate_dataset_group_by_blueprint(
     datasets: List[DreamBoothDataset] = []
 
     for dataset_blueprint in dataset_group_blueprint.datasets:
+        params = dataset_blueprint.params
+        if (params.validation_split_num and params.validation_split_num > 0) or (
+            params.validation_split and params.validation_split > 0.0
+        ):
+            n_train_images = _count_training_image_paths(dataset_blueprint)
+            if 0 < n_train_images < _MIN_TRAIN_IMAGES_FOR_VALIDATION:
+                logger.warning(
+                    "Training pool has %d image(s) (< %d) — auto-disabling "
+                    "validation_split_num=%s / validation_split=%s. The whole "
+                    "pool will be used for training and no validation pass "
+                    "will run.",
+                    n_train_images,
+                    _MIN_TRAIN_IMAGES_FOR_VALIDATION,
+                    params.validation_split_num,
+                    params.validation_split,
+                )
+                params.validation_split_num = 0
+                params.validation_split = 0.0
+
         subsets = [
             DreamBoothSubset(**asdict(subset_blueprint.params))
             for subset_blueprint in dataset_blueprint.subsets

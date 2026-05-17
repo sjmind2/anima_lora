@@ -2001,7 +2001,6 @@ class AnimaTrainer:
                     del image, crossattn_emb
                     clean_memory_on_device(accelerator.device)
                     val_progress_bar.update(1)
-                    val_progress_bar.set_postfix({"items": f"{i + 1}/{len(ref_items)}"})
 
                     self.on_validation_step_end(ctx, {})
 
@@ -2010,13 +2009,26 @@ class AnimaTrainer:
                 clean_memory_on_device(accelerator.device)
                 bundle.encoder.inner.to(accelerator.device)
                 try:
-                    for image_cpu in pixel_images:
-                        image_gpu = image_cpu.to(accelerator.device)
+                    # Batch PE encoding by bucket: same-shape images go through
+                    # one same_bucket=True forward instead of N. Original order
+                    # is preserved so gen_pooled[i] still pairs with ref_pool[i].
+                    bucket_groups: dict[tuple[int, int], list[int]] = {}
+                    for idx, img in enumerate(pixel_images):
+                        key = (int(img.shape[-2]), int(img.shape[-1]))
+                        bucket_groups.setdefault(key, []).append(idx)
+
+                    pooled_slots: list[torch.Tensor | None] = [None] * len(pixel_images)
+                    for indices in bucket_groups.values():
+                        batch = torch.stack(
+                            [pixel_images[idx] for idx in indices], dim=0
+                        ).to(accelerator.device)
                         feats_list = encode_pe_from_imageminus1to1(
-                            bundle, image_gpu.unsqueeze(0), same_bucket=True
+                            bundle, batch, same_bucket=True
                         )
-                        gen_pooled.append(pool_and_normalize(feats_list[0]).cpu())
-                        del image_gpu, feats_list
+                        for idx, feats in zip(indices, feats_list):
+                            pooled_slots[idx] = pool_and_normalize(feats).cpu()
+                        del batch, feats_list
+                    gen_pooled = [t for t in pooled_slots if t is not None]
                 finally:
                     bundle.encoder.inner.to("cpu")
                     clean_memory_on_device(accelerator.device)
