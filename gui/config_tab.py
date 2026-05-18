@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import re
 import sys
@@ -880,16 +881,27 @@ class ConfigTab(QWidget):
         python = sys.executable
         args = ["tasks.py", "preprocess"]
 
-        # Point tasks.py at the same variant training will use, so any
-        # source_image_dir / resized_image_dir / lora_cache_dir override the
-        # user wrote into the variant file is honored by preprocess too.
-        self._proc.setProcessEnvironment(
-            make_subprocess_env(
-                METHOD=variant,
-                METHODS_SUBDIR="gui-methods",
-                PRESET=self._IMPLICIT_PRESET,
-            )
-        )
+        env_extra = {
+            "METHOD": variant,
+            "METHODS_SUBDIR": "gui-methods",
+            "PRESET": self._IMPLICIT_PRESET,
+        }
+        settings_file = Path(__file__).resolve().parent / "gui_settings.json"
+        if settings_file.exists():
+            try:
+                gui_settings = json.loads(settings_file.read_text(encoding="utf-8"))
+                if "caption_tag_dropout_rate" in gui_settings:
+                    env_extra["CAPTION_TAG_DROPOUT_RATE"] = str(
+                        gui_settings["caption_tag_dropout_rate"]
+                    )
+                if "caption_shuffle_variants" in gui_settings:
+                    env_extra["CAPTION_SHUFFLE_VARIANTS"] = str(
+                        gui_settings["caption_shuffle_variants"]
+                    )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        self._proc.setProcessEnvironment(make_subprocess_env(**env_extra))
 
         self.log.clear()
         self._reset_progress()
