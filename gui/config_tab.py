@@ -44,7 +44,6 @@ from gui import (
     _save,
     _widget,
     apply_validation_choice,
-    confirm_existing_caches,
     confirm_resumable_checkpoint,
     confirm_train_using_cache,
     is_basic_field,
@@ -151,16 +150,10 @@ class ConfigTab(QWidget):
         self._save_btn.clicked.connect(self._save_preset)
         top.addWidget(self._save_btn)
 
-        self.preprocess_btn = QPushButton(t("preprocess"))
-        self._preprocess_idle_style = (
-            "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
-        )
-        self._preprocess_busy_style = (
-            "background:#7f8c8d;color:white;font-weight:bold;padding:4px 16px;"
-        )
-        self.preprocess_btn.setStyleSheet(self._preprocess_idle_style)
-        self.preprocess_btn.clicked.connect(self._start_preprocess)
-        top.addWidget(self.preprocess_btn)
+        # The standalone Preprocess button used to live here; it was retired
+        # once the Train button gained an auto-chain that runs preprocess
+        # itself when no cache is present. Per-step preprocess controls (TE
+        # caching, SAM/MIT masks, …) still live on the PreprocessingTab.
 
         self.train_btn = QPushButton(t("train"))
         self._train_idle_style = (
@@ -694,7 +687,6 @@ class ConfigTab(QWidget):
         self.test_btn.setText(t("test") + " ...")
         self.test_btn.setStyleSheet(self._test_busy_style)
         self.test_btn.setEnabled(False)
-        self.preprocess_btn.setEnabled(False)
         self.train_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.method_combo.setEnabled(False)
@@ -703,7 +695,7 @@ class ConfigTab(QWidget):
 
     def _resolve_cache_dir(self, variant: str) -> Path:
         """Resolve the absolute lora_cache_dir for the given variant. Used by
-        both Preprocess (reassurance popup) and Train (cache-exists branch)."""
+        the Train cache-exists branch and the auto-chain preprocess path."""
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         cache_rel = merged.get("lora_cache_dir") or "post_image_dataset/lora"
         cache_dir = Path(cache_rel)
@@ -711,25 +703,10 @@ class ConfigTab(QWidget):
             cache_dir = ROOT / cache_dir
         return cache_dir
 
-    def _start_preprocess(self):
-        # Flush form edits to disk first — the subprocess re-reads the variant
-        # file, so unsaved knobs (paths, source dirs, …) would otherwise be lost.
-        if self._dirty:
-            self._save_preset(silent=True)
-
-        variant = self._current_variant()
-        cache_dir = self._resolve_cache_dir(variant)
-        # Reassure the user that any pre-existing caches there will be reused,
-        # not wiped. Mirrors scripts/tasks/preprocess.py's fallback.
-        if not confirm_existing_caches(self, cache_dir):
-            return
-
-        self._launch_preprocess(variant)
-
     def _launch_preprocess(self, variant: str) -> None:
-        """Start the preprocess subprocess for ``variant``. Skips the
-        confirm-existing-caches popup — callers (Preprocess button, train
-        auto-chain) own that decision."""
+        """Start the preprocess subprocess for ``variant``. Only caller is the
+        Train auto-chain (no Preprocess button on this tab); the
+        PreprocessingTab owns the standalone preprocess UI."""
         python = sys.executable
         args = ["tasks.py", "preprocess"]
 
@@ -754,9 +731,11 @@ class ConfigTab(QWidget):
         )
         self._running_mode = "preprocess"
         self._proc.start(python, args)
-        self.preprocess_btn.setText(t("preprocess") + " ...")
-        self.preprocess_btn.setStyleSheet(self._preprocess_busy_style)
-        self.preprocess_btn.setEnabled(False)
+        # Train is the only visible action — surface the preprocess phase on
+        # it so the user sees that something is running before training
+        # actually starts.
+        self.train_btn.setText(t("train_preprocessing"))
+        self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -802,7 +781,6 @@ class ConfigTab(QWidget):
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
-        self.preprocess_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -841,7 +819,6 @@ class ConfigTab(QWidget):
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.setEnabled(True)
-        self.preprocess_btn.setEnabled(True)
         self.test_btn.setEnabled(self._has_lora_output())
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
@@ -892,9 +869,6 @@ class ConfigTab(QWidget):
             self._preprocessed = True
         if mode == "test" and exit_code == 0:
             self._show_test_output()
-        self.preprocess_btn.setText(t("preprocess"))
-        self.preprocess_btn.setStyleSheet(self._preprocess_idle_style)
-        self.preprocess_btn.setEnabled(True)
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.setEnabled(True)

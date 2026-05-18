@@ -17,10 +17,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # PreprocessingTab
         "preprocess_intro": (
             "Configure caption shuffling and text-bubble masking, then run each "
-            "step on demand. The Training Config tab's one-click Preprocess "
-            "button still uses defaults — this tab is for tuning."
+            "step on demand. The Training Config tab's Train button auto-runs "
+            "preprocess with default settings when no cache exists — this tab "
+            "is for tuning and for re-running individual steps."
         ),
-        "preprocess_text_caching": "Text caching",
+        "preprocess_text_caching": "Caching (VAE + text)",
         "preprocess_caption_shuffle_variants": "Shuffle variants per caption (N):",
         "preprocess_caption_shuffle_variants_tip": (
             "Generate N caption variants per image. v0 is the pristine original; "
@@ -35,7 +36,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "including the first @artist marker are never dropped. Ignored when "
             "shuffle variants ≤ 0."
         ),
-        "preprocess_run_te": "Run text caching",
+        "preprocess_run_te": "Run caching (VAE + text)",
         "preprocess_masking_sam": "SAM3 masking (text bubbles)",
         "preprocess_masking_mit": "MIT masking (manga text)",
         "preprocess_sam_prompts": "SAM prompts (one per line):",
@@ -113,6 +114,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "No preprocessed cache found — running preprocess first, "
             "then training automatically.\n"
         ),
+        "train_preprocessing": "Preprocessing…",
         "no_lora_for_test": "No LoRA in output/ckpt/ to test. Run training first.",
         "test_output_title": "Latest test output",
         "test_output_empty": "output/tests/ is empty.",
@@ -313,10 +315,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         # PreprocessingTab
         "preprocess_intro": (
             "캡션 셔플과 말풍선 마스킹을 설정하고, 각 단계를 원할 때 실행합니다. "
-            "학습 설정 탭의 원클릭 Preprocess 버튼은 기본값을 사용합니다 — "
-            "이 탭은 세부 조정용입니다."
+            "학습 설정 탭의 학습 버튼은 캐시가 없을 때 기본값으로 전처리를 "
+            "자동 실행합니다 — 이 탭은 세부 조정 및 단계별 재실행용입니다."
         ),
-        "preprocess_text_caching": "텍스트 캐싱",
+        "preprocess_text_caching": "캐싱 (VAE + 텍스트)",
         "preprocess_caption_shuffle_variants": "캡션당 셔플 변형 수 (N):",
         "preprocess_caption_shuffle_variants_tip": (
             "이미지당 N개의 캡션 변형을 생성합니다. v0은 원본 그대로이고, "
@@ -331,7 +333,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "첫 번째 @artist 마커까지의 태그는 절대 드롭되지 않습니다. "
             "셔플 변형 수가 0 이하이면 무시됩니다."
         ),
-        "preprocess_run_te": "텍스트 캐싱 실행",
+        "preprocess_run_te": "캐싱 실행 (VAE + 텍스트)",
         "preprocess_masking_sam": "SAM3 마스킹 (말풍선)",
         "preprocess_masking_mit": "MIT 마스킹 (만화 텍스트)",
         "preprocess_sam_prompts": "SAM 프롬프트 (한 줄에 하나):",
@@ -408,6 +410,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "전처리 캐시가 없어 전처리를 먼저 실행한 뒤 자동으로 "
             "학습을 시작합니다.\n"
         ),
+        "train_preprocessing": "전처리 중…",
         "no_lora_for_test": "테스트할 LoRA가 output/ckpt/에 없습니다. 먼저 학습을 실행하세요.",
         "test_output_title": "최신 테스트 출력",
         "test_output_empty": "output/tests/가 비어 있습니다.",

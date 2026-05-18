@@ -488,13 +488,19 @@ class PreprocessingTab(QWidget):
         return self._proc.state() != QProcess.NotRunning
 
     def _run_te(self) -> None:
+        # Unified "caching" step — runs `tasks.py preprocess`, which chains
+        # resize → VAE-latent cache → text-embedding cache. Replaces the old
+        # text-only path now that the ConfigTab's standalone Preprocess
+        # button is gone and this tab owns the cache-build UI. The TE knobs
+        # (shuffle / dropout) are still surfaced as env vars; resize and VAE
+        # currently have no GUI-tunable parameters, so the form stays TE-only.
         if not self._save_all():
             return
         env = make_subprocess_env(
             CAPTION_SHUFFLE_VARIANTS=str(int(self.shuffle_spin.value())),
             CAPTION_TAG_DROPOUT_RATE=self.dropout_edit.text().strip(),
         )
-        self._launch(["tasks.py", "preprocess-te"], env=env)
+        self._launch(["tasks.py", "preprocess"], env=env)
 
     def _run_sam(self) -> None:
         # SAM reads configs/sam_mask.yaml directly — no env vars needed,
