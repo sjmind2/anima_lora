@@ -83,6 +83,70 @@ def _path(key: str, default: str) -> str:
     return str(val) if val is not None else default
 
 
+def _load_subset_configs() -> list[dict] | None:
+    method = os.environ.get("METHOD")
+    if not method:
+        print("  _load_subset_configs: METHOD env var not set, no subset configs", file=sys.stderr)
+        return None
+    methods_subdir = os.environ.get("METHODS_SUBDIR") or "methods"
+    variant_path = ROOT / "configs" / methods_subdir / f"{method}.toml"
+    if not variant_path.is_file():
+        print(f"  _load_subset_configs: variant file not found: {variant_path}", file=sys.stderr)
+        return None
+    import toml as _toml
+
+    try:
+        data = _toml.loads(variant_path.read_text(encoding="utf-8"))
+    except (OSError, Exception) as e:
+        print(f"  _load_subset_configs: failed to read {variant_path}: {e}", file=sys.stderr)
+        return None
+    datasets = data.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        print(f"  _load_subset_configs: no [[datasets]] in {variant_path}", file=sys.stderr)
+        return None
+    first = datasets[0]
+    if not isinstance(first, dict):
+        print(f"  _load_subset_configs: first dataset entry is not a dict", file=sys.stderr)
+        return None
+    subsets = first.get("subsets")
+    if not isinstance(subsets, list) or not subsets:
+        print(f"  _load_subset_configs: no subsets in first dataset", file=sys.stderr)
+        return None
+    print(f"  _load_subset_configs: loaded {len(subsets)} subset(s) from {variant_path}", file=sys.stderr)
+    source_image_dir = data.get("source_image_dir", "")
+    for idx, sub in enumerate(subsets):
+        image_dir = sub.get("image_dir", "")
+        if not sub.get("source_dir") and image_dir:
+            p = Path(image_dir)
+            rel = ""
+            if p.name == ".resized":
+                rel = str(p.parent.name)
+            elif p.name == ".lora":
+                rel = str(p.parent.name)
+            if source_image_dir:
+                if rel:
+                    sub["source_dir"] = str(Path(source_image_dir) / rel)
+                else:
+                    sub["source_dir"] = source_image_dir
+        if not sub.get("name") and image_dir:
+            p = Path(image_dir)
+            if p.name == ".resized":
+                parent_name = p.parent.name
+                src_base = Path(source_image_dir).name if source_image_dir else ""
+                sub["name"] = "(root)" if parent_name == src_base else parent_name
+            else:
+                sub["name"] = p.name
+        print(
+            f"    subset[{idx}]: name={sub.get('name')!r}  "
+            f"source_dir={sub.get('source_dir')!r}  "
+            f"image_dir={image_dir!r}  "
+            f"cache_dir={sub.get('cache_dir')!r}  "
+            f"num_repeats={sub.get('num_repeats', 1)}",
+            file=sys.stderr,
+        )
+    return subsets
+
+
 def bespoke_preset_flags(preset: str) -> list[str]:
     """Translate ``configs/presets.toml[<preset>]`` into CLI flags for the
     bespoke distillation loops (``scripts/distill_mod/distill.py`` / ``distill_turbo.py``)

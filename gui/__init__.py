@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 import toml
+
+logger = logging.getLogger(__name__)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -586,6 +590,65 @@ def _imgs(d: Path) -> list[Path]:
     return sorted(
         p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
+
+
+def scan_source_dir(source_dir: str) -> list[dict]:
+    logger.info("scan_source_dir: scanning source_dir=%r", source_dir)
+    p = Path(source_dir)
+    if not p.is_dir():
+        logger.warning("scan_source_dir: %r is not a directory or does not exist, returning empty list", source_dir)
+        return []
+    basename = p.name
+    logger.debug("scan_source_dir: resolved basename=%r", basename)
+    subsets = []
+    root_images = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
+    logger.debug("scan_source_dir: found %d image file(s) in root directory", len(root_images))
+    if root_images:
+        sub = {
+            "name": "(root)",
+            "source_dir": str(p),
+            "image_dir": f"post_image_dataset/{basename}/.resized",
+            "cache_dir": f"post_image_dataset/{basename}/.lora",
+            "num_repeats": 1,
+            "recursive": True,
+        }
+        subsets.append(sub)
+        logger.info(
+            "scan_source_dir: added (root) subset  image_dir=%r  cache_dir=%r  num_repeats=1",
+            sub["image_dir"], sub["cache_dir"],
+        )
+    skipped = []
+    for child in sorted(p.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("."):
+            skipped.append(child.name)
+            continue
+        m = re.match(r"^(\d+)_.+", child.name)
+        num_repeats = int(m.group(1)) if m else 1
+        sub = {
+            "name": child.name,
+            "source_dir": str(child),
+            "image_dir": f"post_image_dataset/{basename}/{child.name}/.resized",
+            "cache_dir": f"post_image_dataset/{basename}/{child.name}/.lora",
+            "num_repeats": num_repeats,
+            "recursive": True,
+        }
+        subsets.append(sub)
+        if m:
+            logger.info(
+                "scan_source_dir: subset=%r  matched pattern [N]_rest → num_repeats=%d  image_dir=%r  cache_dir=%r",
+                child.name, num_repeats, sub["image_dir"], sub["cache_dir"],
+            )
+        else:
+            logger.info(
+                "scan_source_dir: subset=%r  no repeat prefix → num_repeats=%d (default)  image_dir=%r  cache_dir=%r",
+                child.name, num_repeats, sub["image_dir"], sub["cache_dir"],
+            )
+    if skipped:
+        logger.debug("scan_source_dir: skipped hidden directories: %s", skipped)
+    logger.info("scan_source_dir: total %d subset(s) generated for source_dir=%r", len(subsets), source_dir)
+    return subsets
 
 
 def _safetensors_in(d: Path) -> list[Path]:
