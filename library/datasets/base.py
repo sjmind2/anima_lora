@@ -1774,17 +1774,24 @@ class DreamBoothDataset(BaseDataset):
                 if strategy is not None:
                     logger.info("get image size from name of cache files")
 
-                    if recursive:
-                        npz_paths = glob.glob(
-                            os.path.join(
-                                subset.image_dir, "**", "*" + strategy.cache_suffix
-                            ),
-                            recursive=True,
-                        )
-                    else:
-                        npz_paths = glob.glob(
-                            os.path.join(subset.image_dir, "*" + strategy.cache_suffix)
-                        )
+                    search_dirs = [subset.image_dir]
+                    cache_dir_val = getattr(subset, "cache_dir", None)
+                    if cache_dir_val:
+                        cache_dir_path = str(cache_dir_val)
+                        if cache_dir_path not in (str(subset.image_dir), ""):
+                            search_dirs.append(cache_dir_path)
+
+                    npz_paths = []
+                    for sd in search_dirs:
+                        if recursive:
+                            npz_paths.extend(glob.glob(
+                                os.path.join(sd, "**", "*" + strategy.cache_suffix),
+                                recursive=True,
+                            ))
+                        else:
+                            npz_paths.extend(glob.glob(
+                                os.path.join(sd, "*" + strategy.cache_suffix)
+                            ))
                     npz_paths.sort(key=lambda item: item.rsplit("_", maxsplit=2)[0])
                     npz_path_index = 0
 

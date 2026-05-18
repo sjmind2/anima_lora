@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import html
+
+logger = logging.getLogger(__name__)
 
 import toml
 from PySide6.QtCore import QProcess, Qt, Signal
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTextBrowser,
     QVBoxLayout,
@@ -50,6 +54,7 @@ from gui import (
     list_gui_variants,
     list_methods,
     merged_gui_variant_preset,
+    scan_source_dir,
     variant_path,
 )
 from gui.explanations import field_help, method_guide
@@ -85,6 +90,8 @@ class ConfigTab(QWidget):
         # Train/Preprocess auto-saves before launching, since the subprocess
         # re-reads the file from disk and would otherwise miss form edits.
         self._dirty = False
+        self._subsets: list[dict] = []
+        self._subset_widgets: list[dict] = []
         lay = QVBoxLayout(self)
 
         # Top bar: method + save + preprocess + train + stop
@@ -374,7 +381,21 @@ class ConfigTab(QWidget):
                 lbl.clicked.connect(
                     lambda _k=k, _h=help_text, _n=notes: self._show_explain(_k, _h, _n)
                 )
-                form.addRow(lbl, w)
+
+                if k == "source_image_dir":
+                    scan_btn = QPushButton(t("scan_subsets"))
+                    scan_btn.setToolTip(t("scan_subsets_tooltip"))
+                    scan_btn.clicked.connect(self._scan_subsets)
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setContentsMargins(0, 0, 0, 0)
+                    row_layout.addWidget(w, 1)
+                    row_layout.addWidget(scan_btn)
+                    form.addRow(lbl, row_widget)
+                    self._source_dir_widget = w
+                    w.editingFinished.connect(self._on_source_dir_changed)
+                else:
+                    form.addRow(lbl, w)
             box.setLayout(form)
             return box
 
@@ -413,6 +434,57 @@ class ConfigTab(QWidget):
 
         advanced_box.toggled.connect(_on_advanced_toggled)
         self._fl.addWidget(advanced_box)
+
+        self._subsets = []
+        self._subset_widgets = []
+        variant_data = _load(variant_path(variant))
+        existing_datasets = variant_data.get("datasets")
+        if isinstance(existing_datasets, list) and existing_datasets:
+            first_ds = existing_datasets[0]
+            if isinstance(first_ds, dict) and "subsets" in first_ds:
+                logger.info(
+                    "_reload: variant %r has %d subset(s) in [[datasets]], loading into UI",
+                    variant, len(first_ds["subsets"]),
+                )
+                src_dir_base = variant_data.get("source_image_dir", "")
+                for idx, sub in enumerate(first_ds["subsets"]):
+                    image_dir = sub.get("image_dir", "")
+                    cache_dir = sub.get("cache_dir", "")
+                    name = sub.get("name", "")
+                    source_dir = sub.get("source_dir", "")
+                    if not name and image_dir:
+                        p = Path(image_dir)
+                        if p.name == ".resized":
+                            parent_name = p.parent.name
+                            name = "(root)" if not parent_name or parent_name == p.parent.parent.name else parent_name
+                        else:
+                            name = p.name
+                    if not source_dir and src_dir_base:
+                        if name == "(root)":
+                            source_dir = src_dir_base
+                        else:
+                            source_dir = str(Path(src_dir_base) / name)
+                    entry = {
+                        "name": name,
+                        "source_dir": source_dir,
+                        "image_dir": image_dir,
+                        "cache_dir": cache_dir,
+                        "num_repeats": sub.get("num_repeats", 1),
+                        "recursive": sub.get("recursive", True),
+                    }
+                    self._subsets.append(entry)
+                    logger.debug(
+                        "_reload: loaded subset[%d] name=%r  image_dir=%r  cache_dir=%r  num_repeats=%d",
+                        idx, entry["name"], entry["image_dir"], entry["cache_dir"], entry["num_repeats"],
+                    )
+            else:
+                logger.debug("_reload: variant %r has no subsets in [[datasets]]", variant)
+        else:
+            logger.debug("_reload: variant %r has no [[datasets]] section", variant)
+
+        if self._subsets:
+            subsets_box = self._build_subsets_box()
+            self._fl.addWidget(subsets_box)
 
         self._fl.addStretch()
 
@@ -460,6 +532,87 @@ class ConfigTab(QWidget):
             self._save_btn.setText(t("save"))
             self._save_btn.setStyleSheet(self._save_btn_idle_style)
             self._save_btn.setToolTip("")
+
+    # ── Subset scanning ──
+
+    def _scan_subsets(self):
+        src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+        if not src:
+            logger.warning("_scan_subsets: source_image_dir is empty, cannot scan")
+            QMessageBox.information(self, t("subsets_section"), t("subsets_scan_no_dir"))
+            return
+        logger.info("_scan_subsets: scanning source_image_dir=%r", src)
+        self._subsets = scan_source_dir(src)
+        logger.info("_scan_subsets: scan returned %d subset(s)", len(self._subsets))
+        self._rebuild_subset_ui()
+        if not self._subsets:
+            QMessageBox.information(self, t("subsets_section"), t("subsets_scan_no_dir"))
+        else:
+            self._mark_dirty()
+
+    def _on_source_dir_changed(self):
+        if self._subsets:
+            logger.info("_on_source_dir_changed: source_image_dir changed, re-scanning subsets")
+            self._scan_subsets()
+
+    def _build_subsets_box(self) -> QGroupBox:
+        subsets_box = QGroupBox(t("subsets_section"))
+        subsets_layout = QVBoxLayout()
+        subsets_layout.setContentsMargins(8, 12, 8, 8)
+        subsets_layout.setSpacing(6)
+        self._subset_widgets = []
+        for i, sub in enumerate(self._subsets):
+            card = QGroupBox()
+            card.setStyleSheet(
+                "QGroupBox { border: 1px solid #444; border-radius: 4px; "
+                "margin-top: 0; padding: 6px; padding-top: 2px; }"
+                "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+            )
+            card_layout = QVBoxLayout()
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            card_layout.setSpacing(2)
+            name_lbl = QLabel(sub["name"])
+            name_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+            card_layout.addWidget(name_lbl)
+            img_lbl = QLabel(sub["image_dir"])
+            img_lbl.setStyleSheet("color:#aaa; font-size: 11px;")
+            img_lbl.setWordWrap(True)
+            img_lbl.setToolTip(sub["image_dir"])
+            card_layout.addWidget(img_lbl)
+            cache_lbl = QLabel(sub["cache_dir"])
+            cache_lbl.setStyleSheet("color:#aaa; font-size: 11px;")
+            cache_lbl.setWordWrap(True)
+            cache_lbl.setToolTip(sub["cache_dir"])
+            card_layout.addWidget(cache_lbl)
+            repeats_row = QHBoxLayout()
+            repeats_row.addWidget(QLabel(t("subsets_col_num_repeats")))
+            repeats_spin = QSpinBox()
+            repeats_spin.setRange(1, 1000)
+            repeats_spin.setValue(sub["num_repeats"])
+            repeats_spin.setFixedWidth(70)
+            repeats_spin.wheelEvent = lambda e: e.ignore()
+            repeats_spin.valueChanged.connect(self._mark_dirty)
+            repeats_row.addWidget(repeats_spin)
+            repeats_row.addStretch()
+            card_layout.addLayout(repeats_row)
+            card.setLayout(card_layout)
+            subsets_layout.addWidget(card)
+            self._subset_widgets.append({"spin": repeats_spin, "index": i})
+        subsets_box.setLayout(subsets_layout)
+        return subsets_box
+
+    def _rebuild_subset_ui(self):
+        for i in range(self._fl.count()):
+            item = self._fl.itemAt(i)
+            if item.widget() and isinstance(item.widget(), QGroupBox):
+                if item.widget().title() == t("subsets_section"):
+                    item.widget().deleteLater()
+                    self._fl.removeItem(item)
+                    break
+        if not self._subsets:
+            return
+        subsets_box = self._build_subsets_box()
+        self._fl.insertWidget(self._fl.count() - 1, subsets_box)
 
     # ── Explanation panel ──
 
@@ -558,6 +711,37 @@ class ConfigTab(QWidget):
         use_valid_w = self._w.get("use_valid")
         if use_valid_w is not None:
             apply_validation_choice(out, bool(_read(use_valid_w)))
+
+        if self._subsets:
+            logger.info("_save_preset: writing %d subset(s) to variant TOML", len(self._subsets))
+            dataset_entry = out.get("datasets")
+            if not isinstance(dataset_entry, list):
+                dataset_entry = [{}]
+                out["datasets"] = dataset_entry
+            if not dataset_entry:
+                dataset_entry.append({})
+            first = dataset_entry[0]
+            if not isinstance(first, dict):
+                first = {}
+                dataset_entry[0] = first
+            _TRAINING_SUBSET_KEYS = {"image_dir", "cache_dir", "num_repeats", "recursive", "is_reg", "class_tokens", "caption_extension", "keep_tokens", "alpha_mask"}
+            subsets_list = []
+            for i, sub in enumerate(self._subsets):
+                sub_copy = {k: v for k, v in sub.items() if k in _TRAINING_SUBSET_KEYS}
+                if self._subset_widgets:
+                    for sw in self._subset_widgets:
+                        if sw["index"] == i:
+                            sub_copy["num_repeats"] = sw["spin"].value()
+                            break
+                subsets_list.append(sub_copy)
+                logger.debug(
+                    "_save_preset: subset[%d] name=%r  image_dir=%r  cache_dir=%r  num_repeats=%d  recursive=%s",
+                    i, sub.get("name"), sub_copy.get("image_dir"), sub_copy.get("cache_dir"),
+                    sub_copy.get("num_repeats"), sub_copy.get("recursive"),
+                )
+            first["subsets"] = subsets_list
+        else:
+            logger.debug("_save_preset: no subsets to write")
 
         # Extra-args textarea: parse as TOML and merge in. Textarea overrides
         # the form for any duplicate key (it's the more explicit signal).
