@@ -154,7 +154,10 @@ def latest_output(prefix: str = "", exclude: str | None = None) -> Path:
 
 
 def latest_lora() -> Path:
-    return latest_output()
+    # Exclude pooled_text_proj heads: they live in output/ckpt/ too but are
+    # not LoRAs — picking the newest `.safetensors` blindly grabs them right
+    # after `make distill-mod`. They're resolved separately by MOD=1.
+    return latest_output(exclude="pooled_text_proj")
 
 
 def latest_hydra() -> Path:

@@ -75,14 +75,18 @@ make distill-mod           # Train pooled_text_proj MLP (text → AdaLN modulati
 
 # Inference (test with most recent output)
 make test
-make test-mod              # Test with modulation guidance (pooled_text_proj)
+make test MOD=1            # Latest LoRA + distilled pooled_text_proj (modulation guidance)
+make test NOLORA=1         # Bare DiT (skip --lora_weight); compose with MOD=1 for mod-only path
 make test-hydra            # HydraLoRA / FeRA router-live (anima_hydra*_moe.safetensors or
                            #   stacked-experts FeRA — both go through the same
                            #   `lora_ups.{i}.weight` safetensors sniff)
 make test-merge            # Inference with a merged/baked DiT (no adapter loaded)
 make test SPECTRUM=1       # Spectrum-accelerated inference (~3.75x speedup)
+make test SPECTRUM=1 MOD=1 # Spectrum + modulation guidance composed
 make test-dcw              # Latest LoRA + DCW scalar bias correction (--dcw, λ=−0.015)
-make test-dcw-v4           # Latest LoRA + DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors)
+make test-dcw-v4           # DCW v4 learnable calibrator on bare DiT (auto-resolves fusion_head.safetensors;
+                           #   NOLORA=0 attaches the latest LoRA)
+# SPECTRUM=1 / MOD=1 / NOLORA=1 all compose into test-dcw, test-dcw-v4, test-smc-cfg too.
 make test-spectrum-dcw     # Spectrum + DCW scalar composed
 make test-dcw-v4-spectrum  # Spectrum + DCW v4 composed
 

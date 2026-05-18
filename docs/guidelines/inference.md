@@ -31,7 +31,8 @@ representative starting point.
 |--------|--------------|
 | `make test` | Latest LoRA |
 | `make test SPECTRUM=1` | Latest LoRA + Spectrum acceleration |
-| `make test-mod` | Latest distilled `pooled_text_proj` (modulation guidance) |
+| `make test MOD=1` | Latest LoRA + distilled `pooled_text_proj` (modulation guidance). Composes with `SPECTRUM=1`. |
+| `make test NOLORA=1` | Bare DiT (skips `--lora_weight`). Compose with `MOD=1` for a mod-only sample. |
 | `make test-hydra` | Latest HydraLoRA / FeRA `*_moe.safetensors` (router-live) |
 | `make test-merge` | Inference against a baked DiT under `MODEL_DIR=` |
 | `make test-dcw` | Latest LoRA + DCW scalar bias correction (λ = -0.015) |

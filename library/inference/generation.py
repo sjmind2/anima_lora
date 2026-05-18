@@ -24,6 +24,7 @@ from library.inference.output import check_inputs
 from library.inference.text import prepare_text_inputs
 from library.inference.models import load_dit_model
 from library.inference.mod_guidance import setup_mod_guidance
+from library.inference.smc_cfg import SMCCFGState
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,20 @@ def generate_body_tiled(
         er_sde = inference_utils.LCMSampler(sigmas, seed=args.seed, device=device)
 
     do_cfg = args.guidance_scale != 1.0
+    smc_cfg = (
+        SMCCFGState(
+            lam=args.smc_cfg_lambda,
+            k=args.smc_cfg_k,
+            eps=(None if args.smc_cfg_eps < 0 else args.smc_cfg_eps),
+            alpha=(
+                None
+                if getattr(args, "smc_cfg_alpha", -1.0) < 0
+                else args.smc_cfg_alpha
+            ),
+        )
+        if do_cfg and getattr(args, "smc_cfg", False)
+        else None
+    )
 
     # P-GRAFT: get network reference for mid-denoising cutoff
     pgraft_network = getattr(anima, "_pgraft_network", None)
@@ -309,9 +324,14 @@ def generate_body_tiled(
                 noise_pred = noise_acc / weight_acc
                 if do_cfg:
                     uncond_noise_pred = uncond_noise_acc / uncond_weight_acc
-                    noise_pred = uncond_noise_pred + args.guidance_scale * (
-                        noise_pred - uncond_noise_pred
-                    )
+                    if smc_cfg is not None:
+                        noise_pred = smc_cfg.combine(
+                            noise_pred, uncond_noise_pred, args.guidance_scale
+                        )
+                    else:
+                        noise_pred = uncond_noise_pred + args.guidance_scale * (
+                            noise_pred - uncond_noise_pred
+                        )
 
                 denoised = latents.float() - sigmas[i] * noise_pred.float()
                 if er_sde is not None:
@@ -513,6 +533,20 @@ def generate_body(
 
     # Denoising loop
     do_cfg = args.guidance_scale != 1.0
+    smc_cfg = (
+        SMCCFGState(
+            lam=args.smc_cfg_lambda,
+            k=args.smc_cfg_k,
+            eps=(None if args.smc_cfg_eps < 0 else args.smc_cfg_eps),
+            alpha=(
+                None
+                if getattr(args, "smc_cfg_alpha", -1.0) < 0
+                else args.smc_cfg_alpha
+            ),
+        )
+        if do_cfg and getattr(args, "smc_cfg", False)
+        else None
+    )
 
     # P-GRAFT: get network reference for mid-denoising cutoff
     pgraft_network = getattr(anima, "_pgraft_network", None)
@@ -554,6 +588,7 @@ def generate_body(
             dcw_schedule=getattr(args, "dcw_schedule", "one_minus_sigma"),
             dcw_band_mask=getattr(args, "dcw_band_mask", "LL"),
             dcw_calibrator=dcw_calibrator,
+            smc_cfg=smc_cfg,
         )
     else:
         try:
@@ -606,9 +641,14 @@ def generate_body(
                                 padding_mask=padding_mask,
                                 **_neg_kw,
                             )
-                        noise_pred = uncond_noise_pred + args.guidance_scale * (
-                            noise_pred - uncond_noise_pred
-                        )
+                        if smc_cfg is not None:
+                            noise_pred = smc_cfg.combine(
+                                noise_pred, uncond_noise_pred, args.guidance_scale
+                            )
+                        else:
+                            noise_pred = uncond_noise_pred + args.guidance_scale * (
+                                noise_pred - uncond_noise_pred
+                            )
 
                     # ensure latents dtype is consistent
                     denoised = latents.float() - sigmas[i] * noise_pred.float()

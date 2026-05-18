@@ -16,13 +16,16 @@ Core forecasting algorithm adapted from:
 
 import math
 import logging
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 from tqdm import tqdm
 
 from library.inference.adapters import clear_hydra_sigma, set_hydra_sigma
 from library.inference import sampling as inference_utils
+
+if TYPE_CHECKING:
+    from library.inference.smc_cfg import SMCCFGState
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +251,7 @@ def spectrum_denoise(
     dcw_schedule: str = "one_minus_sigma",
     dcw_band_mask: str = "LL",
     dcw_calibrator=None,
+    smc_cfg: "Optional[SMCCFGState]" = None,
 ) -> torch.Tensor:
     """Spectrum-accelerated denoising loop.
 
@@ -365,9 +369,14 @@ def spectrum_denoise(
                         ):
                             uncond_residual = ufeat - uncond_fc.predict(float(i))
                         uncond_fc.update(float(i), ufeat)
-                        noise_pred = uncond_noise_pred + guidance_scale * (
-                            noise_pred - uncond_noise_pred
-                        )
+                        if smc_cfg is not None:
+                            noise_pred = smc_cfg.combine(
+                                noise_pred, uncond_noise_pred, guidance_scale
+                            )
+                        else:
+                            noise_pred = uncond_noise_pred + guidance_scale * (
+                                noise_pred - uncond_noise_pred
+                            )
 
                     # Advance schedule (only post-warmup to avoid inflating window)
                     if i >= warmup_steps:
@@ -393,9 +402,14 @@ def spectrum_denoise(
                             uncond_noise_pred = _spectrum_fast_forward(
                                 anima, t_exp, upred_feat
                             )
-                            noise_pred = uncond_noise_pred + guidance_scale * (
-                                noise_pred - uncond_noise_pred
-                            )
+                            if smc_cfg is not None:
+                                noise_pred = smc_cfg.combine(
+                                    noise_pred, uncond_noise_pred, guidance_scale
+                                )
+                            else:
+                                noise_pred = uncond_noise_pred + guidance_scale * (
+                                    noise_pred - uncond_noise_pred
+                                )
 
                     consec_cached += 1
                     pbar.set_postfix(mode="cached", n=fwd_count)

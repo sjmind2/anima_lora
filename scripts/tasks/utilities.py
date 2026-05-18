@@ -59,8 +59,8 @@ def cmd_distill_mod(extra):
     ``make distill-mod PRESET=low_vram`` enables grad ckpt + unsloth offload.
     Trailing ``extra`` args are appended last, so user CLI overrides win.
 
-    Saves to ``output/ckpt/pooled_text_proj.safetensors`` so ``test-mod`` picks it
-    up automatically.
+    Saves to ``output/ckpt/pooled_text_proj.safetensors`` so ``make test MOD=1``
+    picks it up automatically.
     """
     preset_flags = bespoke_preset_flags(_preset())
     run(

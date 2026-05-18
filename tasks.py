@@ -9,6 +9,8 @@ Examples:
     python tasks.py lora --network_dim 32 --max_train_epochs 64
     python tasks.py test
     python tasks.py test                     # add SPECTRUM=1 to enable Spectrum
+    python tasks.py test                     # add MOD=1 to enable modulation guidance
+    python tasks.py test                     # add NOLORA=1 to run against the bare DiT
     python tasks.py download-models
     python tasks.py exp-postfix              # experimental method
     python tasks.py exp-test-ip ref.png      # experimental inference
@@ -48,11 +50,9 @@ COMMANDS = {
     # ── Inference ─────────────────────────────────────────────────────
     "test": (
         inference.cmd_test,
-        "Inference with latest LoRA. SPECTRUM=1 enables Spectrum acceleration.",
-    ),
-    "test-mod": (
-        inference.cmd_test_mod,
-        "Inference with latest pooled_text_proj (modulation guidance)",
+        "Inference with latest LoRA. SPECTRUM=1 enables Spectrum acceleration; "
+        "MOD=1 adds the latest distilled pooled_text_proj (modulation guidance); "
+        "NOLORA=1 runs against the bare DiT (skips --lora_weight).",
     ),
     "test-hydra": (
         inference.cmd_test_hydra,
@@ -64,11 +64,18 @@ COMMANDS = {
     ),
     "test-dcw": (
         inference.cmd_test_dcw,
-        "Inference with latest LoRA + DCW post-step bias correction",
+        "Inference with latest LoRA + DCW post-step bias correction. "
+        "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
+    ),
+    "test-smc-cfg": (
+        inference.cmd_test_smc_cfg,
+        "Inference with latest LoRA + SMC-CFG (sliding-mode control CFG, arXiv:2603.03281). "
+        "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
     ),
     "test-dcw-v4": (
         inference.cmd_test_dcw_v4,
-        "Inference with latest LoRA + DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors)",
+        "Inference with DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors). "
+        "No LoRA by default; SPECTRUM=1 / MOD=1 / NOLORA=0 (attach latest LoRA) all compose.",
     ),
     "dcw": (
         dcw.cmd_dcw,

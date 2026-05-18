@@ -242,6 +242,8 @@ def load_dit_model(
     if getattr(args, "compile", False):
         logger.info("Compiling DiT model with torch.compile...")
         model = torch.compile(model)
+    elif getattr(args, "compile_blocks", False):
+        model.compile_blocks(mode=getattr(args, "compile_inductor_mode", None))
 
     clean_memory_on_device(device)
 
