@@ -47,7 +47,7 @@ GUIDEBOOK_PATH = _REPO_ROOT / "docs" / "guidelines" / "가이드북.md"
 ICON_PATH = Path(__file__).resolve().parent / "icon.ico"
 
 
-LANG_NAMES = {"en": "English", "ko": "한국어"}
+LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文"}
 
 
 def _dark(app: QApplication):
