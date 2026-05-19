@@ -33,6 +33,11 @@ const NODE_CONFIG = {
         countWidget: "input_count",
         baseNames: ["vae_name_"],
         max: 10
+    },
+    "XY Input (Anima): LoRA": {
+        countWidget: "input_count",
+        baseNames: ["lora_name_", "model_strength_", "clip_strength_"],
+        max: 10
     }
 };
 
