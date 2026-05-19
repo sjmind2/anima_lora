@@ -1,3 +1,5 @@
+import { app } from "../../scripts/app.js";
+
 const NODE_CONFIG = {
     "XY Input (Anima): Sampler/Scheduler": {
         countWidget: "input_count",
@@ -73,45 +75,39 @@ function updateVisibility(node, config) {
 
 app.registerExtension({
     name: "anima_xyplot.widgets",
-    async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
-        const config = NODE_CONFIG[nodeData.name];
+    nodeCreated(node) {
+        const config = NODE_CONFIG[node.comfyClass];
         if (!config) return;
 
-        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
-        nodeType.prototype.onNodeCreated = function () {
-            const result = origOnNodeCreated?.apply(this, arguments);
+        const countWidget = node.widgets?.find(w => w.name === config.countWidget);
+        if (!countWidget) return;
 
-            const node = this;
-            requestAnimationFrame(() => {
-                updateVisibility(node, config);
+        let widgetValue = countWidget.value;
 
-                const countWidget = node.widgets?.find(w => w.name === config.countWidget);
-                if (countWidget) {
-                    const origCallback = countWidget.callback;
-                    countWidget.callback = function (...args) {
-                        updateVisibility(node, config);
-                        if (origCallback) origCallback.apply(this, args);
-                    };
+        let originalDescriptor = Object.getOwnPropertyDescriptor(countWidget, 'value');
+        if (!originalDescriptor) {
+            originalDescriptor = Object.getOwnPropertyDescriptor(
+                countWidget.constructor.prototype, 'value'
+            );
+        }
 
-                    if (countWidget.inputEl) {
-                        countWidget.inputEl.addEventListener("input", () => {
-                            updateVisibility(node, config);
-                        });
-                        countWidget.inputEl.addEventListener("change", () => {
-                            updateVisibility(node, config);
-                        });
-                    }
+        updateVisibility(node, config);
 
-                    const origMouse = countWidget.mouse;
-                    countWidget.mouse = function (...args) {
-                        const result = origMouse?.apply(this, args);
-                        requestAnimationFrame(() => updateVisibility(node, config));
-                        return result;
-                    };
+        Object.defineProperty(countWidget, 'value', {
+            get() {
+                if (originalDescriptor && originalDescriptor.get) {
+                    return originalDescriptor.get.call(countWidget);
                 }
-            });
-
-            return result;
-        };
+                return widgetValue;
+            },
+            set(newVal) {
+                if (originalDescriptor && originalDescriptor.set) {
+                    originalDescriptor.set.call(countWidget, newVal);
+                } else {
+                    widgetValue = newVal;
+                }
+                updateVisibility(node, config);
+            }
+        });
     }
 });

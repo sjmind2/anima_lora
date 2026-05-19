@@ -68,6 +68,12 @@ def _resolve_router_compute():
             raise
         if str(_VENDOR) not in sys.path:
             sys.path.insert(0, str(_VENDOR))
+        for k in [
+            k for k in list(sys.modules)
+            if k.startswith(("library.", "networks."))
+            or k in ("library", "networks")
+        ]:
+            del sys.modules[k]
         return importlib.import_module("library.inference.router_compute")
 
 
