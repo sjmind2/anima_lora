@@ -713,6 +713,8 @@ class ConfigTab(QWidget):
         # Point tasks.py at the same variant training will use, so any
         # source_image_dir / resized_image_dir / lora_cache_dir override the
         # user wrote into the variant file is honored by preprocess too.
+        # drop_lowres_images / min_pixels are read straight from the merged
+        # config chain by scripts/tasks/preprocess.py via _path_overrides().
         self._proc.setProcessEnvironment(
             make_subprocess_env(
                 METHOD=variant,

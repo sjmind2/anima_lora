@@ -178,7 +178,7 @@ def load_mask_from_dir(
         return None
     mask = Image.open(mask_path).convert("L")
     if (mask.width, mask.height) != size:
-        mask = mask.resize(size, Image.LANCZOS)
+        mask = mask.resize(size, Image.NEAREST)
     mask_np = np.array(mask, dtype=np.float32) / 255.0
     return torch.FloatTensor(mask_np)
 

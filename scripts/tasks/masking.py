@@ -40,7 +40,7 @@ def _run_sam(image_dir: Path, out_dir: Path, extra: list[str]) -> None:
             "--checkpoint",
             "models/sam3/sam3.pt",
             "--batch-size",
-            "2",
+            "4",
             "--recursive",
             *extra,
         ]

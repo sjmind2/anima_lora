@@ -573,7 +573,7 @@ class BaseDataset(torch.utils.data.Dataset):
             mask = Image.open(info.mask_path).convert("L")
             target_w, target_h = info.bucket_reso  # (W, H)
             if (mask.width, mask.height) != (target_w, target_h):
-                mask = mask.resize((target_w, target_h), Image.LANCZOS)
+                mask = mask.resize((target_w, target_h), Image.NEAREST)
                 n_resized += 1
             info.preloaded_alpha_mask = torch.from_numpy(np.array(mask, dtype=np.uint8))
         if n_missing:

@@ -359,6 +359,40 @@ FIELD_HELP: dict[str, dict[str, str]] = {
             "임계값도 필터링된 풀을 기준으로 동작합니다."
         ),
     },
+    "drop_lowres_images": {
+        "en": (
+            "When true, the preprocess auto-chain skips source images below "
+            "the `min_pixels` threshold so they never enter the resize / VAE "
+            "/ TE caches. Applied to both preprocess/resize_images.py and "
+            "preprocess/cache_text_embeddings.py via the same `--min_pixels` "
+            "argument. Uncheck to keep every image regardless of size."
+        ),
+        "ko": (
+            "체크 시, 학습 자동 체인의 전처리가 `min_pixels` 임계값 미만의 "
+            "원본 이미지를 건너뛰어 리사이즈 / VAE / TE 캐시에 들어가지 "
+            "않도록 합니다. preprocess/resize_images.py와 "
+            "preprocess/cache_text_embeddings.py 양쪽에 동일한 "
+            "`--min_pixels` 인자로 전달됩니다. 체크 해제하면 크기와 무관하게 "
+            "모든 이미지를 사용합니다."
+        ),
+    },
+    "min_pixels": {
+        "en": (
+            "Pixel-count threshold used by `drop_lowres_images` (default "
+            "500_000 = 0.5MP). Forwarded verbatim to "
+            "preprocess/resize_images.py and cache_text_embeddings.py as "
+            "`--min_pixels`. Ignored when `drop_lowres_images = false`. "
+            "Set to 0 (with the flag on) to disable the filter without "
+            "flipping the checkbox."
+        ),
+        "ko": (
+            "`drop_lowres_images`에서 사용하는 픽셀 수 임계값 (기본값 "
+            "500_000 = 0.5MP). preprocess/resize_images.py와 "
+            "cache_text_embeddings.py에 `--min_pixels`로 그대로 전달됩니다. "
+            "`drop_lowres_images = false`일 때는 무시됩니다. 체크박스를 "
+            "끄지 않고 필터만 비활성화하려면 0으로 설정하세요."
+        ),
+    },
 }
 
 

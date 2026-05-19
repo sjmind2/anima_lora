@@ -28,6 +28,15 @@ lora_cache_dir = "post_image_dataset/lora"
 # Same blueprint applies to validation enumeration.
 path_pattern = "*"
 
+# Preprocess input filter. When true, scripts/tasks/preprocess.py forwards
+# `--min_pixels = min_pixels` to both preprocess/resize_images.py and
+# preprocess/cache_text_embeddings.py so under-sized source images never
+# enter the resize / VAE / TE caches. Default 500_000 = 0.5MP — matches the
+# scripts' own argparse defaults. Set drop_lowres_images = false to keep
+# every image regardless of size.
+drop_lowres_images = true
+min_pixels = 500000
+
 optimizer_type = "AdamW"
 lr_scheduler = "constant"
 

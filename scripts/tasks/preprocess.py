@@ -11,6 +11,31 @@ from ._common import PY, _path, run
 # `recursive = true` subset default in configs/base.toml. Stems must stay
 # unique across the tree (cache filenames are stem-keyed and flat). Pass
 # `--no_recursive` (or edit configs) to opt out.
+def _min_pixels_args() -> list[str]:
+    """``--min_pixels <N>`` derived from the variant TOML's
+    ``drop_lowres_images`` + ``min_pixels`` keys (resolved through the same
+    base → preset → method merge chain training uses, via ``_path_overrides``
+    in scripts/tasks/_common.py).
+
+    Returns ``[]`` when both keys are absent so plain CLI use keeps each
+    script's own argparse default (500_000 = 0.5MP). ``drop_lowres_images
+    = false`` forces ``--min_pixels 0`` even when ``min_pixels`` is set, so
+    the user can flip a single boolean to disable the filter."""
+    from ._common import _path_overrides  # local import: avoids unused circular
+
+    overrides = _path_overrides()
+    if "drop_lowres_images" not in overrides and "min_pixels" not in overrides:
+        return []
+    if overrides.get("drop_lowres_images") is False:
+        return ["--min_pixels", "0"]
+    raw = overrides.get("min_pixels", 500_000)
+    try:
+        n = max(0, int(raw))
+    except (TypeError, ValueError):
+        return []
+    return ["--min_pixels", str(n)]
+
+
 def cmd_preprocess_resize(extra):
     run(
         [
@@ -22,6 +47,7 @@ def cmd_preprocess_resize(extra):
             _path("resized_image_dir", "post_image_dataset/resized"),
             "--no_copy_captions",
             "--recursive",
+            *_min_pixels_args(),
             *extra,
         ]
     )
@@ -72,6 +98,7 @@ def cmd_preprocess_te(extra):
             "--caption_tag_dropout_rate",
             tag_dropout_rate,
             "--recursive",
+            *_min_pixels_args(),
             *extra,
         ]
     )

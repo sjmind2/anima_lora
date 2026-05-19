@@ -94,22 +94,59 @@ def _compose_mask_overlay(source: QPixmap, mask_path: Path) -> QPixmap:
     ``setAlphaChannel`` instead: when given a grayscale image, it copies the
     luminance into the alpha channel of an ARGB32 layer.
 
-    The mask is scaled to the source's resolution before being attached as the
-    alpha channel (resized-tree vs original image_dataset).
+    Alignment: masks are generated at the **bucket** resolution
+    (``post_image_dataset/resized/`` = scale-to-cover + center-crop of the
+    original in ``image_dataset/``). A plain ``IgnoreAspectRatio`` rescale
+    onto the source would (a) stretch non-uniformly when ARs differ and
+    (b) ignore the cropped-out margins — both contribute visible drift on
+    the original-image view. Invert the bucket transform: scale the mask
+    uniformly to match the appropriate axis, then letterbox the other axis
+    so masked features land where the trainer actually saw them.
     """
     mask_img = QImage(str(mask_path))
     if mask_img.isNull():
         return source
     gray = mask_img.convertToFormat(QImage.Format_Grayscale8)
     gray.invertPixels()  # bubble (was 0) → 255, train-here (was 255) → 0
-    if gray.size() != source.size():
-        gray = gray.scaled(
-            source.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+
+    src_w, src_h = source.width(), source.height()
+    mask_w, mask_h = gray.width(), gray.height()
+    if (src_w, src_h) == (mask_w, mask_h):
+        aligned = gray
+    elif src_w * mask_h >= src_h * mask_w:
+        # ar_src >= ar_mask: bucket cropped left/right of the original.
+        # Match height, letterbox width.
+        scaled_w = max(1, round(mask_w * src_h / mask_h))
+        scaled = gray.scaled(
+            scaled_w, src_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
         )
+        aligned = QImage(src_w, src_h, QImage.Format_Grayscale8)
+        aligned.fill(0)  # 0 = no tint on the cropped-out bars
+        offset_x = max(0, (src_w - scaled_w) // 2)
+        painter = QPainter(aligned)
+        try:
+            painter.drawImage(offset_x, 0, scaled)
+        finally:
+            painter.end()
+    else:
+        # ar_src < ar_mask: bucket cropped top/bottom of the original.
+        # Match width, letterbox height.
+        scaled_h = max(1, round(mask_h * src_w / mask_w))
+        scaled = gray.scaled(
+            src_w, scaled_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+        )
+        aligned = QImage(src_w, src_h, QImage.Format_Grayscale8)
+        aligned.fill(0)
+        offset_y = max(0, (src_h - scaled_h) // 2)
+        painter = QPainter(aligned)
+        try:
+            painter.drawImage(0, offset_y, scaled)
+        finally:
+            painter.end()
 
     layer = QImage(source.size(), QImage.Format_ARGB32)
     layer.fill(_MASK_OVERLAY_COLOR_OPAQUE)
-    layer.setAlphaChannel(gray)
+    layer.setAlphaChannel(aligned)
 
     result = QPixmap(source)
     p = QPainter(result)

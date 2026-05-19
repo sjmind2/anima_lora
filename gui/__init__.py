@@ -252,6 +252,8 @@ _GROUPS = {
         "resized_image_dir",
         "lora_cache_dir",
         "path_pattern",
+        "drop_lowres_images",
+        "min_pixels",
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
@@ -286,6 +288,8 @@ _BASIC = {
     "lora_cache_dir",
     "output_dir",
     "path_pattern",
+    "drop_lowres_images",
+    "min_pixels",
     "use_valid",
     "validation_split_num",
 }
@@ -776,7 +780,15 @@ def _widget(v: Any, key: str = "") -> QWidget:
         return w
     if isinstance(v, int):
         w = QSpinBox()
-        w.setRange(0, 10000)
+        # Per-key range overrides for fields that legitimately exceed the
+        # default 10k cap (silently clips otherwise). Keep these explicit
+        # rather than raising the global ceiling — most int fields are
+        # small (epochs, ranks, expert counts) and a 10k cap keeps the
+        # user from typoing a giant value into them.
+        if key == "min_pixels":
+            w.setRange(0, 100_000_000)  # 100MP — covers any real image
+        else:
+            w.setRange(0, 10000)
         w.setValue(v)
         w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         w.wheelEvent = lambda e: e.ignore()
