@@ -71,7 +71,14 @@ def apply_router_conditioning(
     ):
         network.set_content(crossattn_emb)
 
+    incremented = False
     if is_train and hasattr(network, "step_balance_loss_warmup"):
         network.step_balance_loss_warmup(warmup_step, max_train_steps)
-        return warmup_step + 1
-    return warmup_step
+        incremented = True
+    # Soft-tokens bank-dispersive warmup: parallel branch (mutually exclusive
+    # with the LoRA-family network above — different network class) but kept
+    # as a separate ``if`` so the order of checks doesn't matter.
+    if is_train and hasattr(network, "step_bank_dispersive_warmup"):
+        network.step_bank_dispersive_warmup(warmup_step, max_train_steps)
+        incremented = True
+    return warmup_step + 1 if incremented else warmup_step

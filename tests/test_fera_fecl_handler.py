@@ -108,15 +108,12 @@ def test_build_loss_composer_activates_fera_fecl_on_stacked_experts():
     LoRANetwork with ``cfg.use_moe_style == 'independent_A'`` and
     ``fecl_weight > 0``.
     """
-    cfg = types.SimpleNamespace(
-        use_moe_style="independent_A", fera_fecl_weight=0.5
-    )
+    cfg = types.SimpleNamespace(use_moe_style="independent_A", fera_fecl_weight=0.5)
     network = types.SimpleNamespace(
         cfg=cfg,
         fecl_weight=0.5,
         _ortho_reg_weight=0.0,
         _balance_loss_weight=0.0,
-        contrastive_weight=0.0,
     )
     args = argparse.Namespace(
         method="lora",
@@ -136,7 +133,6 @@ def test_build_loss_composer_skips_fera_fecl_on_plain_lora():
         fecl_weight=0.5,
         _ortho_reg_weight=0.0,
         _balance_loss_weight=0.0,
-        contrastive_weight=0.0,
     )
     args = argparse.Namespace(
         method="lora",

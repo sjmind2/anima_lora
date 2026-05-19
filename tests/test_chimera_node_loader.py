@@ -24,6 +24,8 @@ path requires ``comfy.lora`` (ComfyUI is not on the unit-test sys.path).
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -32,14 +34,33 @@ from safetensors.torch import save_file
 
 
 def _load_adapter_module():
-    """Import the node's ``adapter.py`` without depending on ComfyUI."""
+    """Import the node's ``adapter.py`` without depending on ComfyUI.
+
+    ``adapter.py`` does ``from .chimera import ...``, so it must be loaded
+    as a submodule of a package. We register a stub parent package whose
+    ``__path__`` points at the node directory — skipping the real
+    ``__init__.py`` (which imports ComfyUI) — and load ``adapter`` under it.
+    """
     here = Path(__file__).resolve().parent.parent
+    node_dir = here / "custom_nodes" / "comfyui-hydralora"
+
+    pkg_name = "_anima_node_pkg"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [str(node_dir)]
+        sys.modules[pkg_name] = pkg
+
+    adapter_name = f"{pkg_name}.adapter"
+    if adapter_name in sys.modules:
+        return sys.modules[adapter_name]
+
     spec = importlib.util.spec_from_file_location(
-        "_anima_node_adapter",
-        here / "custom_nodes" / "comfyui-hydralora" / "adapter.py",
+        adapter_name,
+        node_dir / "adapter.py",
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[adapter_name] = mod
     spec.loader.exec_module(mod)
     return mod
 
