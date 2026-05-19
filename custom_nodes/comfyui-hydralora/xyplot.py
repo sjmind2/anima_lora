@@ -394,6 +394,21 @@ class AnimaEfficientKSampler:
                         f"with ReFT strength {param_val}."
                     )
                 cur["model"] = new_model
+        elif param_type == "lora":
+            lora_name, model_str, clip_str = param_val
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
+                base_model = deps[0]
+                clip = deps[1]
+                positive_text = deps[6]
+                negative_text = deps[7]
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    base_model, clip, lora_sd, model_str, clip_str
+                )
+                cur["model"] = new_model
+                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
+                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
         elif param_type == "anima_postfix":
             postfix_name, strength = param_val
             postfix_path = folder_paths.get_full_path("loras", postfix_name)
@@ -434,6 +449,9 @@ class AnimaEfficientKSampler:
             return f"Lora: {param_val:.2f}"
         if param_type == "anima_reft_strength":
             return f"ReFT: {param_val:.2f}"
+        if param_type == "lora":
+            import os
+            return f"LoRA: {os.path.splitext(os.path.basename(param_val[0]))[0]}"[:25]
         if param_type == "anima_postfix":
             return param_val[0][:25]
         if param_type == "checkpoint":
