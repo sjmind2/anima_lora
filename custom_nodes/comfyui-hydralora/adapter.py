@@ -1253,9 +1253,13 @@ def _apply_hydra_live_to_model(model, hydra_data: dict, strength: float) -> int:
         )
     else:
         router_pre_hook = _make_router_pre_hook(sigma_state, fei_on, fei_sigma_low_div)
-    new_pre_hooks = OrderedDict(diffusion_model._forward_pre_hooks)
+    pre_hook_key = "diffusion_model._forward_pre_hooks"
+    if pre_hook_key in model.object_patches:
+        new_pre_hooks = OrderedDict(model.object_patches[pre_hook_key])
+    else:
+        new_pre_hooks = OrderedDict()
     new_pre_hooks[id(router_pre_hook)] = router_pre_hook
-    model.add_object_patch("diffusion_model._forward_pre_hooks", new_pre_hooks)
+    model.add_object_patch(pre_hook_key, new_pre_hooks)
 
     patched = 0
     skipped: list[str] = []
@@ -1346,9 +1350,13 @@ def _apply_hydra_live_to_model(model, hydra_data: dict, strength: float) -> int:
             }
             hook = _make_hydra_hook(params, strength, sigma_state)
 
-        new_hooks = OrderedDict(linear._forward_hooks)
+        hook_key = f"{module_path}._forward_hooks"
+        if hook_key in model.object_patches:
+            new_hooks = OrderedDict(model.object_patches[hook_key])
+        else:
+            new_hooks = OrderedDict()
         new_hooks[id(hook)] = hook
-        model.add_object_patch(f"{module_path}._forward_hooks", new_hooks)
+        model.add_object_patch(hook_key, new_hooks)
         patched += 1
 
     if skipped:
@@ -1429,9 +1437,13 @@ def _apply_chimera_dual_a_to_model(
         router_tau=float(chimera_data["router_tau"]),
         K_f=int(chimera_data["num_experts_freq"]),
     )
-    new_pre_hooks = OrderedDict(diffusion_model._forward_pre_hooks)
+    pre_hook_key = "diffusion_model._forward_pre_hooks"
+    if pre_hook_key in model.object_patches:
+        new_pre_hooks = OrderedDict(model.object_patches[pre_hook_key])
+    else:
+        new_pre_hooks = OrderedDict()
     new_pre_hooks[id(router_pre_hook)] = router_pre_hook
-    model.add_object_patch("diffusion_model._forward_pre_hooks", new_pre_hooks)
+    model.add_object_patch(pre_hook_key, new_pre_hooks)
 
     K_c = int(chimera_data["num_experts_content"])
     K_f = int(chimera_data["num_experts_freq"])
@@ -1512,9 +1524,13 @@ def _apply_chimera_dual_a_to_model(
         }
         hook = _make_chimera_dual_a_hook(params, strength, sigma_state)
 
-        new_hooks = OrderedDict(linear._forward_hooks)
+        hook_key = f"{module_path}._forward_hooks"
+        if hook_key in model.object_patches:
+            new_hooks = OrderedDict(model.object_patches[hook_key])
+        else:
+            new_hooks = OrderedDict()
         new_hooks[id(hook)] = hook
-        model.add_object_patch(f"{module_path}._forward_hooks", new_hooks)
+        model.add_object_patch(hook_key, new_hooks)
         patched += 1
 
     if skipped:
@@ -1608,11 +1624,13 @@ def _apply_reft_to_model(model, reft_blocks: Dict[int, dict], strength: float) -
             continue
         block = diffusion.blocks[idx]
         hook = _make_reft_hook(params, strength)
-        new_hooks = OrderedDict(block._forward_hooks)
+        hook_key = f"diffusion_model.blocks.{idx}._forward_hooks"
+        if hook_key in model.object_patches:
+            new_hooks = OrderedDict(model.object_patches[hook_key])
+        else:
+            new_hooks = OrderedDict()
         new_hooks[id(hook)] = hook
-        model.add_object_patch(
-            f"diffusion_model.blocks.{idx}._forward_hooks", new_hooks
-        )
+        model.add_object_patch(hook_key, new_hooks)
         patched += 1
     return patched
 
