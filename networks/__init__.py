@@ -17,8 +17,7 @@ Flag precedence (evaluated top to bottom, first match wins):
 The legacy ``use_hydra`` / ``use_sigma_router`` / ``use_fei_router``
 kwargs were retired in plan2 task #6 — see ``LoRANetworkCfg.from_kwargs``
 for the rejection message. ``use_dora`` was retired alongside the
-``lora_deprecated`` module; ``.dora_scale`` keys in external LoRAs still
-load through the plain ``lora`` spec.
+``lora_deprecated`` module; DoRA is no longer trained, saved, or loaded.
 """
 
 from __future__ import annotations

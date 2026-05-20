@@ -93,8 +93,6 @@ Anima's default 12-epoch OrthoLoRA + T-LoRA stack on diverse multi-artist data s
 | ReFT | n/a — block-level intervention, not a Linear wrap |
 | T-LoRA mask | ✓ — orthogonal; mask applies after the down-projection |
 
-DoRA: not currently wired; would need `inv_scale` factored into the magnitude column too.
-
 ## References
 
 - Xiao et al., **SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models**, ICML 2023 — the original `s = mean|x|^α` absorption trick (this implementation borrows the parameterization, not the quantization goal).

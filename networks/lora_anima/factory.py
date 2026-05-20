@@ -567,8 +567,6 @@ def create_network_from_weights(
         # Force the plain LoRA spec even for ortho checkpoints — the
         # merge_to / fuse_weight path expects flat down/up weights, and
         # ortho checkpoints are distilled to LoRA shape at save time.
-        # External ``.dora_scale`` keys also flow through this branch and
-        # are applied by the merge helper in ``lora_utils.merge_to``.
         spec = NETWORK_REGISTRY["lora"]
         module_class = spec.module_class
     elif has_ortho:

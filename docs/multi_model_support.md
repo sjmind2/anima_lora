@@ -84,7 +84,7 @@ Not all adapter families port equally. Rough triage:
 
 | Adapter | Portability to a new DiT | Why |
 |---------|--------------------------|-----|
-| LoRA / OrthoLoRA / DoRA | High | Operates on any `nn.Linear`; only target list needs to change |
+| LoRA / OrthoLoRA | High | Operates on any `nn.Linear`; only target list needs to change |
 | ReFT | High | Wraps block forwards; needs a block-naming pattern only |
 | HydraLoRA | High-medium | Same target story as LoRA + a router on the Linear's input |
 | T-LoRA | High | Timestep mask is model-agnostic |

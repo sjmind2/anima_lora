@@ -288,7 +288,11 @@ def test_command_job_build_cmd():
     )
     mgr = JobManager.__new__(JobManager)  # no worker thread
     cmd, env = mgr._build_cmd(job)
-    assert cmd == [sys.executable, "tasks.py", "preprocess"]
+    # Command jobs launch under the resolved venv interpreter (windowless on
+    # Windows), not necessarily the caller's sys.executable.
+    from scripts.daemon.client import venv_python
+
+    assert cmd == [venv_python(windowless=True), "tasks.py", "preprocess"]
     assert "train.py" not in cmd
     assert env["CAPTION_SHUFFLE_VARIANTS"] == "7"
     assert env["PYTHONUNBUFFERED"] == "1"

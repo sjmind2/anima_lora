@@ -14,7 +14,7 @@ Coverage:
 * End-to-end: build a real ``LoRAModule`` with ``channel_scale``, run defuse,
   refuse, and verify the rebuilt fused module produces identical output to the
   in-memory original.
-* Bake: the production ``rename_dora_and_defuse_standard`` path now folds
+* Bake: the production ``defuse_and_bake_standard`` path now folds
   ``inv_scale`` into ``lora_down`` and drops the key, so a plain (no
   channel-scale) consumer reproduces the channel-scaled forward bitwise.
 """
@@ -28,8 +28,8 @@ from networks.lora_modules.base import BaseLoRAModule
 from networks.lora_modules.lora import (
     LoRAModule,
     bake_inv_scale,
+    defuse_and_bake_standard,
     defuse_standard_qkv,
-    rename_dora_and_defuse_standard,
 )
 
 
@@ -258,7 +258,7 @@ def test_bake_inv_scale_drops_key_and_folds_down():
 
 
 def test_baked_save_reproduces_channel_scaled_forward():
-    """The production save path (rename_dora_and_defuse_standard) bakes
+    """The production save path (defuse_and_bake_standard) bakes
     inv_scale, so a *plain* LoRAModule (no channel_scale) loading the baked
     weights reproduces the original channel-scaled forward bitwise — this is
     what stock ComfyUI / merge_to_dit now apply correctly."""
@@ -290,7 +290,7 @@ def test_baked_save_reproduces_channel_scaled_forward():
 
     # Production save: defuse → bake. After this there are NO inv_scale keys.
     sd = {f"{lora.lora_name}.{k}": v for k, v in lora.state_dict().items()}
-    rename_dora_and_defuse_standard(sd)
+    defuse_and_bake_standard(sd)
     assert not any(k.endswith(".inv_scale") for k in sd), (
         "baked save must not ship inv_scale keys"
     )

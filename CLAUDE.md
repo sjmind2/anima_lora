@@ -139,7 +139,7 @@ make mask-clean            # rm -rf post_image_dataset/masks/
 make merge ADAPTER_DIR=output/ckpt                    # bake latest bakeable LoRA in dir
 make merge ADAPTER_DIR=output/ckpt MULTIPLIER=0.8     # scale strength
 python scripts/merge_to_dit.py --adapter path/to/lora.safetensors --allow-partial
-# Supports: LoRA / OrthoLoRA / DoRA / T-LoRA. Refuses ReFT / Hydra moe / postfix
+# Supports: LoRA / OrthoLoRA / T-LoRA. Refuses ReFT / Hydra moe / postfix
 # by default (they can't be folded into Linear weights); --allow-partial
 # drops them and bakes only the LoRA portion.
 

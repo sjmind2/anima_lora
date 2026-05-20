@@ -2618,11 +2618,6 @@ class LoRANetwork(torch.nn.Module):
         else:
             weights_sd = torch.load(file, map_location="cpu")
 
-        for key in list(weights_sd.keys()):
-            if key.endswith(".dora_scale"):
-                new_key = key.replace(".dora_scale", ".magnitude")
-                weights_sd[new_key] = weights_sd.pop(key)
-
         # Stack per-expert hydra ups into fused lora_up_weight (training form).
         # Also stacks per-expert ``.lora_downs.{i}.weight`` for the
         # StackedExperts (independent-A) layout — no-op for Hydra.

@@ -213,26 +213,10 @@ class LoRAModule(BaseLoRAModule):
 #
 # Co-located with LoRAModule because they operate on the layout this class
 # writes (``.lora_down.weight`` / ``.lora_up.weight`` / ``.alpha`` /
-# optional ``.dora_scale``). The standard variant write fires these; the
+# optional ``.inv_scale``). The standard variant write fires these; the
 # Hydra and Chimera writers also defuse their plain-LoRA legs by calling
 # :func:`defuse_standard_qkv` directly.
 # ---------------------------------------------------------------------------
-
-
-def rename_dora_keys(state_dict: Dict[str, torch.Tensor]) -> None:
-    """Rename ``.magnitude`` → ``.dora_scale`` and drop ``._org_weight_norm``.
-
-    DoRA training stores its learned column-norm vector under
-    ``.magnitude``; ComfyUI's LoRA loader looks for ``.dora_scale``. The
-    ``_org_weight_norm`` buffer is a training-only frozen reference and
-    isn't consumed downstream.
-    """
-    for key in list(state_dict.keys()):
-        if key.endswith(".magnitude"):
-            new_key = key.replace(".magnitude", ".dora_scale")
-            state_dict[new_key] = state_dict.pop(key)
-        elif key.endswith("._org_weight_norm"):
-            del state_dict[key]
 
 
 def defuse_standard_qkv(state_dict: Dict[str, torch.Tensor]) -> None:
@@ -241,10 +225,10 @@ def defuse_standard_qkv(state_dict: Dict[str, torch.Tensor]) -> None:
     Operates on the plain LoRA layout (single ``.lora_down.weight`` +
     single ``.lora_up.weight`` per fused Linear). The down projection is
     cloned per component; the up projection (rows = concatenated output
-    channels) is chunked along dim 0. ``.alpha`` / ``.dora_scale`` /
-    ``.inv_scale`` (per_channel_scaling) get cloned/chunked alongside —
-    ``inv_scale`` is shape ``[in_dim]`` and identical for q/k/v which all
-    see the same Linear input, so it clones rather than chunks.
+    channels) is chunked along dim 0. ``.alpha`` / ``.inv_scale``
+    (per_channel_scaling) get cloned/chunked alongside — ``inv_scale`` is
+    shape ``[in_dim]`` and identical for q/k/v which all see the same Linear
+    input, so it clones rather than chunks.
 
     Used by:
       * the standard write path,
@@ -269,23 +253,17 @@ def defuse_standard_qkv(state_dict: Dict[str, torch.Tensor]) -> None:
         down = state_dict.pop(f"{prefix}.lora_down.weight")
         up = state_dict.pop(f"{prefix}.lora_up.weight")
         alpha = state_dict.pop(f"{prefix}.alpha", None)
-        dora_scale = state_dict.pop(f"{prefix}.dora_scale", None)
         inv_scale = state_dict.pop(f"{prefix}.inv_scale", None)
 
         up_chunks = up.chunk(n, dim=0)
-        dora_chunks = (
-            dora_scale.chunk(n, dim=0) if dora_scale is not None else [None] * n
-        )
 
         base_prefix = prefix.removesuffix(spec.fused_frag)
-        for letter, up_chunk, dora_chunk in zip(suffixes, up_chunks, dora_chunks):
+        for letter, up_chunk in zip(suffixes, up_chunks):
             new_prefix = base_prefix + spec.component_frag(letter)
             state_dict[f"{new_prefix}.lora_down.weight"] = down.clone()
             state_dict[f"{new_prefix}.lora_up.weight"] = up_chunk
             if alpha is not None:
                 state_dict[f"{new_prefix}.alpha"] = alpha.clone()
-            if dora_chunk is not None:
-                state_dict[f"{new_prefix}.dora_scale"] = dora_chunk
             if inv_scale is not None:
                 state_dict[f"{new_prefix}.inv_scale"] = inv_scale.clone()
 
@@ -327,10 +305,9 @@ def bake_inv_scale(state_dict: Dict[str, torch.Tensor]) -> None:
         ).to(orig_dtype)
 
 
-def rename_dora_and_defuse_standard(
+def defuse_and_bake_standard(
     state_dict: Dict[str, torch.Tensor],
 ) -> None:
-    """Standard write pipeline: DoRA rename + qkv defuse + inv_scale bake."""
-    rename_dora_keys(state_dict)
+    """Standard write pipeline: qkv defuse + inv_scale bake."""
     defuse_standard_qkv(state_dict)
     bake_inv_scale(state_dict)

@@ -96,7 +96,6 @@ def _scan_adapter(path: Path) -> dict:
         "reft": 0,
         "postfix": 0,
         "ortho_sp": 0,  # .S_p keys (OrthoLoRA / OrthoHydraLoRA)
-        "dora": 0,
         "other": 0,
     }
     # Postfix weights store their mode in safetensors metadata; detect that
@@ -139,8 +138,6 @@ def _scan_adapter(path: Path) -> dict:
             counts["lora_down"] += 1
         elif k.endswith(".S_p"):
             counts["ortho_sp"] += 1
-        elif k.endswith(".dora_scale") or k.endswith(".magnitude"):
-            counts["dora"] += 1
         elif is_postfix:
             counts["postfix"] += 1
         else:
@@ -151,8 +148,6 @@ def _scan_adapter(path: Path) -> dict:
         details.append(f"{counts['lora_down']} LoRA keys")
     if counts["ortho_sp"]:
         details.append(f"{counts['ortho_sp']} OrthoLoRA keys")
-    if counts["dora"]:
-        details.append(f"{counts['dora']} DoRA keys")
     if counts["reft"]:
         details.append(f"{counts['reft']} ReFT keys")
     if counts["lora_up_weight"] or counts["lora_ups"]:

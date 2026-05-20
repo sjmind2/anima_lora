@@ -206,7 +206,7 @@ def _parse_hydra(weights_sd: Dict[str, torch.Tensor]) -> Optional[dict]:
 def _extract_lora_sd(
     weights_sd: Dict[str, torch.Tensor],
 ) -> Optional[Dict[str, torch.Tensor]]:
-    """Pull standard LoRA keys (lora_down/lora_up/alpha/dora_scale).
+    """Pull standard LoRA keys (lora_down/lora_up/alpha).
     Returns None if no lora_up.weight keys are present.
 
     Hydra-prefix keys are excluded *entirely* — not just the per-expert
