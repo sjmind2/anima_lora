@@ -75,7 +75,7 @@ class ForwardArtifacts:
       - ``timesteps``:         ``[B]`` in ``[0, 1]``
       - ``crossattn_emb``:     ``[B, S, D]`` after any prefix/postfix injection
       - ``forward_kwargs``:    extra kwargs the trainer passed to ``anima(...)``
-                                (``crossattn_seqlens``, ``max_crossattn_seqlen``)
+                                (e.g. ``crossattn_seqlens``)
 
     ``noise`` and ``latents`` are 4D ``[B, C, H, W]`` (post-shift-scale, post-squeeze).
     ``anima_call`` invokes the DiT with the same patched-network state the primary

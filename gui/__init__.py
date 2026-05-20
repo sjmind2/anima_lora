@@ -226,7 +226,6 @@ _GROUPS = {
         "blocks_to_swap",
         "torch_compile",
         "compile_mode",
-        "trim_crossattn_kv",
         "cache_llm_adapter_outputs",
         "masked_loss",
         "mixed_precision",

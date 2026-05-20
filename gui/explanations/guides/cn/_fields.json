@@ -43,7 +43,6 @@
   "blocks_to_swap": "GPU与CPU间交换的DiT块数量。0：全部在GPU。越高CPU卸载越多，适合低显存。",
   "torch_compile": "为前向传播启用torch.compile。初始编译后训练速度加快。最好与static_token_count=true配合使用。",
   "compile_mode": "'blocks'：单独编译每个DiT块（默认）。'full'：将整个模型编译为一个图，实现跨块内存优化。full模式与梯度检查点及块交换不兼容。",
-  "trim_crossattn_kv": "从交叉注意力KV中去除零填充以提高效率。Flash4应用LSE校正以保持正确的softmax。",
   "cache_llm_adapter_outputs": "将LLM适配器层输出缓存到磁盘。避免每轮重新计算文本编码器投影。",
   "masked_loss": "仅在未被遮罩的区域（如排除文字气泡）应用损失。需要post_image_dataset/masks/（或旧版masks/merged/）中的遮罩文件 — 运行`make mask`生成。",
   "mixed_precision": "混合精度模式。bf16：推荐用于现代GPU。fp16：适用于不支持bf16的旧款GPU。",

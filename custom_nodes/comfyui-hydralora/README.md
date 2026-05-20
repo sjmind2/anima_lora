@@ -1,12 +1,12 @@
-# Anima Adapter / Postfix Loaders (ComfyUI)
+# Anima Adapter / Postfix / Soft-Token Loaders (ComfyUI)
 
-Two ComfyUI custom nodes that load Anima-trained interventions and dispatch them through ComfyUI's patching system. Each node does one thing; chain them with the MODEL socket when a workflow needs both.
+Four ComfyUI custom nodes that load Anima-trained interventions and dispatch them through ComfyUI's patching system. Each node does one thing; chain them with the MODEL socket when a workflow needs more than one.
 
-Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/postfix.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
+Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/postfix.md`, `docs/experimental/soft_tokens.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
 
 ## Install
 
-Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The two nodes appear as **Anima Adapter Loader** and **Anima Postfix Loader** in the loaders menu.
+Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The nodes appear as **Anima Adapter Loader**, **Anima FeRA Loader**, **Anima Postfix Loader**, and **Anima Soft Tokens Loader** in the loaders menu.
 
 ## The loaders
 
@@ -29,6 +29,15 @@ Sniffs the safetensors header and routes each component independently — you ge
 
 Mode (prefix / postfix / cond) is auto-detected from the file's keys. When chaining with the adapter loader, put the postfix loader *after* the adapter loader so the postfix wrapper sees the model with adapter modifications already in place.
 
+### Anima Soft Tokens Loader
+
+| Input | Purpose |
+|-------|---------|
+| `soft_tokens` | safetensors file with `tokens` + `t_offsets.weight` keys (`make exp-soft-tokens`) |
+| `strength` | scales the spliced soft tokens (0 = no-op) |
+
+SoftREPA-parameterization soft tokens (Lee et al., arXiv:2503.08250): a bank of per-layer, per-timestep-bucket learned vectors is spliced into the crossattn embedding *inside* the first `n_layers` DiT blocks. Unlike postfix (one splice on `diffusion_model.forward`), each block gets its own splice via a `forward_pre_hook` that rewrites the block's `crossattn_emb` argument; a `diffusion_model` pre-hook records the per-step sigma and precomputes the bank. Applies to the whole batch (both CFG branches) — soft tokens are part of the conditioning the trainer always saw, not a positive-only postfix. `n_layers` / `K` / `n_t_buckets` / splice position are read from the checkpoint (tensor shapes + `ss_splice_position`). Chain after the adapter / postfix loaders when a workflow needs more than one.
+
 ## How each component applies
 
 **Plain LoRA** → `ModelPatcher.add_patches`, the standard ComfyUI weight-patch path.
@@ -47,6 +56,8 @@ When chimera was trained with `content_router_source = "crossattn"` (`ss_chimera
 
 **Prefix / postfix / cond** → `ModelPatcher.add_object_patch` on `diffusion_model.forward`, splicing learned vectors into the T5-compatible crossattn embedding *after* the LLM adapter + pad-to-512 step. Positive-batch rows only via `cond_or_uncond` from `transformer_options` (CFG-safe).
 
+**Soft tokens** → per-block `forward_pre_hook` installed via `ModelPatcher.add_object_patch` on each of the first `n_layers` `diffusion_model.blocks.<idx>._forward_pre_hooks`, plus one `diffusion_model._forward_pre_hooks` pre-hook. The block pre-hook rewrites the block's `crossattn_emb` positional arg (overwriting the K padding-tail slots for `end_of_sequence`, or scattering after the real text tokens for `front_of_padding`); `forward` itself is untouched, same invariant as Hydra/ReFT. The model-level pre-hook recovers the `[0, 1]` sigma from comfy's `sigma × 1000` FLOW timesteps (`ModelSamplingDiscreteFlow` multiplier), bucketizes it, and precomputes the `(n_layers, B, K, D)` token bank the block hooks index. All hook installs go through `get_model_object`, so soft tokens compose with a prior adapter pre-hook on the same `_forward_pre_hooks` dict rather than clobbering it.
+
 ## Why forward hooks, not `forward` override
 
 For both HydraLoRA and ReFT we install a `forward_hook` rather than overriding `block.forward` / `linear.forward`. Overriding `forward` strands weights on CPU under ComfyUI's cast-weights path: ComfyUI relies on walking the real `forward` to drive its `comfy_cast_weights` machinery, and replacing the method confused it — blocks ended up with `comfy_cast_weights=False` and their Linears stayed on CPU, producing a device mismatch at runtime. A hook leaves `forward` untouched, traces cleanly through `torch.compile`, and is properly reverted on `unpatch_model`.
@@ -58,13 +69,24 @@ For both HydraLoRA and ReFT we install a `forward_hook` rather than overriding `
 | `adapter.py` | LoRA / Hydra / ReFT loading, parsing, hook install |
 | `fera.py` | Author-faithful + plan2 stacked-experts FeRA loading |
 | `postfix.py` | Prefix / postfix / cond context splicing |
-| `nodes.py` | `AnimaAdapterLoader` / `AnimaFeraLoader` / `AnimaPostfixLoader` |
+| `soft_tokens.py` | SoftREPA soft-token bank loading + per-block splice pre-hooks |
+| `nodes.py` | `AnimaAdapterLoader` / `AnimaFeraLoader` / `AnimaPostfixLoader` / `AnimaSoftTokensLoader` |
 | `__init__.py` | Re-exports `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` |
 | `_vendor/` | Generated by `scripts/sync_vendor.py` — bundled copy of the router-compute kernels so the node works when not sitting inside the anima_lora repo |
 
 The pure-compute router math (FEI 2-band / FEI n-band high-to-low, σ sinusoidal features, σ-band partition mask) lives in `library/inference/router_compute.py` in the main repo. `adapter.py` resolves it live when the node is inside anima_lora, falls back to `_vendor/library/inference/router_compute.py` when standalone. Trained router weights are bit-sensitive to these kernels, so the vendored copy must stay in lockstep with the live tree — re-run `make vendor-sync` (or `python scripts/sync_vendor.py`) before publishing a new node version.
 
 ## Changelog
+
+### 3.6.0 — 2026-05-20 — Soft-token inference (`AnimaSoftTokensLoader`)
+
+New node `AnimaSoftTokensLoader` runs SoftREPA-parameterization soft tokens (Lee et al., arXiv:2503.08250) at inference — the `networks/methods/soft_tokens.py` checkpoints from `make exp-soft-tokens` were previously training-only on the ComfyUI side.
+
+- Detection: the file's `tokens` `(n_layers, K, D)` + `t_offsets.weight` `(n_t_buckets, n_layers·D)` tensors. `n_layers` / `K` / `n_t_buckets` are inferred from the shapes; splice position from `ss_splice_position` (`end_of_sequence` default, or `front_of_padding`).
+- Application: a per-block `forward_pre_hook` on the first `n_layers` `diffusion_model.blocks.<idx>._forward_pre_hooks` rewrites each block's `crossattn_emb` arg with that block's spliced bank; a `diffusion_model._forward_pre_hooks` pre-hook records the per-step sigma and precomputes the `(n_layers, B, K, D)` bank. `forward` is never overridden (Hydra/ReFT invariant).
+- Sigma convention: comfy hands the FLOW model `timesteps = sigma × 1000` (`ModelSamplingDiscreteFlow`, multiplier 1000), so the pre-hook divides by 1000 to recover the `[0, 1]` sigma the trainer's t-bucket index uses (`train.py` draws `[0,1]`-scaled timesteps).
+- Applies to the whole batch (both CFG branches), matching training — not positive-only like postfix.
+- Composes with the adapter / postfix loaders: hook installs go through `get_model_object`, so a prior adapter pre-hook on `diffusion_model._forward_pre_hooks` is preserved rather than clobbered.
 
 ### 3.5.0 — 2026-05-19 — ChimeraHydra global ContentRouter (`content_router_source="crossattn"`)
 

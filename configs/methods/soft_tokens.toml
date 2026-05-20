@@ -61,7 +61,7 @@ network_dim = 4
 #                                   hinge             mean max(0, ε − d²) (bounded ≥ 0)
 # dispersive_hinge_eps          — ε for the ``hinge`` form only.
 network_args = [
-    "n_layers=10",
+    "n_layers=6",
     "n_t_buckets=14",
     "init_std=0.02",
     "splice_position=front_of_padding",
@@ -72,7 +72,7 @@ network_args = [
     "dispersive_hinge_eps=1.0",
 ]
 output_name = "anima_soft_tokens"
-
+weight_decay=1e-4
 # Soft tokens are independent of the cached crossattn (they overwrite zero-
 # padding tail), so cache_llm_adapter_outputs is the right default.
 use_shuffled_caption_variants = true
@@ -83,6 +83,7 @@ learning_rate = 1e-3
 max_train_epochs = 4
 save_every_n_epochs = 4
 checkpointing_epochs = 4
+compile_inductor_mode = "reduce-overhead"
 
 # Per-block monkey-patch on Block.forward; gradient checkpoint() inside the
 # original forward is preserved (our hook is the outermost wrapper). Block

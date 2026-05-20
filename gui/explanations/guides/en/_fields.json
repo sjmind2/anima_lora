@@ -43,7 +43,6 @@
   "blocks_to_swap": "Number of DiT blocks to swap between GPU and CPU. 0: all on GPU. Higher values = more CPU offloading for low VRAM.",
   "torch_compile": "Enable torch.compile for the forward pass. Faster training after initial compilation. Best with static_token_count=true.",
   "compile_mode": "'blocks': compile each DiT block individually (default). 'full': compile entire model as one graph for cross-block memory optimization. Full mode is incompatible with gradient checkpointing and block swap.",
-  "trim_crossattn_kv": "Remove zero-padding from cross-attention KV for efficiency. Flash4 applies LSE correction to maintain correct softmax.",
   "cache_llm_adapter_outputs": "Cache the LLM adapter layer outputs to disk. Avoids recomputing text encoder projections each epoch.",
   "masked_loss": "Apply loss only to non-masked regions (e.g., exclude text bubbles). Requires mask files in post_image_dataset/masks/ (or legacy masks/merged/) — run `make mask` to generate them.",
   "mixed_precision": "Mixed precision mode. bf16: recommended for modern GPUs. fp16: for older GPUs without bf16 support.",

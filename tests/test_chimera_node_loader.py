@@ -102,7 +102,10 @@ def _write_chimera_checkpoint(
         "ss_num_experts_freq": str(K_f),
         "ss_chimera_fei_feature_dim": str(fei_dim),
         "ss_chimera_sigma_feature_dim": str(sigma_dim),
-        "ss_chimera_fei_sigma_low_div": "4.0",
+        # Non-default (config default is 4.0) so a key-name typo on the read
+        # side surfaces instead of coinciding with the fallback. 8.0 keeps the
+        # blur kernel small enough for the 16x16 synth latent in the pre-hook test.
+        "ss_chimera_fei_sigma_low_div": "8.0",
         "ss_use_moe_style": "shared_A",
         "ss_route_per_layer": "true",
         "ss_router_source": "input",
@@ -132,6 +135,9 @@ def test_load_adapter_recognizes_chimera(tmp_path):
     assert chimera["num_experts_freq"] == 2
     assert chimera["fei_feature_dim"] == 2
     assert chimera["sigma_feature_dim"] == 0
+    # Stamped σ_low div must survive the read (guards the ss_chimera_fei_sigma_low_div
+    # key name — a typo here would silently fall back to the 4.0 default).
+    assert chimera["fei_sigma_low_div"] == 8.0
     fr = chimera["freq_router_sd"]
     assert fr["net.0.weight"].shape == (8, 2)
     assert fr["net.2.weight"].shape == (2, 8)

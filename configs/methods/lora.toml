@@ -62,7 +62,7 @@ alpha_rank_scale = 1.0
 
 use_moe_style = "shared_A"
 route_per_layer = true
-router_source = "input"
+router_source = "crossattn_emb"
 network_router_lr_scale = 10
 # router_source = "crossattn_emb"
 

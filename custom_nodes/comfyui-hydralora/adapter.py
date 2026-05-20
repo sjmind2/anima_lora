@@ -379,16 +379,16 @@ def load_adapter(file_path: str) -> dict:
             fei_feature_dim = 0
         try:
             fei_sigma_low_div = (
-                float(file_metadata["ssfei_sigma_low_div"])
-                if fei_on and "ssfei_sigma_low_div" in file_metadata
-                else 8.0  # training-side default (configs/methods/fera.toml)
+                float(file_metadata["ss_fei_sigma_low_div"])
+                if fei_on and "ss_fei_sigma_low_div" in file_metadata
+                else 4.0  # training-side default (config.py / configs/methods/lora.toml)
             )
         except (TypeError, ValueError):
             logger.warning(
-                f"{file_path}: ssfei_sigma_low_div is malformed "
-                f"({file_metadata.get('ssfei_sigma_low_div')!r}) — using default 8.0."
+                f"{file_path}: ss_fei_sigma_low_div is malformed "
+                f"({file_metadata.get('ss_fei_sigma_low_div')!r}) — using default 4.0."
             )
-            fei_sigma_low_div = 8.0
+            fei_sigma_low_div = 4.0
         hydra["use_fei_router"] = fei_on and fei_feature_dim > 0
         hydra["fei_feature_dim"] = fei_feature_dim if hydra["use_fei_router"] else 0
         hydra["fei_sigma_low_div"] = fei_sigma_low_div

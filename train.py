@@ -479,9 +479,6 @@ class AnimaTrainer:
             attn_softmax_scale=attn_softmax_scale,
         )
 
-        # Bucketed KV trimming for cross-attention
-        model.trim_crossattn_kv = getattr(args, "trim_crossattn_kv", False)
-
         # Static token count (constant-shape padding for torch.compile)
         if getattr(args, "static_token_count", None) is not None:
             model.set_static_token_count(args.static_token_count)
@@ -706,7 +703,6 @@ class AnimaTrainer:
             network=network,
             device=accelerator.device,
             weight_dtype=weight_dtype,
-            trim_crossattn_kv=bool(args.trim_crossattn_kv),
             uncond_crossattn_emb=self._uncond_crossattn_1,
         )
         crossattn_emb = tc.crossattn_emb
@@ -714,7 +710,6 @@ class AnimaTrainer:
         attn_mask = tc.attn_mask
         t5_input_ids = tc.t5_input_ids
         t5_attn_mask = tc.t5_attn_mask
-        _max_crossattn_seqlen = tc.max_crossattn_seqlen
 
         # ChimeraHydra global content router (chimera with
         # ``content_router_source="crossattn"``): fire ONCE per step on the
@@ -769,14 +764,12 @@ class AnimaTrainer:
                 )
             else:
                 # crossattn_emb is already in target (T5-compatible) space.
-                # Postfix splice + KV-trim kwargs.
+                # Postfix splice kwargs.
                 fk = build_forward_kwargs(
                     network=network,
                     crossattn_emb=crossattn_emb,
                     t5_attn_mask=t5_attn_mask,
                     timesteps=timesteps,
-                    max_crossattn_seqlen=_max_crossattn_seqlen,
-                    trim_crossattn_kv=bool(args.trim_crossattn_kv),
                 )
                 crossattn_emb = fk.crossattn_emb
                 kw = fk.kw

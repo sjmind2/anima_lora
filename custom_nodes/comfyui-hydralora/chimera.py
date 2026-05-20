@@ -222,7 +222,7 @@ def _attach_single_a_chimera_metadata(
             file_metadata.get("ss_chimera_sigma_feature_dim", 0)
         )
         chimera_sigma_low_div = float(
-            file_metadata.get("ss_chimerafei_sigma_low_div", 4.0)
+            file_metadata.get("ss_chimera_fei_sigma_low_div", 4.0)
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(
@@ -344,15 +344,9 @@ def _finalize_dual_a_chimera(
         chimera_sigma_dim = int(
             file_metadata.get("ss_chimera_sigma_feature_dim", 0)
         )
-        # New stamp name (post-c4851b6): ``ss_chimera_fei_sigma_low_div``
-        # with an underscore. Fall back to the legacy single-A stamp
-        # ``ss_chimerafei_sigma_low_div`` (no underscore) for forward-
-        # compat with files saved on the legacy code path.
+        # Stamp name (network.py:3065): ``ss_chimera_fei_sigma_low_div``.
         chimera_sigma_low_div = float(
-            file_metadata.get(
-                "ss_chimera_fei_sigma_low_div",
-                file_metadata.get("ss_chimerafei_sigma_low_div", 4.0),
-            )
+            file_metadata.get("ss_chimera_fei_sigma_low_div", 4.0)
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(

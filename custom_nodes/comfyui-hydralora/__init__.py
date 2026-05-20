@@ -1,6 +1,6 @@
 """Anima ComfyUI custom nodes.
 
-Three single-purpose loader nodes; chain them via the MODEL socket when
+Four single-purpose loader nodes; chain them via the MODEL socket when
 a workflow needs more than one:
 
   - ``AnimaAdapterLoader`` — LoRA / HydraLoRA / ReFT (auto-detected
@@ -13,10 +13,14 @@ a workflow needs more than one:
     HydraLoRA-moe at load time.
   - ``AnimaPostfixLoader`` — prefix / postfix / cond context splicing
     (auto-detected from safetensors keys).
+  - ``AnimaSoftTokensLoader`` — SoftREPA-parameterization soft tokens
+    (Lee et al., arXiv:2503.08250): per-layer × per-timestep-bucket
+    learned tokens spliced into the crossattn embedding inside the first
+    n_layers DiT blocks via per-block forward pre-hooks.
 
 Adapter and postfix were a single toggle-bool node before v3.0.0; see
 README §3.0.0 for the rationale on the split. ``AnimaFeraLoader`` was
-added in v3.1.0.
+added in v3.1.0; ``AnimaSoftTokensLoader`` in v3.6.0.
 """
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

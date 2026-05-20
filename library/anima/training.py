@@ -319,13 +319,6 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "",
     )
     parser.add_argument(
-        "--trim_crossattn_kv",
-        action="store_true",
-        help="Trim zero-padded KV positions in cross-attention (flash4 only). "
-        "Uses bucketed lengths + LSE sigmoid correction for exact equivalence. "
-        "Typical 4x KV reduction for short captions → ~10-15%% faster training.",
-    )
-    parser.add_argument(
         "--static_token_count",
         type=int,
         default=None,

@@ -18,11 +18,16 @@ workflow needs more than one.
     Wraps ``diffusion_model.forward`` to splice learned vectors into the
     T5-compatible crossattn embedding after the LLM adapter, CFG-safe via
     ``cond_or_uncond``.
+  - ``AnimaSoftTokensLoader``: SoftREPA-parameterization soft tokens.
+    Per-block forward pre-hooks splice per-layer x per-timestep-bucket
+    learned tokens into the crossattn embedding inside the first n_layers
+    DiT blocks; a diffusion_model pre-hook records the per-step sigma.
 
 Adapter and postfix loaders were previously bundled in a single node
 with toggle booleans; they were split in v3.0.0 so each does one thing
 and users can bypass / reorder them with ComfyUI's standard MODEL-chain
-wiring. ``AnimaFeraLoader`` was added in v3.1.0.
+wiring. ``AnimaFeraLoader`` was added in v3.1.0; ``AnimaSoftTokensLoader``
+in v3.6.0.
 """
 
 import folder_paths
@@ -30,6 +35,7 @@ import folder_paths
 from .adapter import apply_adapter
 from .fera import apply_fera
 from .postfix import apply_postfix
+from .soft_tokens import apply_soft_tokens
 
 
 class AnimaAdapterLoader:
@@ -257,14 +263,77 @@ class AnimaPostfixLoader:
         return (new_model,)
 
 
+class AnimaSoftTokensLoader:
+    """Apply Anima soft tokens (SoftREPA parameterization) to a MODEL.
+
+    Splices per-layer, per-timestep-bucket learned soft tokens into the
+    T5-compatible crossattn embedding **inside** the first ``n_layers`` DiT
+    blocks (the same surface anima_lora's trainer monkey-patches). A
+    ``forward_pre_hook`` on each block rewrites its ``crossattn_emb`` argument;
+    a ``diffusion_model`` pre-hook records the per-step sigma and precomputes
+    the bank, so ``forward`` is never overridden (same invariant as Hydra/ReFT).
+
+    Applies to the whole batch (both CFG branches) — soft tokens are part of
+    the conditioning the trainer always saw, not a positive-only postfix.
+    Chain after ``AnimaAdapterLoader`` / ``AnimaPostfixLoader`` when a workflow
+    needs more than one intervention.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = folder_paths.get_filename_list("loras")
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "soft_tokens": (
+                    loras,
+                    {
+                        "tooltip": (
+                            "Soft-token file (tokens + t_offsets.weight keys, "
+                            "from `make exp-soft-tokens`)."
+                        )
+                    },
+                ),
+                "strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "Strength multiplier for the spliced soft tokens.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "loaders"
+    DESCRIPTION = (
+        "Anima soft-token loader. Splices per-layer x per-t learned soft "
+        "tokens into the crossattn embedding inside the first n_layers DiT "
+        "blocks via forward pre-hooks. Applies to both CFG branches. Chain "
+        "after an adapter / postfix loader when a workflow needs both."
+    )
+
+    def apply(self, model, soft_tokens, strength):
+        new_model = model.clone()
+        file_path = folder_paths.get_full_path("loras", soft_tokens)
+        apply_soft_tokens(new_model, file_path, strength)
+        return (new_model,)
+
+
 NODE_CLASS_MAPPINGS = {
     "AnimaAdapterLoader": AnimaAdapterLoader,
     "AnimaFeraLoader": AnimaFeraLoader,
     "AnimaPostfixLoader": AnimaPostfixLoader,
+    "AnimaSoftTokensLoader": AnimaSoftTokensLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaAdapterLoader": "Anima Adapter Loader",
     "AnimaFeraLoader": "Anima FeRA Loader",
     "AnimaPostfixLoader": "Anima Postfix Loader",
+    "AnimaSoftTokensLoader": "Anima Soft Tokens Loader",
 }
