@@ -106,6 +106,15 @@ make exp-test-directedit PROMPT='double peace'  # DirectEdit on random source im
 make exp-test-directedit-dry                    # DirectEdit reconstruction sanity check
                                                 # (ψ_tar == ψ_src; output should reconstruct the source)
 
+# Training daemon (local job queue — see plan.md, Phase 1)
+# Single localhost process: FIFO serial queue + worker that spawns each job as a
+# detached `accelerate launch` subprocess and follows it via the Phase-0
+# progress.jsonl. The ComfyUI trainer node auto-starts it and submits jobs.
+make daemon                # Start (idempotent; detached, waits for /health)
+make daemon-attach         # Follow events read-only (JOB=<id> tails that job's stdout); ctrl-C detaches only
+make daemon-kill           # Abort the running job (or JOB=<id>); daemon stays up, advances the queue
+make daemon-terminate      # Stop the daemon entirely (active job killed, GPU freed)
+
 # GUI (PySide6 — config editing, IP-Adapter / EasyControl preprocess+train, dataset browsing)
 make gui
 python tasks.py gui        # Windows

@@ -1,0 +1,244 @@
+"""Phase 1 training daemon: arg builder, job persistence, liveness, and an
+end-to-end serial-queue run over the real HTTP surface with fake training
+subprocesses.
+
+The fake "trainer" is a tiny ``python -c`` script that writes a well-formed
+Phase-0 ``progress.jsonl`` and exits — exercising the spawn → tail → finalize
+path without launching torch/accelerate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+
+import psutil
+import pytest
+
+from scripts.daemon import config, gpu, jobs, proc
+from scripts.daemon.manager import JobManager
+from scripts.daemon.server import serve
+from scripts.tasks._common import build_method_args
+
+
+# --------------------------------------------------------------------------
+# pure helpers
+# --------------------------------------------------------------------------
+
+
+def test_build_method_args_basic():
+    args = build_method_args("lora", preset="default")
+    assert args == ["--method", "lora", "--preset", "default"]
+
+
+def test_build_method_args_subdir_artist_profile_and_extra():
+    args = build_method_args(
+        "tlora",
+        preset="low_vram",
+        methods_subdir="gui-methods",
+        extra=["--network_dim", "32"],
+        artist="alice",
+        profile_steps="3-5",
+    )
+    assert args[:6] == [
+        "--method",
+        "tlora",
+        "--preset",
+        "low_vram",
+        "--methods_subdir",
+        "gui-methods",
+    ]
+    assert "--artist_filter" in args and "alice" in args
+    assert "--profile_steps" in args and "3-5" in args
+    assert args[-2:] == ["--network_dim", "32"]
+
+
+def test_build_method_args_respects_explicit_overrides():
+    # caller already passed --artist_filter in extra → builder must not duplicate
+    args = build_method_args(
+        "lora", preset="default", extra=["--artist_filter", "bob"], artist="alice"
+    )
+    assert args.count("--artist_filter") == 1
+    assert "alice" not in args
+
+
+def test_job_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    job = jobs.Job(
+        id="j1", method="lora", preset="default", overrides={"network_dim": 16}
+    )
+    job.progress_path = str(job.dir / "progress.jsonl")
+    job.persist()
+    loaded = jobs.load_all()
+    assert "j1" in loaded
+    assert loaded["j1"].method == "lora"
+    assert loaded["j1"].overrides == {"network_dim": 16}
+
+
+def test_liveness_pid_create_time():
+    me = os.getpid()
+    ct = proc.create_time(me)
+    assert proc.is_alive(me, ct)
+    # wrong create_time → treated as a reused PID, not our process
+    assert not proc.is_alive(me, (ct or 0) + 10_000)
+    # a definitely-dead pid
+    assert not proc.is_alive(2_147_483_000, 123.0)
+
+
+# --------------------------------------------------------------------------
+# end-to-end over the HTTP surface
+# --------------------------------------------------------------------------
+
+_FAKE_TRAINER = r"""
+import json, sys, time
+path, dur = sys.argv[1], float(sys.argv[2])
+with open(path, "w", buffering=1) as f:
+    f.write(json.dumps({"ev": "run_start", "ts": 0.0}) + "\n")
+    f.write(json.dumps({"ev": "step", "ts": 0.1, "global_step": 1, "loss": 0.5}) + "\n")
+    time.sleep(dur)
+    f.write(json.dumps({"ev": "ckpt", "ts": dur, "global_step": 1, "path": "/tmp/fake.safetensors"}) + "\n")
+    f.write(json.dumps({"ev": "run_end", "ts": dur, "status": "ok", "final_step": 1}) + "\n")
+"""
+
+
+def _fake_build_cmd(self, job):
+    dur = float(job.overrides.get("duration", 1.0))
+    cmd = [sys.executable, "-c", _FAKE_TRAINER, job.progress_path, str(dur)]
+    return cmd, os.environ.copy()
+
+
+def _wait_until(pred, timeout=20.0, interval=0.1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False
+
+
+@pytest.fixture
+def daemon(tmp_path, monkeypatch):
+    """An in-process daemon (manager + HTTP server) with fake training cmds."""
+    from scripts.daemon import client
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(config, "PIDFILE", tmp_path / "daemon.json")
+    monkeypatch.setattr(config, "DAEMON_LOG", tmp_path / "daemon.log")
+    monkeypatch.setattr(JobManager, "_build_cmd", _fake_build_cmd)
+    # Fake trainers don't touch the GPU; stub the guard so the test doesn't
+    # block on whatever real workload happens to hold VRAM on the host.
+    monkeypatch.setattr(gpu, "gpu_pids", lambda: set())
+
+    mgr = JobManager()
+    mgr.start()
+    srv = serve(mgr, port=0)
+    t = threading.Thread(
+        target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
+    )
+    t.start()
+    port = srv.server_address[1]
+    cl = client.DaemonClient(port)
+    assert _wait_until(lambda: cl.health() is not None, timeout=5)
+    try:
+        yield cl, mgr
+    finally:
+        srv.request_shutdown(True)
+        srv.server_close()
+
+
+def test_health(daemon):
+    cl, _ = daemon
+    h = cl.health()
+    assert h["ok"] is True
+    assert h["active_job"] is None
+
+
+def test_serial_queue(daemon):
+    cl, _ = daemon
+    j1 = cl.submit(method="lora", overrides={"duration": 1.0})["job_id"]
+    j2 = cl.submit(method="lora", overrides={"duration": 1.0})["job_id"]
+
+    assert _wait_until(lambda: cl.get(j1)["state"] == "done", timeout=15)
+    assert _wait_until(lambda: cl.get(j2)["state"] == "done", timeout=15)
+
+    g1, g2 = cl.get(j1), cl.get(j2)
+    # serial: the second job can't start before the first ends
+    assert g2["started_at"] >= g1["ended_at"] - 0.5
+    # ckpt path picked up from the progress stream
+    assert g1["ckpt_path"] == "/tmp/fake.safetensors"
+    assert g1["latest"]["ev"] == "run_end"
+
+
+def test_stop_running_job(daemon):
+    cl, mgr = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "running", timeout=10)
+    pid = cl.get(jid)["pid"]
+    assert pid and psutil.pid_exists(pid)
+
+    cl.stop(jid)
+    assert _wait_until(lambda: cl.get(jid)["state"] == "stopped", timeout=10)
+    # tree torn down → the training pid is gone
+    assert _wait_until(lambda: not psutil.pid_exists(pid), timeout=5)
+
+
+def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
+    """Boot sweep: dead `running` → orphaned error; `queued` → re-enqueued;
+    live `running` → adopted for monitoring."""
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+
+    # a `running` job whose process died while the daemon was down
+    dead = jobs.Job(
+        id="dead",
+        method="lora",
+        preset="default",
+        state=jobs.STATE_RUNNING,
+        pid=2_147_483_000,
+        create_time=1.0,
+    )
+    dead.progress_path = str(dead.dir / "progress.jsonl")
+    dead.persist()
+
+    # a `queued` job that never started
+    pend = jobs.Job(id="pend", method="lora", preset="default", state=jobs.STATE_QUEUED)
+    pend.persist()
+
+    # a `running` job that's actually alive (use this test process as the pid)
+    me = os.getpid()
+    live = jobs.Job(
+        id="live",
+        method="lora",
+        preset="default",
+        state=jobs.STATE_RUNNING,
+        pid=me,
+        create_time=proc.create_time(me),
+    )
+    live.persist()
+
+    mgr = JobManager()
+    mgr._reconcile()  # sweep without starting the worker
+
+    assert mgr.get("dead").state == jobs.STATE_ERROR
+    assert mgr.get("dead").status_detail == "orphaned"
+    assert mgr._queue.get_nowait() == "pend"  # re-enqueued
+    assert "live" in mgr._adopt  # re-attached for monitoring
+
+
+def test_tail_while_write(tmp_path):
+    """progress.jsonl tail-while-write: last_event sees the freshest line even
+    as it grows (Windows-strict-locking smoke check)."""
+    from scripts.daemon import tail
+
+    p = tmp_path / "progress.jsonl"
+    with open(p, "w", buffering=1, encoding="utf-8") as f:
+        f.write(json.dumps({"ev": "run_start", "ts": 0.0}) + "\n")
+        assert tail.last_event(str(p))["ev"] == "run_start"
+        f.write(json.dumps({"ev": "step", "ts": 0.1, "global_step": 5}) + "\n")
+        ev = tail.last_event(str(p))
+        assert ev["ev"] == "step" and ev["global_step"] == 5
+    assert tail.last_ckpt_path(str(p)) is None

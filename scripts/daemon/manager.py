@@ -1,0 +1,403 @@
+"""The job manager: FIFO serial queue + worker thread + state table.
+
+One worker thread drains a ``queue.Queue`` of job ids. Per job it builds the
+same ``accelerate launch … train.py`` command the CLI builds, spawns it
+detached (so a console ctrl-C can't reach it), points ``--progress_jsonl`` at
+the job dir, then monitors by polling ``(pid, create_time)`` liveness — never
+by awaiting a subprocess transport (sidesteps Windows ProactorEventLoop
+subprocess bugs). On boot it reconciles ``jobs/`` so it can re-attach a
+still-alive orphan or mark a dead one ``orphaned``.
+
+Serial by design (single local GPU): exactly one job runs at a time.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import queue
+import threading
+import time
+from typing import Optional
+
+from . import config, gpu, proc, tail
+from .jobs import (
+    STATE_DONE,
+    STATE_ERROR,
+    STATE_QUEUED,
+    STATE_RUNNING,
+    STATE_STOPPED,
+    TERMINAL_STATES,
+    Job,
+    load_all,
+    new_job_id,
+)
+
+logger = logging.getLogger("anima.daemon")
+
+_POLL_INTERVAL = 1.0  # seconds between liveness checks
+_SENTINEL = "__stop__"
+
+
+class JobManager:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._jobs: dict[str, Job] = {}
+        self._queue: "queue.Queue[str]" = queue.Queue()
+        self._popens: dict[str, object] = {}  # job_id -> Popen (spawned only)
+        self._adopt: list[str] = []  # running orphans to monitor before the queue
+        self._subscribers: set["queue.Queue[dict]"] = set()
+        self._stopping = False
+        self._kill_on_shutdown = False
+        self._worker = threading.Thread(
+            target=self._run, name="anima-job-worker", daemon=True
+        )
+
+    # ----- lifecycle -----
+
+    def start(self) -> None:
+        config.ensure_state_dirs()
+        self._reconcile()
+        self._worker.start()
+
+    def shutdown(self, *, kill_jobs: bool) -> None:
+        """Stop accepting work and unblock the worker. With ``kill_jobs`` the
+        active job tree is torn down and the GPU freed before the daemon exits.
+        """
+        with self._lock:
+            self._stopping = True
+            self._kill_on_shutdown = kill_jobs
+            current = self._current_running_locked()
+        if kill_jobs and current is not None:
+            current.stop_requested = True
+            self._kill_job_tree(current)
+        self._queue.put(_SENTINEL)  # wake the worker so it can exit
+
+    # ----- submission / query -----
+
+    def submit(
+        self,
+        *,
+        method: str,
+        preset: str,
+        methods_subdir: Optional[str],
+        overrides: dict,
+        extra: list[str],
+    ) -> Job:
+        job = Job(
+            id=new_job_id(),
+            method=method,
+            preset=preset,
+            methods_subdir=methods_subdir,
+            overrides=dict(overrides or {}),
+            extra=list(extra or []),
+        )
+        d = config.job_dir(job.id)
+        job.progress_path = str(d / "progress.jsonl")
+        job.stdout_path = str(d / "stdout.log")
+        with self._lock:
+            self._jobs[job.id] = job
+            job.persist()
+        self._queue.put(job.id)
+        self._broadcast({"ev": "submitted", "job_id": job.id, "state": job.state})
+        return job
+
+    def list_jobs(self) -> list[Job]:
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda j: j.submitted_at)
+
+    def get(self, job_id: str) -> Optional[Job]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def stale_for(self, job: Job) -> Optional[float]:
+        """Seconds since the job's last progress event, for a running job."""
+        if job.state != STATE_RUNNING:
+            return None
+        ev = tail.last_event(job.progress_path)
+        if not ev:
+            return None
+        # progress ts is relative to run start; compare wall clock instead.
+        try:
+            mtime = os.path.getmtime(job.progress_path)
+        except OSError:
+            return None
+        return round(time.time() - mtime, 1)
+
+    # ----- stop (job-scoped) -----
+
+    def stop(self, job_id: Optional[str] = None) -> Optional[Job]:
+        """Abort a job. ``None`` → the running job. Queued → cancelled in place;
+        running → tree killed, GPU freed. The daemon stays up and advances to
+        the next queued job."""
+        with self._lock:
+            job = self._jobs.get(job_id) if job_id else self._current_running_locked()
+            if job is None or job.state in TERMINAL_STATES:
+                return job
+            job.stop_requested = True
+            job.persist()
+            state = job.state
+        if state == STATE_RUNNING:
+            self._kill_job_tree(job)
+        # A queued job is finalized lazily when the worker dequeues it and sees
+        # stop_requested — no need to surgically remove it from the FIFO.
+        return job
+
+    # ----- worker -----
+
+    def _run(self) -> None:
+        # Drain re-attached orphans before touching the queue so the serial
+        # GPU invariant holds across a daemon restart.
+        for job_id in self._adopt:
+            job = self.get(job_id)
+            if job is not None:
+                self._monitor(job, popen=None)
+        while True:
+            job_id = self._queue.get()
+            if job_id == _SENTINEL:
+                break
+            with self._lock:
+                if self._stopping:
+                    break
+                job = self._jobs.get(job_id)
+            if job is None or job.state != STATE_QUEUED:
+                continue
+            if job.stop_requested:
+                self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
+                continue
+            self._gpu_guard(job)
+            self._launch_and_monitor(job)
+
+    def _launch_and_monitor(self, job: Job) -> None:
+        cmd, env = self._build_cmd(job)
+        d = config.job_dir(job.id)
+        try:
+            popen = proc.spawn_detached(
+                cmd,
+                cwd=config.ROOT,
+                stdout_path=d / "stdout.log",
+                env=env,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._finalize(job, STATE_ERROR, error=f"spawn failed: {exc}")
+            return
+        with self._lock:
+            job.state = STATE_RUNNING
+            job.started_at = time.time()
+            job.pid = popen.pid
+            job.create_time = proc.create_time(popen.pid)
+            job.persist()
+            self._popens[job.id] = popen
+        self._broadcast({"ev": "started", "job_id": job.id, "pid": job.pid})
+        self._monitor(job, popen=popen)
+
+    def _monitor(self, job: Job, *, popen) -> None:
+        """Block until the job process exits, then finalize. Works for both a
+        process we spawned (``popen`` reaps the child) and an adopted orphan
+        (``popen is None`` → psutil liveness)."""
+        while self._proc_running(job, popen):
+            if self._kill_on_shutdown:
+                self._kill_job_tree(job)
+                break
+            time.sleep(_POLL_INTERVAL)
+        # Reap our own child to avoid a zombie.
+        if popen is not None:
+            try:
+                popen.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+        self._popens.pop(job.id, None)
+        self._finalize_from_exit(job, popen)
+
+    @staticmethod
+    def _proc_running(job: Job, popen) -> bool:
+        if popen is not None:
+            return popen.poll() is None
+        return proc.is_alive(job.pid, job.create_time)
+
+    def _finalize_from_exit(self, job: Job, popen) -> None:
+        if job.state in TERMINAL_STATES:
+            return
+        ev = tail.last_event(job.progress_path)
+        rc = popen.poll() if popen is not None else None
+        if job.stop_requested:
+            self._finalize(job, STATE_STOPPED)
+            return
+        if ev and ev.get("ev") == "run_end":
+            status = ev.get("status")
+            mapped = {
+                "ok": STATE_DONE,
+                "stopped": STATE_STOPPED,
+                "error": STATE_ERROR,
+            }.get(status, STATE_ERROR)
+            self._finalize(job, mapped, error=ev.get("error"))
+            return
+        if rc == 0:
+            self._finalize(job, STATE_DONE)
+        else:
+            # No run_end and a nonzero/unknown exit — the trainer died before it
+            # could write its terminal event.
+            self._finalize(
+                job,
+                STATE_ERROR,
+                error=f"process exited (code={rc}) without a run_end event",
+            )
+
+    def _finalize(
+        self,
+        job: Job,
+        state: str,
+        *,
+        error: Optional[str] = None,
+        detail: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            job.state = state
+            job.ended_at = time.time()
+            if error:
+                job.error = error
+            if detail:
+                job.status_detail = detail
+            job.ckpt_path = tail.last_ckpt_path(job.progress_path)
+            job.persist()
+        self._broadcast({"ev": "ended", "job_id": job.id, "state": state})
+
+    # ----- gpu guard -----
+
+    def _gpu_guard(self, job: Job, *, retries: int = 6, delay: float = 5.0) -> None:
+        """Before launching, ensure the GPU is free. Reap VRAM leaked by our own
+        dead jobs; wait (bounded) on an unknown holder rather than blind-killing
+        it, then proceed with a warning so the queue never deadlocks."""
+        for attempt in range(retries):
+            holders = gpu.gpu_pids()
+            if not holders:  # None (can't tell) or empty (free) → go
+                return
+            with self._lock:
+                known = {j.pid: j for j in self._jobs.values() if j.pid in holders}
+            unknown = holders - set(known)
+            # Kill leftovers from our own (now-terminal/dead) jobs.
+            for pid, owner in known.items():
+                if owner.id == job.id:
+                    continue
+                logger.warning(
+                    "gpu_guard: reaping leaked VRAM from job %s (pid %s)",
+                    owner.id,
+                    pid,
+                )
+                proc.kill_tree(pid)
+            if not unknown:
+                time.sleep(0.5)  # let the killed procs release VRAM
+                continue
+            logger.warning(
+                "gpu_guard: GPU held by unknown pid(s) %s (attempt %d/%d)",
+                sorted(unknown),
+                attempt + 1,
+                retries,
+            )
+            self._broadcast(
+                {"ev": "gpu_wait", "job_id": job.id, "unknown_pids": sorted(unknown)}
+            )
+            time.sleep(delay)
+        # Give up waiting on the stranger — proceed (the OS will OOM us if there
+        # genuinely isn't room; we won't kill what we didn't start).
+        job.status_detail = "launched despite unknown GPU holder"
+
+    def _kill_job_tree(self, job: Job) -> None:
+        if job.pid is not None:
+            proc.kill_tree(job.pid)
+
+    # ----- command building -----
+
+    def _build_cmd(self, job: Job) -> tuple[list[str], dict]:
+        # Imported lazily so loading the daemon package never drags in the task
+        # runner's transitive imports until a job actually launches.
+        from scripts.tasks._common import build_launch_cmd, build_method_args
+
+        overrides = dict(job.overrides or {})
+        extra = list(job.extra or [])
+        # Translate dict overrides into --key value pairs unless already present.
+        # NOTE: most train.py bool flags are `store_true`, so a True override
+        # emits `--flag` but a False one can only be expressed by *omitting* it —
+        # train.py then keeps whatever the base→preset→method chain set. That's
+        # fine for the ComfyUI node's overrides (the only preset that turns these
+        # bools on is low_vram, which it never pairs with a False override), but
+        # a caller can't force a preset-on flag back off through this path.
+        for key, val in overrides.items():
+            flag = f"--{key}"
+            if flag in extra:
+                continue
+            if isinstance(val, bool):
+                if val:
+                    extra.append(flag)
+            else:
+                extra += [flag, str(val)]
+        # Point the structured progress stream at the job dir so we always know
+        # where it is, regardless of the method's output_name default.
+        if "--progress_jsonl" not in extra:
+            extra += ["--progress_jsonl", job.progress_path or ""]
+        args = build_method_args(
+            job.method,
+            preset=job.preset,
+            methods_subdir=job.methods_subdir,
+            extra=extra,
+        )
+        cmd = build_launch_cmd(*args)
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        return cmd, env
+
+    # ----- reconciliation (boot) -----
+
+    def _reconcile(self) -> None:
+        self._jobs = load_all()
+        for job in self._jobs.values():
+            if job.state == STATE_RUNNING:
+                if proc.is_alive(job.pid, job.create_time):
+                    logger.info("reconcile: re-attaching live job %s", job.id)
+                    self._adopt.append(job.id)
+                else:
+                    logger.info("reconcile: job %s died while we were down", job.id)
+                    job.stop_requested = False
+                    self._finalize(
+                        job,
+                        STATE_ERROR,
+                        error="daemon was down when the process exited",
+                        detail="orphaned",
+                    )
+            elif job.state == STATE_QUEUED:
+                self._queue.put(job.id)
+
+    # ----- helpers -----
+
+    def _current_running_locked(self) -> Optional[Job]:
+        for job in self._jobs.values():
+            if job.state == STATE_RUNNING:
+                return job
+        return None
+
+    def active_job(self) -> Optional[Job]:
+        """The currently-running job, if any (lock-safe public accessor)."""
+        with self._lock:
+            return self._current_running_locked()
+
+    # ----- pub/sub for SSE -----
+
+    def subscribe(self) -> "queue.Queue[dict]":
+        q: "queue.Queue[dict]" = queue.Queue(maxsize=256)
+        with self._lock:
+            self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: "queue.Queue[dict]") -> None:
+        with self._lock:
+            self._subscribers.discard(q)
+
+    def _broadcast(self, event: dict) -> None:
+        event.setdefault("ts", time.time())
+        with self._lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass  # slow consumer; drop rather than block the worker

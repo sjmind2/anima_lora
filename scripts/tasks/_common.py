@@ -118,7 +118,9 @@ def bespoke_preset_flags(preset: str) -> list[str]:
     if "blocks_to_swap" in section:
         flags += ["--blocks_to_swap", str(int(section["blocks_to_swap"]))]
     if "gradient_checkpointing" in section:
-        flags.append("--grad_ckpt" if section["gradient_checkpointing"] else "--no_grad_ckpt")
+        flags.append(
+            "--grad_ckpt" if section["gradient_checkpointing"] else "--no_grad_ckpt"
+        )
     else:
         flags.append("--no_grad_ckpt")
     if "sample_ratio" in section:
@@ -374,7 +376,10 @@ def _nsys_gpu_metrics_available(nsys: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     blob = (out.stdout or "") + (out.stderr or "")
-    return "Insufficient privilege" not in blob and "None of the installed GPUs" not in blob
+    return (
+        "Insufficient privilege" not in blob
+        and "None of the installed GPUs" not in blob
+    )
 
 
 # nsys stats reports auto-generated after profiling. Tuned for kernel
@@ -493,6 +498,34 @@ def accelerate_launch(*args: str):
         _nsys_run_stats(nsys_out)
 
 
+def build_method_args(
+    method: str,
+    *,
+    preset: str,
+    methods_subdir: str | None = None,
+    extra=None,
+    artist: str | None = None,
+    profile_steps: str | None = None,
+) -> list[str]:
+    """Assemble the ``["--method", m, "--preset", p, ...]`` train.py arg list.
+
+    Pure — no env reads, no subprocess. Shared by the CLI ``train()`` path and
+    the training daemon (``scripts/daemon``) so the daemon doesn't duplicate the
+    ARTIST / PROFILE_STEPS handling. ``extra`` is appended verbatim; ``artist`` /
+    ``profile_steps`` add their flags only when the caller didn't already pass
+    them in ``extra``.
+    """
+    extra = list(extra or [])
+    args = ["--method", method, "--preset", preset]
+    if methods_subdir:
+        args += ["--methods_subdir", methods_subdir]
+    if artist and not any(a == "--artist_filter" for a in extra):
+        args += ["--artist_filter", artist]
+    if profile_steps and not any(a == "--profile_steps" for a in extra):
+        args += ["--profile_steps", profile_steps]
+    return [*args, *extra]
+
+
 def train(
     method: str, extra, preset: str | None = None, methods_subdir: str | None = None
 ):
@@ -506,16 +539,15 @@ def train(
     `--artist_filter <name>` (filters dataset to `@<name>`-tagged captions and
     redirects output to `output/ckpt-artist/`).
     """
-    args = ["--method", method, "--preset", preset or _preset()]
-    if methods_subdir:
-        args += ["--methods_subdir", methods_subdir]
-    artist = os.environ.get("ARTIST")
-    if artist and not any(a == "--artist_filter" for a in extra):
-        args += ["--artist_filter", artist]
-    profile_steps = os.environ.get("PROFILE_STEPS")
-    if profile_steps and not any(a == "--profile_steps" for a in extra):
-        args += ["--profile_steps", profile_steps]
-    accelerate_launch(*args, *extra)
+    args = build_method_args(
+        method,
+        preset=preset or _preset(),
+        methods_subdir=methods_subdir,
+        extra=extra,
+        artist=os.environ.get("ARTIST"),
+        profile_steps=os.environ.get("PROFILE_STEPS"),
+    )
+    accelerate_launch(*args)
 
 
 INFERENCE_BASE = [

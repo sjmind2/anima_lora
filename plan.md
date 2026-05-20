@@ -1,6 +1,12 @@
 # Plan — Local Training Daemon + Structured Progress + MCP
 
-Status: Phase 0 implemented (2026-05-20); Phases 1–3 not started. Owner: @sorryhyun. Drafted 2026-05-20.
+Status: Phase 0 + Phase 1 implemented (2026-05-20); Phases 2–3 not started. Owner: @sorryhyun. Drafted 2026-05-20.
+
+Phase 1 lives in `scripts/daemon/` (`config`, `proc`, `gpu`, `jobs`, `tail`,
+`manager`, `server`, `client`, `__main__`), CLI verbs in `scripts/tasks/daemon.py`
+(`make daemon[-attach|-kill|-terminate]`), the shared `build_method_args`
+extracted into `scripts/tasks/_common.py`, and the ComfyUI trainer-node cutover
+in `custom_nodes/comfyui-anima-trainer/nodes.py`. Tests: `tests/test_daemon.py`.
 
 ## Goal
 
@@ -134,9 +140,32 @@ regex-parsing stdout. Keep stdout fallback for one release.
 
 ---
 
-## Phase 1 — The daemon + migrate the ComfyUI node
+## Phase 1 — The daemon + migrate the ComfyUI node *(DONE — 2026-05-20)*
 
 Smallest thing that fixes the ComfyUI pain and delivers the queue.
+
+**Implemented as designed.** `scripts/daemon/` is a single localhost
+`ThreadingHTTPServer` (zero new deps) with a FIFO `queue.Queue` + one worker
+thread. Each job spawns `accelerate launch … train.py` detached
+(`proc.spawn_detached`: `start_new_session` POSIX / `CREATE_NO_WINDOW |
+DETACHED_PROCESS` Windows), with `--progress_jsonl` pointed at
+`output/daemon/jobs/<id>/progress.jsonl` so the daemon follows the run by
+file-tail (no subprocess transport — Windows-safe) and never needs a pipe. Jobs
+are identified by `(pid, create_time)` and torn down via a psutil tree walk
+(`proc.kill_tree`, the `Popen`-flavored port of `gui/process.py`). Boot
+reconciliation (`manager._reconcile`) re-attaches a live orphan, marks a dead
+one `error`/`orphaned`, and re-enqueues `queued` jobs; a GPU guard
+(`gpu.gpu_pids` via pynvml→nvidia-smi) reaps VRAM leaked by our own dead jobs
+and waits-then-warns on an unknown holder rather than blind-killing it. The
+single-daemon lock is the pidfile `(pid, create_time)` + `EADDRINUSE`. SSE is
+hand-rolled (flush-per-event, BrokenPipe-guarded). The ComfyUI node now submits
+to the daemon and drives a `ProgressBar` from the progress stream instead of
+running training in-process.
+
+Deferred to later phases (unchanged from original plan): CLI `--queue`
+submission and the GUI-as-client cutover are **Phase 2**; the MCP wrapper is
+**Phase 3**. Phase 1 ships no CLI job *producer* — the ComfyUI node and direct
+HTTP clients are the producers; `make daemon*` only manages the daemon.
 
 ### Daemon
 
