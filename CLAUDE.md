@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Anima — LoRA/T-LoRA training and inference pipeline for the Anima diffusion model (DiT-based, flow-matching). Supports several adapter families (LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT / ChimeraHydra / postfix / IP-Adapter / EasyControl) selectable via method config + hardware preset. The LoRA family is routed via a three-axis surface — `use_moe_style` / `route_per_layer` / `router_source` — see `configs/methods/lora.toml`.
+Anima — LoRA/T-LoRA training and inference pipeline for the Anima diffusion model (DiT-based, flow-matching). Supports several adapter families (LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT / ChimeraHydra / IP-Adapter / EasyControl) selectable via method config + hardware preset. The LoRA family is routed via a three-axis surface — `use_moe_style` / `route_per_layer` / `router_source` — see `configs/methods/lora.toml`.
 
 ## Setup
 
@@ -23,8 +23,9 @@ Both `make` (Unix) and `python tasks.py` (cross-platform) are supported. The exa
 ```bash
 # Training (run from anima_lora/)
 # Each training invocation selects a method + hardware preset. Method settings win
-# over preset settings on overlap (e.g. postfix forces blocks_to_swap=0).
-# Method files in configs/methods/: lora.toml, chimera.toml, postfix.toml,
+# over preset settings on overlap (e.g. a frozen-DiT method can force
+# blocks_to_swap=0).
+# Method files in configs/methods/: lora.toml, chimera.toml,
 # ip_adapter.toml, easycontrol.toml, soft_tokens.toml. Variants are toggle
 # blocks inside them — uncomment the target block to switch:
 #   lora.toml             — LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT,
@@ -35,7 +36,6 @@ Both `make` (Unix) and `python tasks.py` (cross-platform) are supported. The exa
 #   chimera.toml          — ChimeraHydra dual-pool additive MoE (content pool
 #                           routed by per-Linear lx-router + freq pool routed
 #                           by network-level FEI router; two A's per Linear)
-#   postfix.toml          — postfix (free param) / cond+ortho (caption-conditional, Cayley-rotated SVD basis)
 #   ip_adapter.toml       — decoupled image cross-attention (PE-Core resampler)
 #   easycontrol.toml      — extended self-attn image conditioning (per-block cond LoRA)
 #   soft_tokens.toml      — SoftREPA-style per-layer × per-t soft text tokens (frozen DiT)
@@ -44,10 +44,9 @@ python tasks.py lora        # Same, works on Windows too
 make lora PRESET=low_vram   # Override preset: methods/lora.toml + presets.toml[low_vram]
 make lora PRESET=fast_16gb  # Override preset: methods/lora.toml + presets.toml[fast_16gb]
 make lora PRESET=half       # Override preset: methods/lora.toml + presets.toml[half] (sample_ratio=0.5)
-# Experimental methods are exposed under exp-* (postfix, ip-adapter,
-# easycontrol). They may produce broken output, change without notice, or be
-# removed.
-make exp-postfix                # Postfix family (methods/postfix.toml — postfix or cond+ortho)
+# Experimental methods are exposed under exp-* (ip-adapter, easycontrol,
+# soft-tokens, chimera). They may produce broken output, change without
+# notice, or be removed.
 make exp-ip-adapter             # IP-Adapter image cross-attention (methods/ip_adapter.toml)
                                 # Reuses LoRA paths: source image_dataset/, cache post_image_dataset/lora/
 make exp-ip-adapter-preprocess  # Alias for `make preprocess` + `make preprocess-pe`
@@ -95,9 +94,6 @@ make dcw                   # Sample 5 aspect buckets + train fusion head (~3-5h 
 make dcw-train             # Train-only on existing pool under bench/dcw/results/ (~30s)
 
 # Experimental inference (matched to make exp-* training)
-make exp-test-postfix          # Test with postfix tuning
-make exp-test-postfix-exp      # Test with postfix tuning (exp variant)
-make exp-test-postfix-func     # Test with postfix tuning (func variant)
 make exp-test-ip REF_IMAGE=... # IP-Adapter inference (image-conditioned)
 make exp-test-easycontrol REF_IMAGE=...  # EasyControl inference (image-conditioned)
 make exp-test-directedit PROMPT='double peace'  # DirectEdit on random source image
@@ -179,13 +175,13 @@ On Windows, use `python tasks.py <command>` instead of `make <command>`. Extra a
 | `gui/` | PySide6 GUI package: config editing with presets, IP-Adapter / EasyControl preprocess+train tabs, dataset browser, training monitor |
 | `tasks.py` | Cross-platform task runner (Windows-compatible Makefile alternative). Source of truth for every `make` target. |
 | `scripts/tasks/` | Per-domain task implementations (`training`, `inference`, `preprocess`, `masking`, `gui`, `downloads`, `utilities`, `tagger`, `dcw`) — where command bodies actually live; `_common.py` holds shared helpers. |
-| `scripts/experimental_tasks/` | Bodies for the `exp-*` commands (postfix, ip-adapter, easycontrol training + their `exp-test-*` inference). Reuses helpers from `scripts/tasks/_common.py`. |
+| `scripts/experimental_tasks/` | Bodies for the `exp-*` commands (ip-adapter, easycontrol, soft-tokens, chimera training + their `exp-test-*` inference, plus the DirectEdit / postfix-tail inversion probes). Reuses helpers from `scripts/tasks/_common.py`. |
 
 Method deep-dives in `docs/methods/` (shipped); experimental method docs in `docs/experimental/`; active proposals in `docs/proposal/`. Retired material lives under `_archive/`.
 
 ## Config flow
 
-Training is config-driven via a three-layer chain: `base.toml → presets.toml[<preset>] → methods/<method>.toml → CLI args`. Method settings win over preset settings on overlap, so a method can force its own hardware requirements (e.g. postfix forces `blocks_to_swap=0`).
+Training is config-driven via a three-layer chain: `base.toml → presets.toml[<preset>] → methods/<method>.toml → CLI args`. Method settings win over preset settings on overlap, so a method can force its own hardware requirements (e.g. a frozen-DiT method can force `blocks_to_swap=0`).
 
 Layout:
 - `configs/base.toml` — shared infrastructure (model paths, optimizer, compile flags, etc.) AND the default LoRA dataset blueprint (`[general]` + `[[datasets]]` + `[[datasets.subsets]]`). LoRA reads resized images from `post_image_dataset/resized/` with caches redirected to `post_image_dataset/lora/` via `cache_dir`. Captions live in `image_dataset/` (master) — TE caching reads `.txt` from there, training reads only the cached prompt embeddings. The dataset sections are consumed by `BlueprintGenerator` and skipped by the flat method+preset merge chain (see `_DATASET_CONFIG_SECTIONS` in `library/train_util.py`); use `--dataset_config <path>` for a wholly different blueprint, or drop a `[general]` / `[[datasets]]` block into the method TOML to shallow-override top-level scalars (e.g. `batch_size`) on the base blueprint — see `_apply_dataset_overrides` in `library/config/io.py`. Subset-level overrides are not supported via this path.
@@ -193,11 +189,10 @@ Layout:
 - `configs/methods/` — one file per algorithm family. Holds rank, the three-axis routing knobs (`use_moe_style` / `route_per_layer` / `router_source`), other method flags (`add_reft`, `use_ortho`, `use_timestep_mask`, …), and the method's opinionated learning rate / epochs / output_name. Six files:
   - `lora.toml` — LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT. Variants are toggle blocks; default stacks LoRA + OrthoLoRA + T-LoRA + Hydra (`use_moe_style="shared_A"` + `route_per_layer=False` + `router_source="fei"`). The σ-routed Hydra and ReFT blocks are present but commented. Default ships `save_every_n_epochs = 4` / `checkpointing_epochs = 4`. **Pre-three-axis checkpoints with `ss_use_hydra`/`ss_use_fei_router` metadata no longer load** — the legacy fallback was removed.
   - `chimera.toml` — ChimeraHydra dual-pool additive MoE (`networks/lora_modules/chimera.py`, registered as `chimera_hydra` in `networks/__init__.py::NETWORK_REGISTRY`). Two A's per Linear (one per pool): content pool with K_c B-heads routed by per-Linear lx-router, freq pool with K_f B-heads routed by the network-level FreqRouter on concat(FEI(z_t), sinusoidal-σ). Pool outputs are added; T-LoRA mask applies to the content branch only.
-  - `postfix.toml` — two modes wired in `networks/methods/postfix.py`: `mode=postfix` (free-parameter K×D shared postfix) and `mode=cond` (caption-conditional, always uses an orthonormal SVD-of-cached-TE basis + Cayley rotation). Default block runs `mode=cond`.
   - `ip_adapter.toml` — IP-Adapter image cross-attention (DiT frozen; trains resampler + per-block `to_k_ip`/`to_v_ip`). Reuses the LoRA pipeline's data layout (`post_image_dataset/resized/` + `post_image_dataset/lora/`). Defaults to PRE-CACHED PE features (`make preprocess-pe`).
   - `easycontrol.toml` — EasyControl image conditioning (DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate). Source: `easycontrol-dataset/`. Caches: `post_image_dataset/easycontrol/`. Reuses cached VAE latents — no new sidecar.
   - `soft_tokens.toml` — SoftREPA-style per-layer × per-t soft text tokens (DiT frozen; per-block `Block.forward` monkey-patch splices `s^(k,t)` into `crossattn_emb`). ~1M params. Inference is wired: standalone via `inference.py --soft_tokens_weight` (`library/inference/generation.py`) and in ComfyUI via the `AnimaSoftTokensLoader` node (`custom_nodes/comfyui-hydralora/soft_tokens.py`).
-- `configs/gui-methods/` — GUI-friendly parallel tree. One self-contained TOML per **variant** instead of per family (`lora`, `lora-8gb`, `ortholora`, `tlora`, `tlora_ortho`, `tlora_ortho_reft`, `reft`, `hydralora_experimental`, `hydralora_sigma`, `hydralora_fei`, `fera`, `chimera_hydra`, `postfix_ortho_cond`, `ip_adapter`, `easycontrol`, `soft_tokens`). No toggle blocks — what you see is what runs. Selected via `train.py --methods_subdir gui-methods` (wrapped by `make lora-gui GUI_PRESETS=<variant>` / `python tasks.py lora-gui <variant>`). `postfix_ortho_cond` is the GUI-exposed postfix path; `fera` is the author-faithful FeRA cell of the three-axis matrix (`use_moe_style="independent_A"` + `route_per_layer=False` + `router_source="fei"`). Run `ls configs/gui-methods/` for the live list — variants get added/renamed.
+- `configs/gui-methods/` — GUI-friendly parallel tree. One self-contained TOML per **variant** instead of per family (`lora`, `lora-8gb`, `ortholora`, `tlora`, `tlora_ortho`, `tlora_ortho_reft`, `reft`, `hydralora_experimental`, `hydralora_sigma`, `hydralora_fei`, `fera`, `chimera_hydra`, `ip_adapter`, `easycontrol`, `soft_tokens`). No toggle blocks — what you see is what runs. Selected via `train.py --methods_subdir gui-methods` (wrapped by `make lora-gui GUI_PRESETS=<variant>` / `python tasks.py lora-gui <variant>`). `fera` is the author-faithful FeRA cell of the three-axis matrix (`use_moe_style="independent_A"` + `route_per_layer=False` + `router_source="fei"`). Run `ls configs/gui-methods/` for the live list — variants get added/renamed.
 
 Subsets accept an optional `cache_dir` key — when set, all VAE / text-encoder / PE caches are written to (and read from) that directory using stem-mirrored filenames, instead of sitting next to the source image. IP-Adapter and EasyControl method configs use this to keep `ip-adapter-dataset/` and `easycontrol-dataset/` purely user-facing source dirs while caches live under `post_image_dataset/`.
 
@@ -219,7 +214,7 @@ Subsets accept an optional `cache_dir` key — when set, all VAE / text-encoder 
   - `library/env.py` — environment / path resolution helpers.
   - `library/log.py` — logging setup + `fire_in_thread`.
 - **Strategy pattern** for model-specific tokenization/encoding (`library/anima/strategy.py`, `library/strategy_base.py`)
-- **Pluggable adapters** under `networks/` — selected via `network_module` config key plus (for the LoRA family) the three-axis routing cfg. Covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT / ChimeraHydra (in `networks/lora_modules/` — including `stacked_experts.py` for FeRA's independent-A layout and `chimera.py` for the dual-pool MoE) coordinated by `networks/lora_anima/` (`network.py`, `factory.py`, `loading.py`, `config.py`, `attn_fuse.py`); postfix / IP-Adapter / EasyControl (in `networks/methods/`); the unified attention-backend dispatcher (`networks/attention_dispatch.py`); and Spectrum inference (`networks/spectrum.py`). See `networks/CLAUDE.md` for the per-module map, three-axis surface, variant details, and dispatch invariants.
+- **Pluggable adapters** under `networks/` — selected via `network_module` config key plus (for the LoRA family) the three-axis routing cfg. Covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA / ReFT / ChimeraHydra (in `networks/lora_modules/` — including `stacked_experts.py` for FeRA's independent-A layout and `chimera.py` for the dual-pool MoE) coordinated by `networks/lora_anima/` (`network.py`, `factory.py`, `loading.py`, `config.py`, `attn_fuse.py`); IP-Adapter / EasyControl (in `networks/methods/`); the unified attention-backend dispatcher (`networks/attention_dispatch.py`); and Spectrum inference (`networks/spectrum.py`). See `networks/CLAUDE.md` for the per-module map, three-axis surface, variant details, and dispatch invariants.
 
 ## Critical invariants
 
@@ -233,7 +228,7 @@ All bucket resolutions ensure `(H/16)*(W/16) ~ 4096` patches. Batch elements are
 
 ### Lazy model loading
 
-DiT is loaded AFTER text encoder/VAE caching and unloading to avoid OOM. The sequence is: text encoder → cache → free → VAE → cache → free → load DiT → attach LoRA/postfix network → training loop.
+DiT is loaded AFTER text encoder/VAE caching and unloading to avoid OOM. The sequence is: text encoder → cache → free → VAE → cache → free → load DiT → attach LoRA/adapter network → training loop.
 
 ## Spectrum inference acceleration
 
@@ -287,7 +282,7 @@ Two HydraLoRAs glued at the residual: a **content** pool (K_c B-heads routed by 
 
 ## Postfix-tail per-image inversion
 
-Given a postfix-trained checkpoint, optimize a per-image residual on the postfix tail to reconstruct a target image without retraining the base LoRA. Code in `library/inference/postfix_inversion.py` + `scripts/inversion/invert_postfix_tail.py`; wired in `tasks.py`. See `docs/proposal/postfix_residual_per_image_inversion.md`.
+The postfix *training method* was archived (2026-05-20 — soft_tokens superseded it; see `_archive/postfix/`). What stays live is this **inversion probe**: optimize a per-image K-slot residual on an orthonormal postfix tail (`Q @ diag(s)`) so it reconstructs a target image against the frozen DiT — an observation tool, not a deployable adapter. It needs no postfix-trained checkpoint (it builds its own SVD-of-cached-TE / random basis). Code in `library/inference/postfix_inversion.py` (self-contained — the basis builders `_build_svd_te_basis` / `_make_orthonormal_basis` were inlined here when the method was archived) + `scripts/inversion/invert_postfix_tail.py`; wired in `tasks.py` (`exp-invert-directedit`). See `docs/proposal/postfix_residual_per_image_inversion.md`.
 
 ## Preprocessing
 
@@ -317,7 +312,7 @@ Utility scripts in `scripts/`:
 Spectrum KSampler and mod guidance ComfyUI nodes live in a separate repo: https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler (the Spectrum node also ships DCW: scalar default `+0.01` plus `auto` mode that runs the v4 fusion head in-node — see `reference_spectrum_node_dcw_defaults` memory).
 
 In-tree under `custom_nodes/`:
-- `comfyui-hydralora/` — four loader nodes: **Anima Adapter Loader** (LoRA / Hydra / ReFT), **Anima FeRA Loader**, **Anima Postfix Loader** (prefix/postfix/cond), and **Anima Soft Tokens Loader** (SoftREPA per-block crossattn splice). See `custom_nodes/comfyui-hydralora/CLAUDE.md` for code-level details and the `forward_hook`-not-`forward`-override invariant; `README.md` for user-facing docs and changelog.
+- `comfyui-hydralora/` — three loader nodes: **Anima Adapter Loader** (LoRA / Hydra / ReFT), **Anima FeRA Loader**, and **Anima Soft Tokens Loader** (SoftREPA per-block crossattn splice). (The Anima Postfix Loader was retired when the postfix method was archived.) See `custom_nodes/comfyui-hydralora/CLAUDE.md` for code-level details and the `forward_hook`-not-`forward`-override invariant; `README.md` for user-facing docs and changelog.
 - `comfyui-anima-directedit/` — `AnimaDirectEdit` node (invert + edit on a frozen Anima checkpoint, using stock MODEL/CLIP/VAE sockets). Consumes the `ANIMA_TAGGER` socket from `comfyui-anima-tagger`, or skips the tagger via the `prompt_src_override` STRING input. See its own `README.md`.
 - `comfyui-anima-tagger/` — `AnimaTaggerLoader` (→ `ANIMA_TAGGER` socket) and `AnimaTaggerCaption` (`ANIMA_TAGGER` + `IMAGE` → `STRING`). Standalone captioner usable outside DirectEdit (LoRA caption pre-fill, prompt scaffolding, etc.).
 - `comfyui-anima-trainer/` — In-ComfyUI training trigger nodes for Anima.

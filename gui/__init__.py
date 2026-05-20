@@ -40,7 +40,6 @@ _METHOD_ORDER = (
     "tlora",
     "hydralora",
     "reft",
-    "postfix",
     "fera",
     "chimera",
     "ip_adapter",

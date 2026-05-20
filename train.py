@@ -2445,7 +2445,7 @@ from library.config import schema as _config_schema  # noqa: E402
 from networks import all_network_kwargs as _all_network_kwargs  # noqa: E402
 
 
-# Network-module-consumed flags (networks.lora_anima / networks.methods.postfix).
+# Network-module-consumed flags (networks.lora_anima / networks.methods.*).
 # These don't flow through argparse directly because `create_network` reads
 # them from ``kwargs``. Derived from the registry in ``networks/__init__.py``
 # (``SHARED_KWARG_FLAGS`` ∪ per-``NetworkSpec.kwarg_flags``) so adding a new

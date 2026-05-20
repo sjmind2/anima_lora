@@ -12,7 +12,7 @@ Examples:
     python tasks.py test                     # add MOD=1 to enable modulation guidance
     python tasks.py test                     # add NOLORA=1 to run against the bare DiT
     python tasks.py download-models
-    python tasks.py exp-postfix              # experimental method
+    python tasks.py exp-chimera              # experimental method
     python tasks.py exp-test-ip ref.png      # experimental inference
 
 Command implementations live under ``scripts/tasks/`` (shipped methods) and
@@ -46,7 +46,7 @@ COMMANDS = {
     "lora-gui": (
         training.cmd_lora_gui,
         "Train from a self-contained configs/gui-methods/<variant>.toml "
-        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft, postfix_exp).",
+        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft, fera).",
     ),
     # ── Training daemon ───────────────────────────────────────────────
     "daemon": (
@@ -217,10 +217,6 @@ COMMANDS = {
     # ── Experimental ──────────────────────────────────────────────────
     # Unstable methods kept under exp-* so they don't pollute the main command
     # surface. May produce broken output, change without notice, or be removed.
-    "exp-postfix": (
-        exp_training.cmd_postfix,
-        "[experimental] Postfix tuning (mode selected in configs/methods/postfix.toml)",
-    ),
     "exp-turbo": (
         exp_training.cmd_turbo,
         "[experimental] Decoupled DMD2 distillation — bakes CFG=4 / 28-step Anima "
@@ -259,10 +255,6 @@ COMMANDS = {
         "[experimental] Full EasyControl preprocess: latents + text emb. "
         "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
     ),
-    "exp-test-postfix": (
-        exp_inference.cmd_test_postfix,
-        "[experimental] Inference with latest postfix weight",
-    ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,
         "[experimental] Inference with latest soft_tokens weight "
@@ -273,14 +265,6 @@ COMMANDS = {
         exp_inference.cmd_test_turbo,
         "[experimental] Inference with latest turbo student LoRA at 4 steps, cfg=1.0 "
         "(CFG is baked into the student).",
-    ),
-    "exp-test-postfix-exp": (
-        exp_inference.cmd_test_postfix_exp,
-        "[experimental] Inference with latest postfix-exp weight",
-    ),
-    "exp-test-postfix-func": (
-        exp_inference.cmd_test_postfix_func,
-        "[experimental] Inference with latest postfix-func weight",
     ),
     "exp-test-ip": (
         exp_inference.cmd_test_ip,

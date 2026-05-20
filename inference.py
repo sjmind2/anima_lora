@@ -87,13 +87,6 @@ def parse_args() -> argparse.Namespace:
         "--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier"
     )
     parser.add_argument(
-        "--postfix_weight",
-        type=str,
-        default=None,
-        help="Postfix tuning weight path (networks.methods.postfix .safetensors). "
-        "Supports postfix (free param) and cond+ortho modes.",
-    )
-    parser.add_argument(
         "--soft_tokens_weight",
         type=str,
         default=None,

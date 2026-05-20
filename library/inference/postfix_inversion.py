@@ -27,6 +27,7 @@ functional cosine — see proposal §Probe metrics) consumes.
 from __future__ import annotations
 
 import csv
+import glob
 import logging
 import os
 from dataclasses import dataclass, field
@@ -37,11 +38,141 @@ import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
-from networks.methods.postfix import _build_svd_te_basis, _make_orthonormal_basis
-
 logger = logging.getLogger(__name__)
 
 MAX_SEQ_LEN = 512
+
+
+# region Orthonormal basis builders
+#
+# Lifted verbatim from the (now archived) postfix method
+# (``_archive/postfix/networks/methods/postfix.py``) so the inversion probe
+# stays self-contained — it is the only live consumer of the cond+ortho basis
+# construction. Both functions depend on stdlib + torch + safetensors only.
+
+
+def _build_svd_te_basis(
+    cache_dir: str,
+    K: int,
+    D: int,
+    num_files: int = 256,
+    seed: int = 0,
+) -> torch.Tensor:
+    """Top-K right singular vectors of a sample of cached adapter outputs,
+    row-shuffled deterministically.
+
+    Reads `*_anima_te.safetensors` under ``cache_dir``, masks padding via
+    `attn_mask_v0`, accumulates non-padding rows into an (M, D) matrix, runs
+    full SVD, and returns the top-K rows of V_h (the K right singular vectors
+    with the largest singular values). The K rows are row-orthonormal (V_h has
+    orthonormal rows by construction).
+
+    Row-shuffle (deterministic from `seed`) breaks the "slot-0 is the principal
+    direction" inductive bias that would otherwise let the optimizer collapse
+    its budget onto the top slot.
+    """
+    if K > D:
+        raise ValueError(
+            f"cond mode requires K ({K}) ≤ D ({D}); cannot build K orthonormal "
+            "rows in a D-dim space"
+        )
+
+    from safetensors.torch import load_file as _load_file
+
+    files = sorted(
+        glob.glob(
+            os.path.join(cache_dir, "**", "*_anima_te.safetensors"),
+            recursive=True,
+        )
+    )
+    if not files:
+        raise FileNotFoundError(
+            f"ortho_basis='svd_te' requires cached *_anima_te.safetensors files "
+            f"under {cache_dir!r} (run `make preprocess-te` first)"
+        )
+
+    rng = torch.Generator().manual_seed(int(seed))
+    if len(files) > num_files:
+        idx = torch.randperm(len(files), generator=rng)[:num_files].tolist()
+        files = [files[i] for i in sorted(idx)]
+
+    chunks: list[torch.Tensor] = []
+    for path in files:
+        sd = _load_file(path)
+        emb = sd["crossattn_emb_v0"].float()  # (S, D)
+        mask = sd["attn_mask_v0"].bool()       # (S,)
+        if emb.shape[-1] != D:
+            raise ValueError(
+                f"cached embed dim {emb.shape[-1]} != requested D={D} (file: {path})"
+            )
+        if mask.any():
+            chunks.append(emb[mask])
+
+    if not chunks:
+        raise RuntimeError(f"no non-padding tokens found across {len(files)} cached files")
+
+    A = torch.cat(chunks, dim=0)  # (M, D)
+    # full_matrices=False → V_h: (min(M, D), D); top-K rows are the K right
+    # singular vectors with the largest singular values.
+    _U, _S, V_h = torch.linalg.svd(A, full_matrices=False)
+    if V_h.shape[0] < K:
+        raise RuntimeError(
+            f"svd_te: only {V_h.shape[0]} singular vectors available (< K={K}); "
+            "use more cached files or smaller K"
+        )
+    top = V_h[:K].contiguous()  # (K, D), row-orthonormal
+
+    # Deterministic row-shuffle: scrambles the "slot k = k-th principal
+    # direction" ordering so the optimizer can't latch onto slot 0.
+    perm = torch.randperm(K, generator=rng)
+    return top[perm].contiguous()
+
+
+def _make_orthonormal_basis(
+    K: int,
+    D: int,
+    kind: str = "random",
+    *,
+    te_cache_dir: Optional[str] = None,
+    svd_num_files: int = 256,
+    seed: int = 0,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """Build a (K, D) row-orthonormal basis (K rows, D-dim each).
+
+    QR on a (D, K) Gaussian matrix gives Q with orthonormal columns; transpose
+    to get K row-orthonormal vectors in R^D. Requires K ≤ D.
+
+    Supports two basis kinds:
+      - ``"random"``: QR of a Gaussian (D, K) matrix.
+      - ``"svd_te"``: top-K right singular vectors of cached
+        ``_anima_te.safetensors`` adapter outputs under ``te_cache_dir``,
+        row-shuffled with ``seed``. See ``_build_svd_te_basis``.
+    """
+    if K > D:
+        raise ValueError(
+            f"cond mode requires K ({K}) ≤ D ({D}); cannot build K orthonormal "
+            "rows in a D-dim space"
+        )
+    if kind == "random":
+        M = torch.randn(D, K, generator=generator)
+        Q, _R = torch.linalg.qr(M)  # Q: (D, K), columns orthonormal
+        return Q.T.contiguous()  # (K, D), rows orthonormal
+    if kind == "svd_te":
+        if te_cache_dir is None:
+            raise ValueError(
+                "ortho_basis='svd_te' requires te_cache_dir kwarg (path to a directory "
+                "of cached *_anima_te.safetensors files, typically post_image_dataset/lora)"
+            )
+        return _build_svd_te_basis(
+            te_cache_dir, K, D, num_files=svd_num_files, seed=seed
+        )
+    raise NotImplementedError(
+        f"ortho_basis={kind!r}: only 'random' and 'svd_te' are implemented."
+    )
+
+
+# endregion
 
 
 # region Basis

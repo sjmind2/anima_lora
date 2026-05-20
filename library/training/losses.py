@@ -11,7 +11,7 @@ Reduction order (must match train.py pre-refactor):
   2. Per-sample += scalar broadcast stage (was `post_process_loss`):
        ortho_reg     — OrthoLoRA orthogonality regularizer
        hydra_balance — MoE load-balance loss
-       functional    — postfix-func inversion MSE
+       functional    — functional inversion MSE (weight-gated)
   3. Scalar stage (after `.mean()` reduction):
        multiscale    — avg_pool2d MSE on pred/target
 

@@ -1,7 +1,7 @@
 """Experimental inference entry-points (exp-test-* commands).
 
-Covers the unstable methods kept under ``make exp-*``:
-postfix / postfix_exp / postfix_func, IP-Adapter, EasyControl. Reference-image
+Covers the unstable methods kept under ``make exp-*``: soft tokens, IP-Adapter,
+EasyControl, plus the DirectEdit + postfix-tail inversion probes. Reference-image
 variants (exp-test-ip / exp-test-easycontrol) accept REF_IMAGE env or first
 positional arg, copy the ref alongside the generated output.
 """
@@ -33,55 +33,6 @@ def _random_ref_image(directory: Path) -> str | None:
     pick = random.choice(pool)
     print(f"  > Random ref: {pick}")
     return str(pick)
-
-
-def cmd_test_postfix(extra):
-    # exclude both _exp and _func so the vanilla postfix target doesn't grab them
-    outputs = sorted(
-        (
-            f
-            for f in (ROOT / "output" / "ckpt").glob("anima_postfix*.safetensors")
-            if "_exp" not in f.name and "_func" not in f.name
-        ),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not outputs:
-        print(
-            "No 'anima_postfix*.safetensors' files found in output/ckpt/",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    run(
-        [
-            *INFERENCE_BASE,
-            "--postfix_weight",
-            str(outputs[0]),
-            *extra,
-        ]
-    )
-
-
-def cmd_test_postfix_exp(extra):
-    run(
-        [
-            *INFERENCE_BASE,
-            "--postfix_weight",
-            str(latest_output("anima_postfix_exp")),
-            *extra,
-        ]
-    )
-
-
-def cmd_test_postfix_func(extra):
-    run(
-        [
-            *INFERENCE_BASE,
-            "--postfix_weight",
-            str(latest_output("anima_postfix_func")),
-            *extra,
-        ]
-    )
 
 
 def cmd_test_soft(extra):

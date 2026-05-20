@@ -43,8 +43,7 @@ def _setup_soft_tokens(args, anima, device):
     Returns ``None`` when the flag isn't set. Otherwise returns the network with
     ``apply_to(unet=anima)`` already called — the per-block ``Block.forward``
     monkey-patches are live, but ``_step_layer_tokens`` is empty until the
-    caller fires ``network.append_postfix(..., timesteps=t)`` each step. Match
-    the postfix block's pattern (line 447 below).
+    caller fires ``network.append_postfix(..., timesteps=t)`` each step.
     """
     soft_weight = getattr(args, "soft_tokens_weight", None)
     if soft_weight is None:
@@ -73,9 +72,9 @@ def _setup_soft_tokens(args, anima, device):
 def _seqlens_from_context(context_dict, device):
     """Extract per-sample text seqlens from the context's attention mask.
 
-    Mirrors the postfix block. ``context['embed'][3]`` is the cached attention
-    mask (1 inside text, 0 in padding) — sum along the sequence axis gives the
-    real token count per sample, which the ``front_of_padding`` splice needs.
+    ``context['embed'][3]`` is the cached attention mask (1 inside text, 0 in
+    padding) — sum along the sequence axis gives the real token count per
+    sample, which the ``front_of_padding`` splice needs.
     """
     embed_mask = context_dict["embed"][3].to(device)
     return embed_mask.sum(dim=-1).to(torch.int32)
@@ -209,26 +208,6 @@ def generate_body_tiled(
     if context_null is None:
         context_null = context
     negative_embed = context_null["embed"][0].to(device, dtype=torch.bfloat16)
-
-    # Postfix tuning: splice learned vectors into the cached adapter output.
-    postfix_weight = getattr(args, "postfix_weight", None)
-    if postfix_weight is not None:
-        from networks.methods.postfix import create_network_from_weights
-
-        postfix_net, postfix_sd = create_network_from_weights(
-            multiplier=1.0, file=postfix_weight, ae=None, text_encoders=None, unet=None
-        )
-        postfix_net.load_weights(postfix_weight)
-        postfix_net.to(device, dtype=torch.bfloat16)
-        embed_mask = context["embed"][3].to(device)
-        embed_seqlens = embed_mask.sum(dim=-1).to(torch.int32)
-        embed = postfix_net.append_postfix(embed, embed_seqlens)
-        neg_mask = context_null["embed"][3].to(device)
-        neg_seqlens = neg_mask.sum(dim=-1).to(torch.int32)
-        negative_embed = postfix_net.append_postfix(negative_embed, neg_seqlens)
-        logger.info(
-            f"Postfix: appended {postfix_net.num_postfix_tokens} tokens after text"
-        )
 
     # Soft tokens — see generate_body() for the long-form comment.
     soft_tokens_net = _setup_soft_tokens(args, anima, device)
@@ -508,33 +487,10 @@ def generate_body(
         context_null = context  # dummy for unconditional
     negative_embed = context_null["embed"][0].to(device, dtype=torch.bfloat16)
 
-    # Postfix tuning: splice learned vectors into cross-attention embeddings.
-    # Pool text BEFORE injection so modulation guidance sees only real text tokens.
+    # Optional pooled-text override for modulation guidance (left unset here;
+    # downstream guards on ``is not None``).
     _pooled_text_pos = None
     _pooled_text_neg = None
-
-    postfix_weight = getattr(args, "postfix_weight", None)
-    if postfix_weight is not None:
-        from networks.methods.postfix import create_network_from_weights
-
-        _pooled_text_pos = embed.max(dim=1).values  # (1, 1024)
-        _pooled_text_neg = negative_embed.max(dim=1).values
-
-        postfix_net, postfix_sd = create_network_from_weights(
-            multiplier=1.0, file=postfix_weight, ae=None, text_encoders=None, unet=None
-        )
-        postfix_net.load_weights(postfix_weight)
-        postfix_net.to(device, dtype=torch.bfloat16)
-        # Compute seqlens from attention masks
-        embed_mask = context["embed"][3].to(device)
-        embed_seqlens = embed_mask.sum(dim=-1).to(torch.int32)
-        neg_mask = context_null["embed"][3].to(device)
-        neg_seqlens = neg_mask.sum(dim=-1).to(torch.int32)
-        embed = postfix_net.append_postfix(embed, embed_seqlens)
-        negative_embed = postfix_net.append_postfix(negative_embed, neg_seqlens)
-        logger.info(
-            f"Postfix: appended {postfix_net.num_postfix_tokens} tokens after text"
-        )
 
     # Soft tokens: build + apply the monkey-patches once. The per-step
     # append_postfix(..., timesteps=t) call fires inside the loop below — and

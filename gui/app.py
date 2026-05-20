@@ -284,14 +284,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
 
-        # Experimental set: Postfix + FeRA + image-conditioning adapters. The
-        # first tab hosts a ConfigTab whose method picker exposes Postfix and
-        # FeRA (both LoRA-family but author-faithful research variants kept
+        # Experimental set: FeRA + ChimeraHydra + image-conditioning adapters.
+        # The first tab hosts a ConfigTab whose method picker exposes FeRA and
+        # ChimeraHydra (LoRA-family author-faithful research variants kept
         # behind the experimental gate). IP-Adapter and EasyControl have their
         # own preprocess/dataset lifecycles, so they keep dedicated tabs.
         self.experimental_tabs = QTabWidget()
         self.experimental_tabs.addTab(
-            ConfigTab(methods=["postfix", "fera", "chimera"]),
+            ConfigTab(methods=["fera", "chimera"]),
             t("tab_methods"),
         )
         self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))

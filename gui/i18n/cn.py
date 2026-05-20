@@ -12,7 +12,6 @@ STRINGS: dict[str, str] = {
     "tab_config": "训练配置",
     "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
-    "tab_postfix": "Postfix",
     "tab_methods": "方法",
     "tab_images": "数据集",
     "tab_merge": "合并",

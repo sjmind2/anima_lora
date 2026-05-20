@@ -8,7 +8,6 @@ STRINGS: dict[str, str] = {
     "tab_config": "学習設定",
     "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
-    "tab_postfix": "Postfix",
     "tab_methods": "手法",
     "tab_images": "データセット",
     "tab_merge": "マージ",

@@ -92,7 +92,6 @@ Each ships with a doc — see the link for usage, flags, and caveats.
 | Feature | What it is | Doc |
 |---|---|---|
 | **ReFT** | Block-level residual-stream intervention (LoReFT, NeurIPS 2024). Composes with any LoRA variant. | [reft.md](docs/methods/reft.md) |
-| **Postfix (cond+ortho)** | Caption-conditional postfix vectors with structural orthogonality (Cayley-rotated frozen SVD basis). DiT frozen; only `cond_mlp` trains. | [postfix.md](docs/experimental/postfix.md) |
 | **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT frozen; trains Perceiver resampler + per-block `to_k_ip`/`to_v_ip`. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
 | **EasyControl** | Extended self-attention image conditioning. DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **Embedding inversion** | Optimize a text embedding to match a target image through the frozen DiT. | [invert.md](docs/methods/invert.md) |
@@ -119,7 +118,7 @@ CLI path:
 
 ```bash
 make preprocess           # VAE-compatible resize & validation
-make lora                 # or: PRESET=fast_16gb make lora / PRESET=low_vram make lora / make exp-postfix
+make lora                 # or: PRESET=fast_16gb make lora / PRESET=low_vram make lora / make exp-chimera
 make test                 # sample generation with the latest trained LoRA
 ```
 
@@ -135,7 +134,7 @@ Config chain: `configs/base.toml → configs/presets.toml[<preset>] → configs/
 | [guidelines/inference.md](docs/guidelines/inference.md) | Inference flags, P-GRAFT, prompt files, LoRA format conversion |
 | [guidelines/graft-guideline.md](docs/guidelines/graft-guideline.md) | GRAFT curation workflow |
 | [optimizations/](docs/optimizations/) | Compile pipeline, FA4 post-mortem, CUDA 13.2 |
-| [methods/](docs/methods/) | One doc per method — HydraLoRA, ReFT, Spectrum, inversion, mod guidance, postfix/prefix, T-LoRA, OrthoLoRA |
+| [methods/](docs/methods/) | One doc per method — HydraLoRA, ReFT, Spectrum, inversion, mod guidance, T-LoRA, OrthoLoRA |
 
 ---
 

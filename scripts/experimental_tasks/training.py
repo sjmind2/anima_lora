@@ -1,4 +1,4 @@
-"""Experimental training entry-points: postfix, ip-adapter, easycontrol.
+"""Experimental training entry-points: ip-adapter, easycontrol, fera, chimera.
 
 These are wired up under ``make exp-*`` / ``python tasks.py exp-*`` to keep
 the unstable methods visually separate from the shipped ones (lora family,
@@ -11,10 +11,6 @@ from __future__ import annotations
 
 from scripts.tasks import preprocess as _preprocess
 from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
-
-
-def cmd_postfix(extra):
-    train("postfix", extra)
 
 
 def cmd_turbo(extra):
