@@ -761,8 +761,12 @@ class LoRANetworkCfg:
             raise RuntimeError(
                 "MoE checkpoint is missing the three-axis routing stamps "
                 "(ss_use_moe_style / ss_route_per_layer / ss_router_source). "
-                "Pre-plan2 checkpoints stop loading by design — retrain the "
-                "adapter to produce the new metadata."
+                "Two common causes: (1) it is a pre-plan2 checkpoint, which "
+                "stops loading by design — retrain the adapter to produce the "
+                "new metadata; or (2) you passed a pre-loaded weights_sd= to "
+                "create_network_from_weights without file= or metadata=. "
+                "load_file() drops safetensors __metadata__, so the stamps "
+                "vanish — pass file=<path> or metadata=<dict> so they survive."
             )
         else:
             use_moe_style = False

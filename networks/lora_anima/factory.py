@@ -284,19 +284,38 @@ def create_network_from_weights(
     unet,
     weights_sd=None,
     for_inference=False,
+    metadata: Optional[Dict[str, str]] = None,
     **kwargs,
 ):
-    file_metadata: Dict[str, str] = {}
+    # Metadata flows independently of the tensor-loading path. ``load_file()``
+    # discards safetensors ``__metadata__``, so a caller that pre-loads tensors
+    # (e.g. to filter to ``lora_unet_*``) and passes ``weights_sd=`` would
+    # otherwise lose the three-axis routing stamps (ss_use_moe_style /
+    # ss_route_per_layer / ss_router_source) and trip the "missing three-axis
+    # stamps" raise in ``LoRANetworkCfg.from_weights`` — pointing at the
+    # checkpoint when the real fault is the call site. Precedence for
+    # ``file_metadata``: explicit ``metadata=`` wins; else read from ``file``
+    # when it's a ``.safetensors`` path (regardless of whether ``weights_sd``
+    # was also supplied); else ``{}``.
+    file_metadata: Dict[str, str] = dict(metadata) if metadata else {}
     if weights_sd is None:
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
             from safetensors import safe_open
 
             weights_sd = load_file(file)
-            with safe_open(file, framework="pt") as f:
-                file_metadata = dict(f.metadata() or {})
+            if not file_metadata:
+                with safe_open(file, framework="pt") as f:
+                    file_metadata = dict(f.metadata() or {})
         else:
             weights_sd = torch.load(file, map_location="cpu")
+    elif file and not file_metadata and os.path.splitext(str(file))[1] == ".safetensors":
+        # Tensors supplied directly, but stamps can still be recovered from the
+        # on-disk file the caller named alongside them.
+        from safetensors import safe_open
+
+        with safe_open(file, framework="pt") as f:
+            file_metadata = dict(f.metadata() or {})
 
     # Strip torch.compile '_orig_mod_' from old checkpoint keys
     weights_sd = LoRANetwork._strip_orig_mod_keys(weights_sd)
@@ -435,6 +454,21 @@ def create_network_from_weights(
     # (3-D) is Hydra (shared lora_down.weight); both 3-D means StackedExperts.
     if not has_stacked_experts and hydra_module_names and not has_ortho_hydra:
         has_hydra = True
+
+    # Early de-footgun: MoE keys present but no metadata almost always means a
+    # caller pre-loaded tensors via ``load_file()`` (which drops __metadata__)
+    # and passed ``weights_sd=`` without ``file=`` / ``metadata=``. The three-
+    # axis stamps live only in __metadata__, so ``from_weights`` is about to
+    # raise an error that blames the checkpoint. Surface the real cause here.
+    if (has_hydra or has_ortho_hydra or has_stacked_experts) and not file_metadata:
+        logger.warning(
+            "MoE checkpoint keys detected but no safetensors metadata was "
+            "available — the three-axis routing stamps (ss_use_moe_style / "
+            "ss_route_per_layer / ss_router_source) live in __metadata__, which "
+            "load_file() drops. If you passed a pre-loaded weights_sd=, also "
+            "pass file=<path> or metadata=<dict> to create_network_from_weights "
+            "so the stamps survive; otherwise loading will fail."
+        )
 
     # has_hydra / has_ortho_hydra / has_stacked_experts win over for_inference:
     # the router is sample-dependent and can't be folded into a static-merge

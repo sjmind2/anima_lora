@@ -128,13 +128,22 @@ def parse_args():
 
 
 def find_sample_stems(dataset_dir, n, seed):
-    te_files = sorted(glob.glob(os.path.join(dataset_dir, "*_anima_te.safetensors")))
+    # Caches may sit flat in dataset_dir or one level deep in per-artist
+    # subdirs (post_image_dataset/lora/<artist>/...), so glob recursively.
+    te_files = sorted(
+        glob.glob(
+            os.path.join(dataset_dir, "**", "*_anima_te.safetensors"), recursive=True
+        )
+    )
     if not te_files:
         raise FileNotFoundError(f"no *_anima_te.safetensors found in {dataset_dir}")
     stems = []
     for te_path in te_files:
         base = os.path.basename(te_path).replace("_anima_te.safetensors", "")
-        npz = glob.glob(os.path.join(dataset_dir, f"{base}_*_anima.npz"))
+        # Pair the npz from the TE file's own directory.
+        npz = glob.glob(
+            os.path.join(os.path.dirname(te_path), f"{base}_*_anima.npz")
+        )
         if npz:
             stems.append((base, npz[0], te_path))
     if not stems:
@@ -309,7 +318,27 @@ def _input_gram(lx: torch.Tensor) -> torch.Tensor:
     return a2.transpose(0, 1) @ a2  # (r, r)
 
 
-def install_hooks(network, cap: Capture):
+def _find_org_linears(unet, modules):
+    """Map id(adapter module) → its wrapped DiT Linear.
+
+    ``LoRAModule.apply_to`` rebinds ``org_module.forward = self.forward`` (an
+    instance attribute on the Linear) and deletes the back-reference, so a
+    ``register_forward_pre_hook`` on the adapter module never fires — the DiT
+    calls the *Linear's* ``__call__``, which dispatches straight to the bound
+    ``forward`` without ever invoking the adapter module's own ``__call__``.
+    Recover each Linear by matching the bound method stashed in its ``__dict__``.
+    """
+    want = {id(m): m for m in modules}
+    out = {}
+    for sub in unet.modules():
+        fwd = sub.__dict__.get("forward")
+        owner = getattr(fwd, "__self__", None)
+        if owner is not None and id(owner) in want:
+            out[id(owner)] = sub
+    return out
+
+
+def install_hooks(network, cap: Capture, unet=None):
     """Wrap Hydra ``_compute_gate`` and pre-hook chimera-inference forwards.
 
     Returns (pools, restore) where pools maps a pool-key →
@@ -320,6 +349,9 @@ def install_hooks(network, cap: Capture):
 
     hydra = [m for m in network.modules() if isinstance(m, HydraLoRAModule)]
     chim = [m for m in network.modules() if isinstance(m, ChimeraHydraInferenceModule)]
+    # Chimera modules inject via the org Linear's rebound ``forward`` (see
+    # _find_org_linears), so the capture pre-hook must sit on the Linear.
+    org_linears = _find_org_linears(unet, chim) if (chim and unet is not None) else {}
     if not hydra and not chim:
         raise RuntimeError(
             "no HydraLoRAModule / ChimeraHydraInferenceModule found — checkpoint is "
@@ -375,28 +407,31 @@ def install_hooks(network, cap: Capture):
         register_pool(f"{m.lora_name}::content", m, "content", m.lora_up_c_weight)
         register_pool(f"{m.lora_name}::freq", m, "freq", m.lora_up_f_weight)
 
+        # ``mod`` is the chimera adapter module (carries the routing buffers /
+        # down-projections); the hook fires on its org Linear, whose first hook
+        # arg is the Linear, not ``mod`` — so reference ``mod`` by closure.
         def make_pre(mod):
             name = mod.lora_name
 
-            def pre_hook(module, inputs):
+            def pre_hook(_linear, inputs):
                 x = inputs[0]
-                x_lora = module._rebalance(x).float()
+                x_lora = mod._rebalance(x).float()
                 lx_c = torch.nn.functional.linear(
-                    x_lora, module.lora_down_c.weight.float()
+                    x_lora, mod.lora_down_c.weight.float()
                 )
                 lx_f = torch.nn.functional.linear(
-                    x_lora, module.lora_down_f.weight.float()
+                    x_lora, mod.lora_down_f.weight.float()
                 )
-                if module.use_global_content_router:
-                    pi_c = module._content_routing_weights
+                if mod.use_global_content_router:
+                    pi_c = mod._content_routing_weights
                     if pi_c.dim() == 1:
                         pi_c = pi_c.unsqueeze(0)
                     if pi_c.shape[0] == 1 and lx_c.shape[0] > 1:
                         pi_c = pi_c.expand(lx_c.shape[0], -1)
                     pi_c = pi_c.float()
                 else:
-                    pi_c = module._compute_content_gate(lx_c).float()  # (B, K_c)
-                pi_f = module._freq_routing_weights
+                    pi_c = mod._compute_content_gate(lx_c).float()  # (B, K_c)
+                pi_f = mod._freq_routing_weights
                 if pi_f.dim() == 1:
                     pi_f = pi_f.unsqueeze(0)
                 pi_f = pi_f.float().expand(pi_c.shape[0], -1)
@@ -405,7 +440,14 @@ def install_hooks(network, cap: Capture):
 
             return pre_hook
 
-        h = m.register_forward_pre_hook(make_pre(m))
+        org_linear = org_linears.get(id(m))
+        if org_linear is None:
+            logger.warning(
+                f"no org Linear found for chimera module {m.lora_name} — "
+                "skipping (its routing leverage will be absent from the report)"
+            )
+            continue
+        h = org_linear.register_forward_pre_hook(make_pre(m))
         restorers.append((h, "_handle", None))
 
     def restore():
@@ -473,18 +515,18 @@ def main():
     anima.to(device)
 
     logger.info(f"loading adapter from {args.lora_weight}")
-    lora_sd = {
-        k: v
-        for k, v in load_file(args.lora_weight).items()
-        if k.startswith("lora_unet_")
-    }
+    # Load via `file=` (not a pre-loaded `weights_sd=`) so the loader reads the
+    # safetensors metadata: the three-axis routing stamps (ss_use_moe_style /
+    # ss_route_per_layer / ss_router_source) live in `__metadata__`, which
+    # `load_file()` drops — passing a pre-loaded dict makes MoE checkpoints
+    # fail the three-axis stamp check in LoRANetworkCfg.from_weights.
     network, weights_sd = lora_anima.create_network_from_weights(
         multiplier=1.0,
-        file=None,
+        file=args.lora_weight,
         ae=None,
         text_encoders=[],
         unet=anima,
-        weights_sd=lora_sd,
+        weights_sd=None,
         for_inference=False,
     )
     network.apply_to([], anima, apply_text_encoder=False, apply_unet=True)
@@ -508,7 +550,7 @@ def main():
     logger.info(f"routing axes: {axes}")
 
     cap = Capture()
-    pools, restore = install_hooks(network, cap)
+    pools, restore = install_hooks(network, cap, anima)
 
     logger.info("running forward passes")
     n_forward = 0

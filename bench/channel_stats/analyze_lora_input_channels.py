@@ -412,6 +412,14 @@ def main():
 
     if args.lora_weight:
         logger.info(f"loading LoRA adapter from {args.lora_weight}")
+        # Read __metadata__ explicitly (load_file() drops it) and forward via
+        # metadata= — harmless for the plain/ortho LoRA this bench targets, and
+        # keeps the three-axis routing stamps alive should it ever be pointed
+        # at a MoE checkpoint.
+        from safetensors import safe_open
+
+        with safe_open(args.lora_weight, framework="pt") as f:
+            lora_metadata = dict(f.metadata() or {})
         lora_sd = load_file(args.lora_weight)
         lora_sd = {k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")}
         network, weights_sd = lora_anima.create_network_from_weights(
@@ -421,6 +429,7 @@ def main():
             text_encoders=[],
             unet=anima,
             weights_sd=lora_sd,
+            metadata=lora_metadata,
             for_inference=False,  # keep OrthoLoRAExpModule for T-LoRA
         )
         network.apply_to([], anima, apply_text_encoder=False, apply_unet=True)

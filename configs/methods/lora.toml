@@ -20,13 +20,13 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 96
-network_dim = 96
+network_alpha = 16
+network_dim = 16
 
-learning_rate = 1e-5
-max_train_epochs = 12
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+learning_rate = 1e-4
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -35,11 +35,11 @@ caption_dropout_rate = 0.1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-output_name = "anima_inv_half"
+output_name = "anima_hydra"
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0
 
-compile_mode = "full"
+# compile_mode = "full"
 # compile_inductor_mode = "reduce-overhead"
 
 channel_scaling_alpha = 0.5
@@ -53,24 +53,34 @@ use_ortho = true
 # Timestep mask
 
 use_timestep_mask = true
-min_rank = 32
+min_rank = 8
 alpha_rank_scale = 1.0
 
 
 # -------------
 # "shared_A" and route_per_layer=false -> hydralora
 
-# use_moe_style = "shared_A"
-# route_per_layer = true
-# router_source = "sigma"
+use_moe_style = "shared_A"
+route_per_layer = true
+router_source = "input"
+network_router_lr_scale = 10
 # router_source = "crossattn_emb"
 
-# sigma_feature_dim = 16
+fei_feature_dim = 2          # raw simplex (e_low, e_high)
+fei_sigma_low_div = 4.0      # σ_low = min(H_lat, W_lat) / 4 — 2026-05-13 dataset sweep
+fera_num_bands = 2
+fera_fecl_weight = 0.0
+
+sigma_feature_dim = 16
 # per_bucket_balance_weight = 0.3   # × balance_loss_weight, per-bucket term
 # num_sigma_buckets = 3
 # specialize_experts_by_sigma_buckets = true
 # sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
-# router_targets = ".*(mlp\\.layer[12])$" 
+router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
+
+num_experts = 4
+balance_loss_weight = 1e-7 # seems lr * 1/100 is proper
+balance_loss_warmup_ratio = 0.4
 
 # -------------
 # "independent_A" and route_per_layer=true -> fera
