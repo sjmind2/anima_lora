@@ -119,9 +119,16 @@ def spectral_expand(
     W_full: int,
     patch: int,
     gen: torch.Generator,
+    hf_scale: float = 1.0,
 ) -> tuple[torch.Tensor, float]:
     """Embed the current low-res DCT block into a larger grid, fill HF slots with
     σ-scaled noise, iDCT, scale by κ (Eq. iii) and align the timestep (Eq. 5–6).
+
+    ``hf_scale`` attenuates the fresh HF noise fill (paper prescription = 1.0).
+    It is the continuity↔detail knob the SPD∘Spectrum frontier probe sweeps:
+    γ→0 injects no fresh HF (max LL-feature continuity across the seam, but an
+    off-manifold under-detailed state); γ=1 is the on-manifold paper default.
+    Default 1.0 ⇒ bit-for-bit identical to the sampler/training path.
 
     Returns (expanded (B,C,1,h_hi,w_hi) latent, sigma_aligned).
     """
@@ -144,7 +151,7 @@ def spectral_expand(
     mask = torch.zeros_like(xi_new)
     mask[:, :, h_lo:, :] = 1.0
     mask[:, :, :h_lo, w_lo:] = 1.0
-    xi_new = xi_new + mask * sigma_val * noise
+    xi_new = xi_new + mask * sigma_val * noise * hf_scale
 
     x4_new = idct2(xi_new) * kappa
     return x4_new.unsqueeze(2).to(x5.dtype), float(sigma_aligned)

@@ -95,7 +95,7 @@ def _spd_flags() -> list[str]:
         "0.5",
         "1.0",
         "--spd_transition_sigmas",
-        "0.7",
+        "0.5",
     ]
 
 

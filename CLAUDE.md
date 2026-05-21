@@ -112,7 +112,7 @@ Each method has a deep-dive doc; the prose below is one-line orientation plus th
 | Method | What it is | Gotcha / pointer |
 |---|---|---|
 | **Spectrum** | Training-free speedup via Chebyshev feature forecasting (`--spectrum`). Cached steps skip all blocks; `final_layer` pre-hook captures outputs. | `docs/methods/spectrum.md` |
-| **SPD** | Training-free multi-resolution inference (`--spd`): early steps at low res, spectral noise-expansion handoff to full res. Sampler-level runner in `networks/spd.py`, registered like Spectrum. | v0 = Euler-only, no DCW/SMC/Spectrum compose, single-late `0.5→1.0 @ σ0.7` default. `bench/spd/plan.md` Phase 3, `docs/proposal/spd_finetune_lora.md` (Case B). |
+| **SPD** | Training-free multi-resolution inference (`--spd`): early steps at low res, spectral noise-expansion handoff to full res. Sampler-level runner in `networks/spd.py`, registered like Spectrum. | v0 = Euler-only, no DCW/SMC/Spectrum compose, single-late `0.5→1.0 @ σ0.7` default. `docs/experimental/spd.md`; `bench/spd/plan.md` Phase 3, `docs/proposal/spd_finetune_lora.md` (Case B). |
 | **DCW** | Training-free SNR-t bias correction at the sampler boundary; composes with everything. Scalar (`--dcw`) or v4 learnable (`--dcw_v4 auto`). | **Bias direction is (CFG × aspect)-dependent** — shipped scalar `−0.015` is CFG=1-only and wrong-sign on CFG=4 non-square. `docs/methods/dcw.md` |
 | **SMC-CFG** | Training-free α-adaptive sliding-mode CFG correction in velocity space (λ=5, α=0.2). | Paper's fixed k was ~14× off; ships `sign()` only (tanh ε removed). `docs/methods/smc_cfg.md` |
 | **Mod guidance** | Text-conditioned AdaLN via learned `pooled_text_proj` MLP, distilled with `make distill-mod`. | `docs/methods/mod-guidance.md` |

@@ -601,10 +601,30 @@ def main():
         if (step + 1) % log_interval == 0:
             avg = running / log_interval
             running = 0.0
-            progress.set_postfix(loss=f"{avg:.5f}", stage=stage_idx, lr=f"{cur_lr:.2e}")
+            with torch.no_grad():
+                up_sq = 0.0
+                down_sq = 0.0
+                for name, p in network.named_parameters():
+                    if not p.requires_grad:
+                        continue
+                    s = p.detach().float().pow(2).sum().item()
+                    if "lora_up" in name:
+                        up_sq += s
+                    elif "lora_down" in name:
+                        down_sq += s
+                up_norm = up_sq**0.5
+                down_norm = down_sq**0.5
+            progress.set_postfix(
+                loss=f"{avg:.5f}",
+                stage=stage_idx,
+                lr=f"{cur_lr:.2e}",
+                up=f"{up_norm:.3f}",
+            )
             if writer is not None:
                 writer.add_scalar("train/loss", avg, step + 1)
                 writer.add_scalar("train/lr", cur_lr, step + 1)
+                writer.add_scalar("train/lora_up_norm", up_norm, step + 1)
+                writer.add_scalar("train/lora_down_norm", down_norm, step + 1)
                 writer.add_scalar(f"train/loss_stage{stage_idx}", loss_v, step + 1)
 
         if (step + 1) % save_every == 0 or (step + 1) == iterations:

@@ -182,10 +182,17 @@ Tier-2 method (see `CONTRIBUTING.md`). Engineering notes:
   δ-optimal schedule from Phase 1's `P_ω`, timestep alignment. Sampler-level, so
   it should compose with LoRA / T-LoRA (token-count-agnostic per-Linear).
 - CLI: `--spd --spd_delta 0.01 --spd_scales 2`. Wire into `inference.py`.
-- **Composition study:** SPD (token-reduction) is orthogonal to Spectrum
-  (block-skipping on cached steps) and Turbo (few-step). The real value question
-  is SPD∘Spectrum and SPD-vs-Turbo at matched quality — not SPD vs a naive
-  50-step baseline. Bench both.
+- **Composition study:** SPD (token-reduction) and Spectrum (block-skipping) are
+  orthogonal on the *FLOP axis* but **redundant on the trajectory-region axis** —
+  both mine the smooth early steps. A naive compose breaks (Spectrum's constant-shape
+  forecaster buffer can't cross the resolution handoff; re-warm lands in the expensive
+  full-res phase) and likely lands *below* Spectrum alone. The principled version —
+  forecast the feature's **LL DCT-coefficient band** (continuous across the handoff)
+  and actual-forward only the HF slots SPD adds — is written up as a gated proposal:
+  **`docs/proposal/spd_spectrum_compose.md`** (Phase 0 = naive-floor + feature-LL-DCT
+  continuity precondition; the two likely killers are R1 feature discontinuity and R2
+  "HF coefficients still cost a full block forward"). SPD-vs-Turbo at matched quality
+  is a separate line. Don't bench SPD vs a naive 50-step baseline — bench it composed.
 - Bench: `bench/spd/bench_speed_quality.py` — speedup + ImageReward/CLIP-IQA/CMMD
   at S∈{2,3}, δ sweep, vs baseline / Spectrum / Spectrum∘SPD. Standard envelope.
 

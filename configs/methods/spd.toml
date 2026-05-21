@@ -27,8 +27,8 @@ seed = 42
 # and T-LoRA's timestep mask interacts with the per-stage t-routing in ways to
 # study separately (proposal "Plain LoRA for v0"). alpha = rank (scale 1.0),
 # matching the LoRA-family convention.
-rank = 48
-alpha = 48
+rank = 64
+alpha = 64
 attn_mode = "flash"
 
 # SPD schedule — the segment geometry this LoRA learns and MUST infer with.
@@ -45,7 +45,7 @@ label = "single_late_0.5_sigma0.5"
 sigma_jitter = 0.0
 
 [optim]
-lr = 1e-4
+lr = 5e-5
 weight_decay = 0.0
 grad_clip = 1.0
 warmup = 0.02            # ratio of iterations (int >=1 → absolute steps)
