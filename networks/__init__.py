@@ -29,6 +29,9 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type
 from networks.lora_modules import (
     ChimeraHydraLoRAModule,
     HydraLoRAModule,
+    LohaModule,
+    LoConModule,
+    LokrModule,
     LoRAModule,
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
@@ -131,6 +134,13 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     "repa_hidden_dim",
     "repa_encoder_dim",
     "repa_lr_scale",
+    # LyCORIS variant selector (loha / locon / lokr)
+    "network_type",
+    # LyCORIS per-variant knobs
+    "use_tucker",
+    "decompose_both",
+    "lokr_factor",
+    "full_matrix",
 )
 
 
@@ -268,6 +278,24 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         kwarg_flags=_HYDRA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
+    "loha": NetworkSpec(
+        name="loha",
+        module_class=LohaModule,
+        save_variant="standard",
+        kwarg_flags=("use_tucker",),
+    ),
+    "locon": NetworkSpec(
+        name="locon",
+        module_class=LoConModule,
+        save_variant="standard",
+        kwarg_flags=("use_tucker",),
+    ),
+    "lokr": NetworkSpec(
+        name="lokr",
+        module_class=LokrModule,
+        save_variant="standard",
+        kwarg_flags=("use_tucker", "decompose_both", "lokr_factor", "full_matrix"),
+    ),
 }
 
 
@@ -314,6 +342,32 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     """
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
     use_chimera = _parse_bool_flag(kwargs, "use_chimera_hydra")
+
+    network_type = kwargs.get("network_type", None)
+    if network_type is not None:
+        network_type = str(network_type).strip().lower()
+        if network_type not in ("lora", "loha", "locon", "lokr"):
+            raise ValueError(
+                f"network_type={network_type!r}: expected 'lora', 'loha', 'locon', or 'lokr'."
+            )
+        if network_type in ("loha", "locon", "lokr"):
+            if use_ortho:
+                raise ValueError(
+                    f"network_type={network_type!r} is not compatible with use_ortho=True."
+                )
+            if use_chimera:
+                raise ValueError(
+                    f"network_type={network_type!r} is not compatible with use_chimera_hydra=True."
+                )
+            raw_moe = kwargs.get("use_moe_style")
+            if raw_moe and str(raw_moe).strip().lower() not in ("false", "none", ""):
+                raise ValueError(
+                    f"network_type={network_type!r} is not compatible with MoE routing."
+                )
+            return NETWORK_REGISTRY[network_type]
+        if network_type == "lora":
+            pass
+
     if use_chimera:
         return NETWORK_REGISTRY["chimera_hydra"]
 

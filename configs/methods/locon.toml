@@ -1,0 +1,16 @@
+# LOCON (Enhanced LoRA with Tucker decomposition).
+# Same as LoRA for Linear layers; Tucker core for Conv2d with kernel > 1.
+
+network_type = "locon"
+network_dim = 32
+network_alpha = 32
+learning_rate = 2e-5
+max_train_epochs = 4
+save_every_n_epochs = 2
+checkpointing_epochs = 2
+
+use_tucker = true
+
+# use_ortho = true
+# use_timestep_mask = true
+# min_rank = 8

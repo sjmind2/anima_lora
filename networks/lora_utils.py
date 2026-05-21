@@ -223,6 +223,64 @@ def load_safetensors_with_lora(
                         found = True
                         break
                 if not found:
+                    # Check for LyCORIS LOHA keys
+                    lora_name_l = prefix + lora_name_without_prefix.replace(".", "_")
+                    hada_w1a_key = lora_name_l + ".hada_w1_a"
+                    hada_w1b_key = lora_name_l + ".hada_w1_b"
+                    hada_w2a_key = lora_name_l + ".hada_w2_a"
+                    hada_w2b_key = lora_name_l + ".hada_w2_b"
+                    if all(k in lora_weight_keys for k in (hada_w1a_key, hada_w1b_key, hada_w2a_key, hada_w2b_key)):
+                        w1a = lora_sd[hada_w1a_key].to(calc_device).float()
+                        w1b = lora_sd[hada_w1b_key].to(calc_device).float()
+                        w2a = lora_sd[hada_w2a_key].to(calc_device).float()
+                        w2b = lora_sd[hada_w2b_key].to(calc_device).float()
+                        alpha_key = lora_name_l + ".alpha"
+                        alpha = lora_sd.get(alpha_key, w1a.size(-1) if w1a.dim() == 2 else w1a.size(0))
+                        dim = w1a.size(-1) if w1a.dim() == 2 else w1a.size(0)
+                        scale = float(alpha) / dim
+                        delta = multiplier * ((w1a @ w1b) * (w2a @ w2b)) * scale
+                        if delta.shape != model_weight.shape:
+                            delta = delta.view(model_weight.shape)
+                        model_weight = model_weight + delta
+                        for k in (hada_w1a_key, hada_w1b_key, hada_w2a_key, hada_w2b_key, alpha_key):
+                            lora_weight_keys.discard(k)
+                        continue
+
+                    # Check for LyCORIS LOKR keys
+                    lokr_w1_key = lora_name_l + ".lokr_w1"
+                    lokr_w1a_key = lora_name_l + ".lokr_w1_a"
+                    lokr_w1b_key = lora_name_l + ".lokr_w1_b"
+                    lokr_w2_key = lora_name_l + ".lokr_w2"
+                    lokr_w2a_key = lora_name_l + ".lokr_w2_a"
+                    lokr_w2b_key = lora_name_l + ".lokr_w2_b"
+                    has_lokr = (lokr_w1_key in lora_weight_keys or lokr_w1a_key in lora_weight_keys)
+                    if has_lokr:
+                        w1 = lora_sd.get(lokr_w1_key)
+                        if w1 is None:
+                            w1 = lora_sd[lokr_w1a_key].to(calc_device).float() @ lora_sd[lokr_w1b_key].to(calc_device).float()
+                        else:
+                            w1 = w1.to(calc_device).float()
+                        w2 = lora_sd.get(lokr_w2_key)
+                        if w2 is None:
+                            w2a = lora_sd[lokr_w2a_key].to(calc_device).float()
+                            w2b = lora_sd[lokr_w2b_key].to(calc_device).float()
+                            w2 = w2a @ w2b
+                        else:
+                            w2 = w2.to(calc_device).float()
+                        alpha_key = lora_name_l + ".alpha"
+                        alpha = lora_sd.get(alpha_key, 1.0)
+                        dim = w1.size(-1) if w1.dim() >= 2 else 1
+                        scale = float(alpha) / max(dim, 1)
+                        from networks.lora_modules.lycoris_functional import make_kron
+                        delta = multiplier * make_kron(w1, w2, scale)
+                        if delta.shape != model_weight.shape:
+                            delta = delta.view(model_weight.shape)
+                        model_weight = model_weight + delta
+                        for k in [lokr_w1_key, lokr_w1a_key, lokr_w1b_key,
+                                   lokr_w2_key, lokr_w2a_key, lokr_w2b_key, alpha_key]:
+                            lora_weight_keys.discard(k)
+                        continue
+
                     # Fallback: check for old unfused LoRA keys on fused projections
                     fused_delta = _try_merge_unfused_lora(
                         lora_name_without_prefix,

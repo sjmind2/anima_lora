@@ -359,6 +359,8 @@ def create_network_from_weights(
     has_stacked_experts = False
     hydra_num_experts = 0
     has_reft = False
+    has_lycoris_loha = False
+    has_lycoris_lokr = False
     reft_dim = None
     reft_block_indices: set[int] = set()
     # Per-module hydra flag: which lora_names were trained as MoE (Hydra) vs
@@ -459,6 +461,16 @@ def create_network_from_weights(
         if "llm_adapter" in lora_name:
             train_llm_adapter = True
 
+        if key.endswith(".hada_w1_a") or key.endswith(".hada_w1_b"):
+            has_lycoris_loha = True
+            modules_dim[lora_name] = lora_dim if lora_dim else 4
+        if key.endswith(".lokr_w1") or key.endswith(".lokr_w1_a"):
+            has_lycoris_lokr = True
+        if key.endswith(".hada_w1_a") and value.dim() == 2:
+            modules_dim[lora_name] = value.size(1)
+        elif key.endswith(".hada_w1_a") and value.dim() == 1:
+            modules_dim[lora_name] = value.size(0)
+
     # Finalize the MoE shape now that the full scan is done. A module that
     # has only ``lora_up_weight`` (3-D) but no matching ``lora_down_weight``
     # (3-D) is Hydra (shared lora_down.weight); both 3-D means StackedExperts.
@@ -476,6 +488,21 @@ def create_network_from_weights(
         module_class = spec.module_class
     elif has_hydra:
         spec = NETWORK_REGISTRY["hydra"]
+        module_class = spec.module_class
+
+    # LyCORIS variant detection from checkpoint keys / metadata.
+    # LOHA uses hada_w1_a/hada_w1_b/hada_w2_a/hada_w2_b keys.
+    # LOKR uses lokr_w1/lokr_w1_a/lokr_w2_a keys.
+    # LOCON uses standard lora_down/lora_up but is stamped via ss_network_type.
+    _network_type_meta = str(file_metadata.get("ss_network_type", "")).strip().lower()
+    if has_lycoris_loha:
+        spec = NETWORK_REGISTRY["loha"]
+        module_class = spec.module_class
+    elif has_lycoris_lokr:
+        spec = NETWORK_REGISTRY["lokr"]
+        module_class = spec.module_class
+    elif _network_type_meta == "locon":
+        spec = NETWORK_REGISTRY["locon"]
         module_class = spec.module_class
 
     # Legacy σ-router refusal: the additive-bias sigma_mlp design is gone;

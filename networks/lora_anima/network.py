@@ -25,6 +25,9 @@ from networks.lora_modules import (
     ChimeraHydraInferenceModule,
     ChimeraHydraLoRAModule,
     HydraLoRAModule,
+    LohaModule,
+    LoConModule,
+    LokrModule,
     LoRAModule,
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
@@ -596,6 +599,13 @@ class LoRANetwork(torch.nn.Module):
                 extra_kwargs = {}
                 if effective_module_class == OrthoLoRAModule:
                     pass  # no extra kwargs — SVD init reads from org_module directly
+                elif effective_module_class in (LohaModule, LoConModule):
+                    extra_kwargs["use_tucker"] = cfg.use_tucker
+                elif effective_module_class == LokrModule:
+                    extra_kwargs["use_tucker"] = cfg.use_tucker
+                    extra_kwargs["decompose_both"] = cfg.decompose_both
+                    extra_kwargs["lokr_factor"] = cfg.lokr_factor
+                    extra_kwargs["full_matrix"] = cfg.full_matrix
                 elif effective_module_class == ChimeraHydraLoRAModule:
                     # Pool split is the chimera's only constructor surface;
                     # σ/FEI feature dims are 0 by design (the network-level
@@ -2775,6 +2785,9 @@ class LoRANetwork(torch.nn.Module):
             metadata["ss_chimera_freq_router_layer_norm"] = (
                 "true" if self.cfg.freq_router_layer_norm else "false"
             )
+
+        if self.cfg.network_type and self.cfg.network_type != "lora":
+            metadata["ss_network_type"] = self.cfg.network_type
 
         state_dict = self.state_dict()
         # Drop training-only auxiliary heads from the on-disk artifact. ``repa_head``

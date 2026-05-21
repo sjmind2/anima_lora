@@ -486,7 +486,7 @@ def preprocess_guide() -> str:
 # (router is layer-local / hook-only / not a weight delta) — render the
 # "not mergeable" callout above their guide.
 _NOT_MERGEABLE = frozenset({"postfix", "hydralora", "reft", "fera"})
-_KNOWN_METHODS = frozenset({"lora", "tlora", "postfix", "hydralora", "reft", "fera"})
+_KNOWN_METHODS = frozenset({"lora", "tlora", "postfix", "hydralora", "reft", "fera", "loha", "locon", "lokr"})
 
 
 def method_guide(method: str) -> str | None:

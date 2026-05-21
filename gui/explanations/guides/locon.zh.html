@@ -1,0 +1,5 @@
+<h2>LOCON</h2>
+<p>带Tucker分解的增强LoRA。</p>
+<p><b>Linear层</b>: 与标准LoRA相同 — ΔW = up @ down × scale</p>
+<p><b>Conv2d层</b>: 为kernel > 1的卷积层增加Tucker核心张量 <code>lora_mid</code>，更高效地分解卷积。</p>
+<p>兼容ComfyUI的LyCORIS加载器。使用 <code>use_tucker=true</code> 启用Conv层的Tucker分解。</p>

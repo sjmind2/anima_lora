@@ -177,6 +177,13 @@ class LoRANetworkCfg:
     lora_dim: int = 4
     alpha: float = 1.0
     module_class: Type = LoRAModule
+    # LyCORIS variant selector: "lora" (default), "loha", "locon", "lokr"
+    network_type: str = "lora"
+    # LyCORIS per-variant knobs
+    use_tucker: bool = False
+    decompose_both: bool = False
+    lokr_factor: int = -1
+    full_matrix: bool = False
     # warm-start path supplies these from the checkpoint; fresh path leaves None
     modules_dim: Optional[Dict[str, int]] = None
     modules_alpha: Optional[Dict[str, float]] = None
@@ -579,10 +586,22 @@ class LoRANetworkCfg:
 
         verbose = _as_bool(kwargs.get("verbose"))
 
+        network_type_raw = kwargs.get("network_type", "lora")
+        network_type = str(network_type_raw).strip().lower() if network_type_raw else "lora"
+        use_tucker = _as_bool(kwargs.get("use_tucker"))
+        decompose_both = _as_bool(kwargs.get("decompose_both"))
+        lokr_factor = int(kwargs.get("lokr_factor", -1))
+        full_matrix = _as_bool(kwargs.get("full_matrix"))
+
         return cls(
             lora_dim=network_dim,
             alpha=network_alpha,
             module_class=module_class,
+            network_type=network_type,
+            use_tucker=use_tucker,
+            decompose_both=decompose_both,
+            lokr_factor=lokr_factor,
+            full_matrix=full_matrix,
             train_llm_adapter=train_llm_adapter,
             exclude_patterns=exclude_patterns,
             include_patterns=include_patterns,
