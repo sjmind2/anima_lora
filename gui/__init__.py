@@ -41,6 +41,9 @@ CUSTOM_VARIANTS_DIR = GUI_METHODS_DIR / "custom"
 
 _METHOD_ORDER = (
     "lora",
+    "locon",
+    "loha",
+    "lokr",
     "tlora",
     "hydralora",
     "reft",

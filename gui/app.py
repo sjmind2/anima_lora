@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
         # the experimental toggle.
         self.tabs = QTabWidget()
         self.tabs.addTab(
-            ConfigTab(methods=["lora", "tlora", "hydralora", "reft"]),
+            ConfigTab(methods=["lora", "locon", "loha", "lokr", "tlora", "hydralora", "reft"]),
             t("tab_config"),
         )
         self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))

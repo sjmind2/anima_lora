@@ -1,0 +1,16 @@
+# LOHA (Low-Rank Hadamard Product adaptation).
+# ΔW = (A@B) ⊙ (C@D) × scale. Effective rank = dim² with 2× parameters.
+
+network_type = "loha"
+network_dim = 8
+network_alpha = 8
+learning_rate = 2e-5
+max_train_epochs = 4
+save_every_n_epochs = 2
+checkpointing_epochs = 2
+
+use_tucker = true
+
+# use_ortho = true
+# use_timestep_mask = true
+# min_rank = 8

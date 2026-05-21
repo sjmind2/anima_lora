@@ -1,0 +1,5 @@
+<h2>LOHA</h2>
+<p>Low-Rank Hadamard Product adaptation.</p>
+<p><b>Formula</b>: ΔW = (A@B) ⊙ (C@D) × scale</p>
+<p>The Hadamard (element-wise) product of two low-rank matrices gives an effective rank of <code>dim²</code> with only <code>2×dim×(M+N)</code> parameters — significantly more expressive than standard LoRA at the same parameter budget.</p>
+<p><b>Tip</b>: Use <code>network_dim=8</code> (effective rank 64) as a starting point. Increase to 16 for higher capacity.</p>
