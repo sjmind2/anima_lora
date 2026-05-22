@@ -34,6 +34,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from library.log import setup_logging
 from library.training.method_adapter import (
@@ -664,47 +665,70 @@ class SoftTokensMethodAdapter(MethodAdapter):
         neg = neg.to(device)  # (B, k, S, D)
         k = neg.shape[1]
 
-        v_pos = primary.model_pred.squeeze(2)  # (B, C, H, W)
+        v_pos = primary.model_pred.squeeze(2)  # (B, C, H, W) — live anchor graph
         # Rectified-flow velocity target — same as train.py's primary target.
         v_target = primary.noise - primary.latents  # (B, C, H, W)
         timesteps = primary.timesteps
         base_kw = dict(primary.forward_kwargs)
 
-        # Snapshot the anchor's per-step splice state so the primary forward's
-        # buffer is restored after we re-prime it per negative. (The splice is
-        # captured into checkpoint inputs at forward time, so this is defensive
-        # — it keeps the live network state matching the primary forward.)
+        # Snapshot the anchor's per-step splice state. The eager (value) pass of
+        # each checkpointed negative below mutates the per-step buffers, so we
+        # restore the anchor's afterwards. (The anchor's own autograd graph holds
+        # tensor *references*, so it is unaffected by these attribute writes —
+        # this restore just keeps the live network state coherent.)
         anchor_tokens = net._step_layer_tokens
         anchor_seqlens = net._step_seqlens
 
-        v_neg_list = []
-        for j in range(k):
-            neg_j = neg[:, j].to(dtype=ce_dtype)  # (B, S, D)
-            # Cached crossattn_emb is zero-padded past the real text length
-            # (the LLM adapter zeroes padding positions), so non-zero rows give
-            # the per-sample sequence length the front_of_padding splice needs.
-            seqlens = (neg_j.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
-            # Re-prime the splice for this negative (same timesteps → identical
-            # soft tokens; only the seqlens differ). Returns crossattn_emb
-            # unchanged — the per-block hooks splice during the forward.
-            ce = net.append_postfix(neg_j, seqlens, timesteps=timesteps)
-            kw_j = dict(base_kw)
-            if "pooled_text_override" in kw_j:
-                kw_j["pooled_text_override"] = neg_j.max(dim=1).values
-            v = primary.anima_call(
+        # ── Gradient caching (your "grad-accum across the contrastive forwards")
+        # The InfoNCE coupling is a tiny head over (B,C,H,W) velocities, but each
+        # negative's velocity comes from a full frozen-DiT forward. Holding all
+        # k+1 activation graphs at once is (k+1)× peak and OOMs a 16GB card even
+        # at k=1. So we never build the negative graphs eagerly: each negative
+        # forward is wrapped in activation checkpointing, so its graph is
+        # *recomputed one at a time during backward* — peak stays at a single DiT
+        # forward regardless of k. (Plain LoRA at any rank fits one forward, which
+        # is why rank never OOMs — rank touches params, not activations.)
+        #
+        # The splice is mutable network state (`_step_layer_tokens`, set by
+        # `append_postfix`, read by the per-block hooks), so the re-prime MUST run
+        # *inside* the checkpointed callable: otherwise the backward recompute
+        # would read whatever negative/anchor state is live at backward time and
+        # splice the wrong tokens. Re-priming inside also keeps the param→token
+        # graph (`self.tokens` → `_step_layer_tokens`) intact through recompute,
+        # so gradient still reaches the soft tokens.
+        def _neg_velocity(neg_j: torch.Tensor) -> torch.Tensor:
+            def run(nmi, ts, neg_emb, pm):
+                # Cached crossattn_emb is zero-padded past the real text length
+                # (the LLM adapter zeroes padding positions), so non-zero rows
+                # give the per-sample seqlen the front_of_padding splice needs.
+                seqlens = (neg_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
+                # Returns crossattn_emb unchanged — the per-block hooks splice
+                # during the forward off the buffer this call primes.
+                ce = net.append_postfix(neg_emb, seqlens, timesteps=ts)
+                kw_j = dict(base_kw)
+                if "pooled_text_override" in kw_j:
+                    kw_j["pooled_text_override"] = neg_emb.max(dim=1).values
+                return primary.anima_call(
+                    nmi, ts, ce, padding_mask=pm, **kw_j
+                ).squeeze(2)
+
+            return checkpoint(
+                run,
                 primary.noisy_model_input,
                 timesteps,
-                ce,
-                padding_mask=primary.padding_mask,
-                **kw_j,
+                neg_j,
+                primary.padding_mask,
+                use_reentrant=False,
             )
-            v_neg_list.append(v.squeeze(2))
 
-        # Restore anchor splice state.
+        v_neg = torch.stack(
+            [_neg_velocity(neg[:, j].to(dtype=ce_dtype)) for j in range(k)], dim=1
+        )  # (B, k, C, H, W)
+
+        # Restore anchor splice state (checkpoint ran each negative forward
+        # eagerly to produce its value, mutating the per-step buffers).
         net._step_layer_tokens = anchor_tokens
         net._step_seqlens = anchor_seqlens
-
-        v_neg = torch.stack(v_neg_list, dim=1)  # (B, k, C, H, W)
 
         # jaccard mode: subtract α·s from each negative logit (s = caption
         # tag-overlap surfaced by the dataset). No-op for shuffled / hard.
