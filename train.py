@@ -1214,97 +1214,60 @@ class AnimaTrainer:
         self,
         args,
         accelerator: Accelerator,
-        unet,
-        vae,
         text_encoders,
         dataset: DatasetGroup,
-        weight_dtype,
     ):
-        if args.cache_text_encoder_outputs:
-            if text_encoders[0] is None:
-                # TE skipped at load time: every output is already cached and
-                # nothing needs live encoding. Run the cache pass with no model
-                # to populate ImageInfo.text_encoder_outputs_npz (forms no
-                # batches), then return without touching the GPU / LLM adapter.
-                dataset.new_cache_text_encoder_outputs([None], accelerator)
-                accelerator.wait_for_everyone()
-                return
+        if not args.cache_text_encoder_outputs:
+            # Live-encoding mode (e.g. IP-Adapter cache_text_encoder_outputs=false):
+            # move the text encoder to device for per-step encoding.
+            text_encoders[0].to(accelerator.device)
+            return
 
-            org_vae_device = None
-            if not args.lowram and vae is not None:
-                # We cannot move DiT to CPU because of block swap, so only move VAE
-                logger.info("move vae to cpu to save memory")
-                org_vae_device = vae.device
-                vae.to("cpu")
-                clean_memory_on_device(accelerator.device)
+        # With caching on, the on-disk cache is guaranteed complete (asserted in
+        # train(), including the LLM adapter's crossattn_emb outputs, which
+        # preprocess writes). The dataset thus never needs encoding here — run
+        # the pass with no model purely to populate
+        # ImageInfo.text_encoder_outputs_npz (forms no batches).
+        dataset.new_cache_text_encoder_outputs([None], accelerator)
 
+        # The text encoder is in memory only to encode sample prompts (TE
+        # training is mutually exclusive with caching). It is None when no
+        # sample prompts are configured — nothing left to do.
+        if text_encoders[0] is not None and args.sample_prompts is not None:
+            logger.info(
+                f"cache Text Encoder outputs for sample prompts: {args.sample_prompts}"
+            )
             logger.info("move text encoder to gpu")
             text_encoders[0].to(accelerator.device)
 
-            llm_adapter = None
-            models_for_cache = text_encoders
-            if getattr(args, "cache_llm_adapter_outputs", False):
-                logger.info("Loading LLM adapter for caching outputs...")
-                llm_adapter = anima_utils.load_llm_adapter(
-                    args.pretrained_model_name_or_path,
-                    args.llm_adapter_path,
-                    dtype=weight_dtype,
-                    device=accelerator.device,
-                )
-                models_for_cache = [text_encoders[0], llm_adapter]
+            tokenize_strategy = text_strategies.TokenizeStrategy.get_strategy()
+            text_encoding_strategy = text_strategies.TextEncodingStrategy.get_strategy()
 
-            with accelerator.autocast():
-                dataset.new_cache_text_encoder_outputs(models_for_cache, accelerator)
-
-            # cache sample prompts
-            if args.sample_prompts is not None:
-                logger.info(
-                    f"cache Text Encoder outputs for sample prompts: {args.sample_prompts}"
-                )
-
-                tokenize_strategy = text_strategies.TokenizeStrategy.get_strategy()
-                text_encoding_strategy = (
-                    text_strategies.TextEncodingStrategy.get_strategy()
-                )
-
-                prompts = train_util.load_prompts(args.sample_prompts)
-                sample_prompts_te_outputs = {}
-                with accelerator.autocast(), torch.no_grad():
-                    for prompt_dict in prompts:
-                        for p in [
-                            prompt_dict.get("prompt", ""),
-                            prompt_dict.get("negative_prompt", ""),
-                        ]:
-                            if p not in sample_prompts_te_outputs:
-                                logger.info(f"  cache TE outputs for: {p}")
-                                tokens_and_masks = tokenize_strategy.tokenize(p)
-                                sample_prompts_te_outputs[p] = (
-                                    text_encoding_strategy.encode_tokens(
-                                        tokenize_strategy,
-                                        text_encoders,
-                                        tokens_and_masks,
-                                    )
+            prompts = train_util.load_prompts(args.sample_prompts)
+            sample_prompts_te_outputs = {}
+            with accelerator.autocast(), torch.no_grad():
+                for prompt_dict in prompts:
+                    for p in [
+                        prompt_dict.get("prompt", ""),
+                        prompt_dict.get("negative_prompt", ""),
+                    ]:
+                        if p not in sample_prompts_te_outputs:
+                            logger.info(f"  cache TE outputs for: {p}")
+                            tokens_and_masks = tokenize_strategy.tokenize(p)
+                            sample_prompts_te_outputs[p] = (
+                                text_encoding_strategy.encode_tokens(
+                                    tokenize_strategy,
+                                    text_encoders,
+                                    tokens_and_masks,
                                 )
-                self.sample_prompts_te_outputs = sample_prompts_te_outputs
+                            )
+            self.sample_prompts_te_outputs = sample_prompts_te_outputs
 
-            accelerator.wait_for_everyone()
-
-            if llm_adapter is not None:
-                logger.info("move LLM adapter back to cpu")
-                llm_adapter.to("cpu")
-
-            # move text encoder back to cpu
             logger.info("move text encoder back to cpu")
             text_encoders[0].to("cpu")
-
-            if not args.lowram and vae is not None and org_vae_device is not None:
-                logger.info("move vae back to original device")
-                vae.to(org_vae_device)
-
             clean_memory_on_device(accelerator.device)
-        else:
-            # move text encoder to device for encoding during training/validation
-            text_encoders[0].to(accelerator.device)
+
+        accelerator.wait_for_everyone()
 
     # endregion
 
@@ -1930,10 +1893,13 @@ class AnimaTrainer:
                 text_encoder_outputs_caching_strategy
             )
 
-        # Decide whether the heavy encoders are actually needed. When latents
-        # / TE outputs are fully cached on disk and nothing else needs them, we
-        # skip loading them entirely (saves the disk read, RAM, and the
-        # GPU round-trip during the caching pass).
+        # Decide whether the heavy encoders are actually needed. When caching is
+        # enabled the caches MUST already be complete on disk (run `make
+        # preprocess` first) — train.py no longer encodes missing latents / TE
+        # outputs on the fly. With complete caches and nothing else needing them
+        # we skip loading the encoders entirely (saves the disk read, RAM, and
+        # the GPU round-trip). `cache_latents = false` (e.g. IP-Adapter) is a
+        # separate, explicit live-encoding mode, not a fallback.
         sampling_enabled = bool(
             args.sample_prompts
             and (
@@ -1949,37 +1915,40 @@ class AnimaTrainer:
         def _te_complete(group):
             return group is None or group.is_text_encoder_outputs_cache_complete()
 
-        latents_complete = (
-            cache_latents
-            and _latents_complete(train_dataset_group)
+        if cache_latents and not (
+            _latents_complete(train_dataset_group)
             and _latents_complete(val_dataset_group)
-        )
+        ):
+            raise RuntimeError(
+                "Latent cache is incomplete. train.py requires a completed "
+                "preprocess pass — run `make preprocess` (or set "
+                "cache_latents = false for live VAE encoding)."
+            )
+
+        if args.cache_text_encoder_outputs and not (
+            _te_complete(train_dataset_group) and _te_complete(val_dataset_group)
+        ):
+            raise RuntimeError(
+                "Text-encoder cache is incomplete. train.py requires a completed "
+                "preprocess pass — run `make preprocess` (or set "
+                "cache_text_encoder_outputs = false for live encoding)."
+            )
+
         # CMMD validation generates samples and decodes them through the VAE
         # (see library/training/validation.py). It reads cached TE outputs, so
         # it needs the VAE but not the text encoder.
         cmmd_validation = val_dataset_group is not None and getattr(
             args, "use_cmmd", True
         )
-        # VAE: needed to encode missing latents, to decode training samples, or
-        # to decode CMMD validation samples.
-        vae_needed = (
-            (not cache_latents)
-            or (not latents_complete)
-            or sampling_enabled
-            or cmmd_validation
-        )
+        # VAE: needed only to live-encode (caching off), to decode training
+        # samples, or to decode CMMD validation samples. With caching on the
+        # cache is guaranteed complete above, so no encode pass is required.
+        vae_needed = (not cache_latents) or sampling_enabled or cmmd_validation
 
-        te_complete = (
-            args.cache_text_encoder_outputs
-            and _te_complete(train_dataset_group)
-            and _te_complete(val_dataset_group)
-        )
-        # Qwen3 TE: needed to encode missing TE outputs, to encode sample
-        # prompts, when caching is off (live encode each step), or when the
-        # text encoder itself is being trained.
+        # Qwen3 TE: needed only to live-encode (caching off), to encode sample
+        # prompts, or when the text encoder itself is being trained.
         qwen3_needed = (
             (not args.cache_text_encoder_outputs)
-            or (not te_complete)
             or bool(args.sample_prompts)
             or self.is_train_text_encoder(args)
         )
@@ -2043,21 +2012,15 @@ class AnimaTrainer:
         self.cache_text_encoder_outputs_if_needed(
             args,
             accelerator,
-            unet,
-            vae,
             text_encoders,
             train_dataset_group,
-            weight_dtype,
         )
         if val_dataset_group is not None:
             self.cache_text_encoder_outputs_if_needed(
                 args,
                 accelerator,
-                unet,
-                vae,
                 text_encoders,
                 val_dataset_group,
-                weight_dtype,
             )
 
         if unet is None:
