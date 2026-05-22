@@ -98,7 +98,7 @@ save_every_n_epochs = 8
 checkpointing_epochs = 8
 
 ip_diagnostics_epochs = 999
-
+validation_baselines=false
 # Pre-cached PE features (no PE-LoRA) — encoder not loaded during training.
 ip_features_cache_to_disk = true
 cache_latents = true
@@ -123,10 +123,10 @@ ip_pair_caption_strip_p = 0.0
 use_ip_adapter = true
 ip_image_drop_p = 0.05
 caption_dropout_rate = 0.05
-# gradient_accumulation_steps = 4
+gradient_accumulation_steps = 2
 
 # DiT is frozen; resampler + KV proj + PE-LoRA + live PE encoder all sit on
 # the GPU alongside the DiT. blocks_to_swap=12 leaves headroom for the live
 # PE forward without disturbing the DiT-side memory budget.
-blocks_to_swap = 12
+blocks_to_swap = 0
 # compile_mode = "full"

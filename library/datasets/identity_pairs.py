@@ -155,3 +155,57 @@ class IdentityPairSampler:
             if cand != target_stem:
                 return cand, "shuffled"
         return target_stem, "self"
+
+    def hard_negative(self, target_stem: str, rng: random.Random) -> tuple[str, str]:
+        """Return ``(reference_stem, level)`` for a *hard* negative — a
+        same-artist image whose ``character`` tags are **disjoint** from the
+        target's (style-matched, content-different; the proposal's option (c)).
+
+        Both sides must be character-tagged for the contrast to be genuine
+        (otherwise "different character" is vacuous). When no such sibling
+        exists — orphan artist, untagged target, or a dataset where the artist's
+        images all share characters — falls back to ``shuffled()`` (returning
+        its ``"shuffled"`` level so callers can see the degradation). This is
+        the Phase-0-measured fallback: ~71% of steps land here on the current
+        dataset (character tagging caps the strict pool at ~29%)."""
+        meta = self.image_meta.get(target_stem)
+        if meta is None:
+            return self.shuffled(target_stem, rng)
+        target_chars = set(meta.get("character", []))
+        target_artists = set(meta.get("artist", []))
+        if not target_chars or not target_artists:
+            return self.shuffled(target_stem, rng)
+
+        candidates: set[str] = set()
+        for artist in target_artists:
+            for s in self.groups.get("artist", {}).get(artist, []):
+                if s == target_stem or not self._eligible(s):
+                    continue
+                cand_chars = set(self.image_meta.get(s, {}).get("character", []))
+                # Genuine hard negative: the candidate is character-tagged and
+                # shares no character with the target.
+                if cand_chars and not (cand_chars & target_chars):
+                    candidates.add(s)
+        if candidates:
+            return rng.choice(sorted(candidates)), "hard"
+        return self.shuffled(target_stem, rng)
+
+    def tag_jaccard(self, stem_a: str, stem_b: str) -> float:
+        """Jaccard overlap of the two stems' identity+style tag sets
+        (``character ∪ copyright ∪ artist``), used by the ``jaccard`` negative
+        mode to down-weight less-surprising mismatches. Returns ``0.0`` when
+        either stem is unknown or both tag sets are empty."""
+
+        def _tags(stem: str) -> set[str]:
+            m = self.image_meta.get(stem, {})
+            return (
+                set(m.get("character", []))
+                | set(m.get("copyright", []))
+                | set(m.get("artist", []))
+            )
+
+        a, b = _tags(stem_a), _tags(stem_b)
+        union = a | b
+        if not union:
+            return 0.0
+        return len(a & b) / len(union)

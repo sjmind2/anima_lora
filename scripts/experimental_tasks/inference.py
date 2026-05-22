@@ -27,7 +27,9 @@ _REF_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 def _random_ref_image(directory: Path) -> str | None:
     if not directory.is_dir():
         return None
-    pool = [p for p in directory.iterdir() if p.suffix.lower() in _REF_IMAGE_EXTS]
+    # resized/ (and other source layouts) nest images under per-artist subdirs,
+    # so recurse rather than only scanning top-level files.
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
     if not pool:
         return None
     pick = random.choice(pool)
@@ -421,7 +423,7 @@ def _resolve_ref_image_pool(directory: Path, n: int) -> list[str]:
     """
     if not directory.is_dir():
         return []
-    pool = [p for p in directory.iterdir() if p.suffix.lower() in _REF_IMAGE_EXTS]
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
     if not pool:
         return []
     if n >= len(pool):

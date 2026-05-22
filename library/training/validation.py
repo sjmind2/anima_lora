@@ -95,16 +95,20 @@ def run_validation(
         # Method-adapter baseline deltas (e.g. IP-Adapter no_ip / shuffled_ref).
         # Runs independently of CMMD/FM above — these are FM-MSE re-forwards on
         # the same (batch, sigma, noise) with the adapter perturbed, so the
-        # delta isolates the adapter's contribution.
-        _run_validation_baselines(
-            trainer,
-            ctx=ctx,
-            val=val,
-            epoch=epoch,
-            global_step=global_step,
-            progress_desc=progress_desc,
-            logging_fn=logging_fn,
-        )
+        # delta isolates the adapter's contribution. Gated by
+        # ``--validation_baselines`` (default on): each baseline is a full extra
+        # val forward per (batch, sigma), so skipping them roughly halves
+        # IP-Adapter validation time.
+        if getattr(args, "validation_baselines", True):
+            _run_validation_baselines(
+                trainer,
+                ctx=ctx,
+                val=val,
+                epoch=epoch,
+                global_step=global_step,
+                progress_desc=progress_desc,
+                logging_fn=logging_fn,
+            )
     finally:
         trainer._restore_rng_state(rng_states)
         args.t_min = val.original_t_min

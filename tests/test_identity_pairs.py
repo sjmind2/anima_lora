@@ -144,3 +144,44 @@ def test_rel_dir(index_path):
 def test_invalid_min_level(index_path):
     with pytest.raises(ValueError):
         IdentityPairSampler(index_path, min_level="franchise")
+
+
+# ── Soft-tokens contrastive hard negatives + tag Jaccard ────────────────────
+
+
+def test_hard_negative_same_artist_different_character(index_path):
+    s = IdentityPairSampler(index_path, min_level="artist")
+    rng = random.Random(0)
+    # a3 (frieren, @y): same-artist siblings with a different, tagged character
+    # are b1 (fern) and c1 (miku).
+    refs = {s.hard_negative("a3", rng) for _ in range(20)}
+    chosen = {stem for stem, _ in refs}
+    assert chosen <= {"b1", "c1"}
+    assert all(level == "hard" for _, level in refs)
+
+
+def test_hard_negative_falls_back_when_no_disjoint_sibling(index_path):
+    s = IdentityPairSampler(index_path, min_level="artist")
+    rng = random.Random(0)
+    # a1 (frieren, @x): the only same-artist sibling is a2, which shares the
+    # character → no genuine hard negative → fall back to shuffled.
+    stem, level = s.hard_negative("a1", rng)
+    assert level == "shuffled"
+    assert stem != "a1"
+
+
+def test_hard_negative_unknown_stem_falls_back(index_path):
+    s = IdentityPairSampler(index_path, min_level="artist")
+    rng = random.Random(0)
+    stem, level = s.hard_negative("does_not_exist", rng)
+    assert level in ("shuffled", "self")
+
+
+def test_tag_jaccard(index_path):
+    s = IdentityPairSampler(index_path, min_level="artist")
+    # identical tag sets (frieren/sousou/@x)
+    assert s.tag_jaccard("a1", "a2") == pytest.approx(1.0)
+    # disjoint identities + artists
+    assert s.tag_jaccard("a1", "c1") == pytest.approx(0.0)
+    # a3 {frieren, sousou, @y} vs b1 {fern, sousou, @y}: ∩=2, ∪=4 → 0.5
+    assert s.tag_jaccard("a3", "b1") == pytest.approx(0.5)

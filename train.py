@@ -395,6 +395,51 @@ class AnimaTrainer:
                 f"index={index_path}"
             )
 
+        # Soft-tokens contrastive negatives. The objective's knobs live in
+        # ``network_args`` (see configs/methods/soft_tokens.toml); preview them
+        # here to decide whether
+        # the dataset should surface cached negative text embeddings. Off unless
+        # contrastive_weight > 0. See docs/proposal/soft_tokens_contrastive.md.
+        if str(getattr(args, "network_module", "") or "") == (
+            "networks.methods.soft_tokens"
+        ):
+            net_arg_preview: dict[str, str] = {}
+            for na in args.network_args or []:
+                if "=" in na:
+                    pk, pv = na.split("=", 1)
+                    net_arg_preview[pk] = pv
+            con_weight = float(net_arg_preview.get("contrastive_weight", 0.0) or 0.0)
+            if con_weight > 0.0:
+                con_k = int(net_arg_preview.get("contrastive_k", 1) or 1)
+                con_mode = str(
+                    net_arg_preview.get("contrastive_negative_mode", "shuffled")
+                )
+                # The negative grouping always comes from the shared caption
+                # index `make caption-index` writes — not a user knob.
+                con_index = "post_image_dataset/captions/caption_index.json"
+                if not os.path.exists(con_index):
+                    raise FileNotFoundError(
+                        f"contrastive_index not found: {con_index}. "
+                        f"Run `make caption-index`."
+                    )
+                if not getattr(args, "cache_llm_adapter_outputs", False):
+                    raise ValueError(
+                        "soft_tokens contrastive requires "
+                        "cache_llm_adapter_outputs=true (negatives are cached "
+                        "crossattn_emb swapped off disk)."
+                    )
+                # Negatives only feed the training-step contrastive forward; the
+                # validation FM-MSE stays a clean baseline, so val datasets are
+                # left untouched.
+                for dataset in train_dataset_group.datasets:
+                    dataset.setup_contrastive_negatives(
+                        con_index, k=con_k, mode=con_mode, is_validation=False
+                    )
+                logger.info(
+                    f"Soft-tokens contrastive: weight={con_weight} k={con_k} "
+                    f"mode={con_mode} index={con_index}"
+                )
+
         train_dataset_group.verify_bucket_reso_steps(
             16
         )  # WanVAE spatial downscale = 8 and patch size = 2
@@ -1434,7 +1479,9 @@ class AnimaTrainer:
                 for ds in train_dataset_group.datasets
                 for subset in ds.subsets
             ]
-            self._state.caption_dropout_enabled = bool(rates) and any(r > 0 for r in rates)
+            self._state.caption_dropout_enabled = bool(rates) and any(
+                r > 0 for r in rates
+            )
             if self._state.caption_dropout_enabled:
                 logger.info(f"caption dropout ENABLED -- per-subset rates: {rates}")
             else:
@@ -2501,6 +2548,17 @@ def setup_parser() -> argparse.ArgumentParser:
         "`use_cmmd = false` in the method TOML (or pass `--no-use_cmmd`) to "
         "skip CMMD and run only the legacy per-σ FM-MSE val pass — useful "
         "on tight VRAM where the PE encoder + sampling path doesn't fit.",
+    )
+    parser.add_argument(
+        "--validation_baselines",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run each method adapter's validation baselines (e.g. IP-Adapter "
+        "no_ip / shuffled_ref) as FM-MSE delta diagnostics during validation. "
+        "Set `validation_baselines = false` in the method TOML (or pass "
+        "`--no-validation_baselines`) to skip them — each baseline adds a full "
+        "extra val forward per (batch, σ), so this roughly halves IP-Adapter "
+        "validation time when you don't need the deltas.",
     )
     parser.add_argument(
         "--unsloth_offload_checkpointing",
