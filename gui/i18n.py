@@ -281,6 +281,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "merge_pick_dit": "Select base DiT .safetensors",
         "merge_pick_out": "Save merged DiT as...",
         "browse": "Browse…",
+        "scan_subsets": "Scan",
+        "scan_subsets_tooltip": "Scan source_image_dir for subdirectories and generate subset configurations",
+        "subsets_section": "Subsets",
+        "subsets_empty": "No subsets found. Click 'Scan' to scan source_image_dir.",
+        "subsets_col_name": "Name",
+        "subsets_col_image_dir": "image_dir",
+        "subsets_col_cache_dir": "cache_dir",
+        "subsets_col_num_repeats": "Repeats",
+        "subsets_scan_no_dir": "source_image_dir does not exist or is not a directory.",
+        "subsets_scan_found": "Found {n} subset(s).",
     },
     "ko": {
         # Window / tabs
@@ -559,6 +569,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "merge_pick_dit": "베이스 DiT .safetensors 선택",
         "merge_pick_out": "병합된 DiT 저장 위치...",
         "browse": "찾아보기…",
+        "scan_subsets": "Scan",
+        "scan_subsets_tooltip": "Scan source_image_dir for subdirectories and generate subset configurations",
+        "subsets_section": "Subsets",
+        "subsets_empty": "No subsets found. Click 'Scan' to scan source_image_dir.",
+        "subsets_col_name": "Name",
+        "subsets_col_image_dir": "image_dir",
+        "subsets_col_cache_dir": "cache_dir",
+        "subsets_col_num_repeats": "Repeats",
+        "subsets_scan_no_dir": "source_image_dir does not exist or is not a directory.",
+        "subsets_scan_found": "Found {n} subset(s).",
     },
 }
 

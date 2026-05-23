@@ -140,6 +140,15 @@ def main() -> None:
             "across the entire source tree."
         ),
     )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        help=(
+            "Process subdirectories of --src independently. Root-level images "
+            "go to {dst}/.resized/, each subdirectory's images go to "
+            "{dst}/{subdir}/.resized/. Stem uniqueness is checked per subdirectory."
+        ),
+    )
     args = parser.parse_args()
 
     if args.no_constant_token_buckets:
@@ -177,6 +186,111 @@ def main() -> None:
                 print(f"  '{stem}': {a} <-> {b}")
             print("Rename so every image has a unique stem across all subfolders.")
             sys.exit(1)
+    elif args.tree:
+        root_images = sorted(
+            f for f in src.iterdir()
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+        )
+        subdirs = [
+            d for d in sorted(src.iterdir())
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+
+        batches: list[tuple[list[Path], Path]] = []
+
+        if root_images:
+            stems: dict[str, Path] = {}
+            collisions: list[tuple[str, Path, Path]] = []
+            for p in root_images:
+                if p.stem in stems:
+                    collisions.append((p.stem, stems[p.stem], p))
+                else:
+                    stems[p.stem] = p
+            if collisions:
+                print("Duplicate image stems found in root:")
+                for stem, a, b in collisions:
+                    print(f"  '{stem}': {a} <-> {b}")
+                sys.exit(1)
+            batches.append((root_images, dst / ".resized"))
+
+        for subdir in subdirs:
+            sub_images = sorted(
+                p for p in subdir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if not sub_images:
+                continue
+            sub_stems: dict[str, Path] = {}
+            sub_collisions: list[tuple[str, Path, Path]] = []
+            for p in sub_images:
+                if p.stem in sub_stems:
+                    sub_collisions.append((p.stem, sub_stems[p.stem], p))
+                else:
+                    sub_stems[p.stem] = p
+            if sub_collisions:
+                print(f"Duplicate image stems found in {subdir.name}:")
+                for stem, a, b in sub_collisions:
+                    print(f"  '{stem}': {a} <-> {b}")
+                sys.exit(1)
+            batches.append((sub_images, dst / subdir.name / ".resized"))
+
+        if args.min_pixels > 0:
+            filtered_batches: list[tuple[list[Path], Path]] = []
+            for image_files, out_dir in batches:
+                kept: list[Path] = []
+                skipped: list[tuple[Path, int, int]] = []
+                for p in image_files:
+                    try:
+                        with Image.open(p) as im:
+                            w, h = im.size
+                    except Exception as e:
+                        print(f"  warn: could not read {p.name}: {e}")
+                        continue
+                    if w * h < args.min_pixels:
+                        skipped.append((p, w, h))
+                    else:
+                        kept.append(p)
+                if skipped:
+                    print(
+                        f"Skipping {len(skipped)} images below {args.min_pixels:,} pixels "
+                        f"({args.min_pixels / 1e6:.2f}MP):"
+                    )
+                    for p, w, h in skipped:
+                        print(f"  {p.name}  {w}x{h}  ({w * h / 1e6:.3f}MP)")
+                filtered_batches.append((kept, out_dir))
+            batches = filtered_batches
+
+        total = sum(len(imgs) for imgs, _ in batches)
+        print(
+            f"Resizing {total} images to "
+            f"{'constant-token' if use_constant else 'standard'} buckets"
+        )
+        bucket_counts: dict[tuple[int, int], int] = {}
+        copy_captions = not args.no_copy_captions
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = {}
+            for image_files, out_dir in batches:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for img_path in image_files:
+                    futures[
+                        pool.submit(
+                            process_image, img_path, out_dir, bucket_args, copy_captions
+                        )
+                    ] = img_path
+            pbar = tqdm(as_completed(futures), total=len(futures), desc="Resizing")
+            for future in pbar:
+                name, reso = future.result()
+                bucket_counts[reso] = bucket_counts.get(reso, 0) + 1
+                pbar.set_postfix_str(f"{name} → {reso[0]}x{reso[1]}")
+
+        print("\nBucket distribution:")
+        for reso in sorted(bucket_counts):
+            tokens = (reso[0] // 16) * (reso[1] // 16)
+            print(
+                f"  {reso[0]:>4d}x{reso[1]:<4d}: {bucket_counts[reso]:>3d} images  ({tokens} tokens)"
+            )
+
+        return
     else:
         image_files = sorted(
             p for p in src.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS

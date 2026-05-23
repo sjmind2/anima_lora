@@ -144,10 +144,9 @@ def _apply_dataset_overrides(blueprint: dict, override: dict) -> None:
     """Shallow-merge override sections into ``blueprint`` in place.
 
     - ``[general]``: per-key overwrite.
-    - ``[[datasets]]``: matched by index against the base blueprint; only
-      top-level scalars on the dataset table are overwritten. ``subsets``
-      arrays in the override are ignored with a warning — subset-level
-      overrides are intentionally out of scope to keep the merge predictable.
+    - ``[[datasets]]``: matched by index against the base blueprint; top-level
+      scalars are overwritten. ``subsets`` arrays in the override replace the
+      base's subsets entirely (full replacement, not merge).
     """
     g_override = override.get("general")
     if isinstance(g_override, dict):
@@ -167,11 +166,7 @@ def _apply_dataset_overrides(blueprint: dict, override: dict) -> None:
             )
             continue
         if "subsets" in override_ds:
-            logger.warning(
-                "Dataset override index %d declares [[datasets.subsets]]; "
-                "subset-level overrides are not supported. Ignoring `subsets`.",
-                i,
-            )
+            base_datasets[i]["subsets"] = override_ds["subsets"]
         for k, v in override_ds.items():
             if k == "subsets":
                 continue
@@ -309,7 +304,7 @@ def _resolve_preset(
                 raise ValueError(
                     f"Preset '{preset}' in {presets_path} is not a table"
                 )
-            return dict(section), presets_path, f"{presets_path}[{preset}]"
+            return dict(section), presets_path, f"{presets_path.replace(chr(92), '/')}[{preset}]"
     custom_path = os.path.join(configs_dir, "custom", f"{preset}.toml")
     if os.path.exists(custom_path):
         with open(custom_path, "r", encoding="utf-8") as f:
@@ -375,7 +370,7 @@ def load_method_preset(
     base_flat = _flatten_toml(base_raw, source=base_path, strict=strict)
     for k, v in base_flat.items():
         merged[k] = v
-        provenance[k] = base_path
+        provenance[k] = base_path.replace("\\", "/")
 
     preset_section, preset_path, preset_tag = _resolve_preset(preset, configs_dir)
     preset_flat = _flatten_toml(
@@ -390,7 +385,7 @@ def load_method_preset(
     method_flat = _flatten_toml(method_raw, source=method_path, strict=strict)
     for k, v in method_flat.items():
         merged[k] = v
-        provenance[k] = method_path
+        provenance[k] = method_path.replace("\\", "/")
 
     if return_provenance:
         return merged, provenance

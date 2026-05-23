@@ -178,6 +178,16 @@ def main() -> None:
             "across the entire source tree."
         ),
     )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        help=(
+            "Tree mode: scan --dir for direct subdirectories. Root-level "
+            "images cache to {cache_dir}/.lora/; each subdirectory's images "
+            "cache to {cache_dir}/{subdir}/.lora/. Stem uniqueness is "
+            "checked per subdirectory only. Requires --cache_dir."
+        ),
+    )
     args = parser.parse_args()
 
     from safetensors.torch import save_file as _save_safetensors
@@ -212,50 +222,120 @@ def main() -> None:
     )
     encoding_strategy = AnimaTextEncodingStrategy()
 
-    # Collect images that have caption sidecars. Mirror the resize filter so
-    # we don't cache TE for images that would be dropped at resize time.
-    if args.recursive:
-        candidates = sorted(
+    entries: list[tuple[Path, str, Path | None]] = []
+    skipped_small = 0
+
+    if args.tree:
+        if cache_dir is None:
+            print("error: --cache_dir is required with --tree")
+            sys.exit(1)
+
+        groups: list[tuple[list[Path], Path]] = []
+
+        root_cache = cache_dir / ".lora"
+        root_cache.mkdir(parents=True, exist_ok=True)
+        root_images = sorted(
             p
-            for p in data_dir.rglob("*")
+            for p in data_dir.iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
         )
-        seen_stems: dict[str, Path] = {}
-        collisions: list[tuple[str, Path, Path]] = []
-        for p in candidates:
-            if p.stem in seen_stems:
-                collisions.append((p.stem, seen_stems[p.stem], p))
-            else:
-                seen_stems[p.stem] = p
-        if collisions:
-            print("Duplicate image stems found under --dir (caches are stem-keyed):")
-            for stem, a, b in collisions:
-                print(f"  '{stem}': {a} <-> {b}")
-            sys.exit(1)
-    else:
-        candidates = sorted(data_dir.iterdir())
+        groups.append((root_images, root_cache))
 
-    entries: list[tuple[Path, str]] = []
-    skipped_small = 0
-    for p in candidates:
-        if p.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        caption_path = p.with_suffix(".txt")
-        if not caption_path.exists():
-            continue
-        if args.min_pixels > 0:
-            try:
-                with Image.open(p) as im:
-                    w, h = im.size
-            except Exception as e:
-                print(f"  warn: could not read {p.name}: {e}")
+        subdirs = sorted(
+            d
+            for d in data_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        )
+        for subdir in subdirs:
+            subdir_cache = cache_dir / subdir.name / ".lora"
+            subdir_cache.mkdir(parents=True, exist_ok=True)
+            subdir_images = sorted(
+                p
+                for p in subdir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            groups.append((subdir_images, subdir_cache))
+
+        for images, _ in groups:
+            seen: dict[str, Path] = {}
+            for p in images:
+                if p.stem in seen:
+                    print(
+                        f"Duplicate stem: '{p.stem}': {seen[p.stem]} <-> {p}"
+                    )
+                    sys.exit(1)
+                seen[p.stem] = p
+
+        print(
+            f"Tree mode: {len(subdirs)} subdirectory(ies) + root "
+            f"({sum(len(imgs) for imgs, _ in groups)} images total)"
+        )
+
+        for images, entry_cache in groups:
+            for p in images:
+                caption_path = p.with_suffix(".txt")
+                if not caption_path.exists():
+                    continue
+                if args.min_pixels > 0:
+                    try:
+                        with Image.open(p) as im:
+                            w, h = im.size
+                    except Exception as e:
+                        print(f"  warn: could not read {p.name}: {e}")
+                        continue
+                    if w * h < args.min_pixels:
+                        skipped_small += 1
+                        continue
+                caption = (
+                    caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
+                )
+                if caption:
+                    entries.append((p, caption, entry_cache))
+    else:
+        if args.recursive:
+            candidates = sorted(
+                p
+                for p in data_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            seen_stems: dict[str, Path] = {}
+            collisions: list[tuple[str, Path, Path]] = []
+            for p in candidates:
+                if p.stem in seen_stems:
+                    collisions.append((p.stem, seen_stems[p.stem], p))
+                else:
+                    seen_stems[p.stem] = p
+            if collisions:
+                print(
+                    "Duplicate image stems found under --dir (caches are stem-keyed):"
+                )
+                for stem, a, b in collisions:
+                    print(f"  '{stem}': {a} <-> {b}")
+                sys.exit(1)
+        else:
+            candidates = sorted(data_dir.iterdir())
+
+        for p in candidates:
+            if p.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
-            if w * h < args.min_pixels:
-                skipped_small += 1
+            caption_path = p.with_suffix(".txt")
+            if not caption_path.exists():
                 continue
-        caption = caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
-        if caption:
-            entries.append((p, caption))
+            if args.min_pixels > 0:
+                try:
+                    with Image.open(p) as im:
+                        w, h = im.size
+                except Exception as e:
+                    print(f"  warn: could not read {p.name}: {e}")
+                    continue
+                if w * h < args.min_pixels:
+                    skipped_small += 1
+                    continue
+            caption = (
+                caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
+            )
+            if caption:
+                entries.append((p, caption, cache_dir))
 
     if skipped_small:
         print(
@@ -292,11 +372,11 @@ def main() -> None:
 
         # Skip already-cached entries
         to_encode: list[tuple[Path, str, Path]] = []
-        for img_path, caption in batch:
+        for img_path, caption, entry_cache_dir in batch:
             cache_name = img_path.stem + TE_CACHE_SUFFIX
             cache_path = (
-                cache_dir / cache_name
-                if cache_dir is not None
+                entry_cache_dir / cache_name
+                if entry_cache_dir is not None
                 else img_path.with_name(cache_name)
             )
             if cache_path.exists():

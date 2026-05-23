@@ -1,0 +1,273 @@
+network_type = "locon"
+network_dim = 32
+network_alpha = 32
+conv_dim = 1
+conv_alpha = 4
+learning_rate = 7e-5
+max_train_epochs = 12
+save_every_n_epochs = 2
+checkpointing_epochs = 2
+use_shuffled_caption_variants = true
+cache_llm_adapter_outputs = true
+caption_dropout_rate = 0.01
+output_name = "anima-locon"
+blocks_to_swap = 0
+use_cmmd = false
+scale_weight_norms = 1.0
+source_image_dir = "O:/LoRATraining/RuneFactoryRNKTrainingDir - 副本"
+lr_scheduler = "cosine"
+[[datasets]]
+validation_split_num = 0
+validation_split = 0.0
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_hina_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_hina_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_hina_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_hina_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_iroha_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_iroha_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_iroha_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_iroha_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kaguya_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kaguya_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kanata_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kanata_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kanata_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kanata_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kurarisu_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kurarisu_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kurarisu_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_kurarisu_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_matsuri_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_matsuri_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_matsuri_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_matsuri_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_suzu_(rune_factory)_face/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_suzu_(rune_factory)_face/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_suzu_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_suzu_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_uraraka_(rune_factory)_tatie/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_uraraka_(rune_factory)_tatie/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_uraraka_(rune_factory)_up/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/10_uraraka_(rune_factory)_up/.lora"
+num_repeats = 10
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(pink_bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(pink_bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(white_bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_hina_(white_bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(blue_bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(blue_bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_iroha_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(swimsuit)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(swimsuit)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kaguya_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kanata_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kurarisu_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kurarisu_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kurarisu_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_kurarisu_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(halterneck)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(halterneck)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_matsuri_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_subaru_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_subaru_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_suzu_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_suzu_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(green_bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(green_bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(pink_bikini)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(pink_bikini)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(yukata)_(rune_factory)/.resized"
+cache_dir = "post_image_dataset/RuneFactoryRNKTrainingDir - 副本/4_uraraka_(yukata)_(rune_factory)/.lora"
+num_repeats = 4
+recursive = true
+
+
+[variant]
+family = "locon"
+label = "LOCON"
+description = "Enhanced LoRA with Tucker decomposition for Conv2d layers. Same math as LoRA for Linear."
+order = 20

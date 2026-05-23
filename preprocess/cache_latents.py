@@ -41,6 +41,89 @@ def get_latents_npz_path(
     return image_path.with_name(name)
 
 
+def _cache_for_images(
+    image_files: list[Path],
+    cache_dir: Path | None,
+    vae,
+    device: torch.device,
+    dtype,
+    batch_size: int,
+    label: str = "Caching latents",
+) -> tuple[int, int]:
+    reso_groups: dict[tuple[int, int], list[Path]] = {}
+    for p in image_files:
+        img = Image.open(p)
+        size = img.size
+        img.close()
+        reso_groups.setdefault(size, []).append(p)
+
+    total = len(image_files)
+    cached = 0
+    skipped = 0
+
+    pbar = tqdm(total=total, desc=label)
+    for (w, h), paths in reso_groups.items():
+        for batch_start in range(0, len(paths), batch_size):
+            batch_paths = paths[batch_start : batch_start + batch_size]
+            tensors = []
+
+            for p in batch_paths:
+                npz_path = get_latents_npz_path(p, (w, h), cache_dir=cache_dir)
+                if npz_path.exists():
+                    latents_size = (h // 8, w // 8)
+                    key = f"latents_{latents_size[0]}x{latents_size[1]}"
+                    try:
+                        npz = np.load(npz_path)
+                        if key in npz:
+                            skipped += 1
+                            pbar.update(1)
+                            pbar.set_postfix_str(f"skip {p.name}")
+                            continue
+                    except Exception:
+                        pass
+
+                img = Image.open(p).convert("RGB")
+                img_np = np.array(img)
+                img_tensor = IMAGE_TRANSFORMS(img_np)
+                tensors.append((p, img_tensor, (w, h)))
+
+            if not tensors:
+                continue
+
+            img_batch = torch.stack([t[1] for t in tensors], dim=0)
+            img_batch = img_batch.to(device=device, dtype=dtype)
+
+            with torch.no_grad():
+                latents = vae.encode_pixels_to_latents(img_batch).cpu()
+
+            for i, (p, _, size) in enumerate(tensors):
+                lat = latents[i]
+                latents_size = lat.shape[-2:]
+                key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}"
+
+                npz_path = get_latents_npz_path(p, size, cache_dir=cache_dir)
+                kwargs = {}
+                if npz_path.exists():
+                    npz = np.load(npz_path)
+                    for key in npz.files:
+                        kwargs[key] = npz[key]
+
+                kwargs[f"latents{key_reso_suffix}"] = lat.float().numpy()
+                kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
+                kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array(
+                    [0, 0, size[0], size[1]]
+                )
+
+                np.savez(npz_path, **kwargs)
+
+                cached += 1
+                pbar.update(1)
+                pbar.set_postfix_str(f"{p.name} → {size[0]}x{size[1]}")
+
+    pbar.close()
+    return cached, skipped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", type=str, required=True, help="Dataset directory")
@@ -78,6 +161,15 @@ def main() -> None:
             "across the entire source tree."
         ),
     )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        help=(
+            "Tree mode: scan --dir for subdirectories containing .resized/ "
+            "and process each independently. Caches go to .lora/ next to each "
+            ".resized/ directory."
+        ),
+    )
     args = parser.parse_args()
 
     from library.models import qwen_vae as qwen_image_autoencoder_kl
@@ -99,104 +191,92 @@ def main() -> None:
     vae.requires_grad_(False)
     vae.eval()
 
-    # Collect images grouped by resolution for efficient batching
-    if args.recursive:
-        image_files = sorted(
-            p
-            for p in data_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-        )
-        stems: dict[str, Path] = {}
-        collisions: list[tuple[str, Path, Path]] = []
-        for p in image_files:
-            if p.stem in stems:
-                collisions.append((p.stem, stems[p.stem], p))
-            else:
-                stems[p.stem] = p
-        if collisions:
-            print("Duplicate image stems found under --dir (caches are stem-keyed):")
-            for stem, a, b in collisions:
-                print(f"  '{stem}': {a} <-> {b}")
-            sys.exit(1)
-    else:
-        image_files = sorted(
-            p for p in data_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS
-        )
+    if args.tree:
+        resized_dirs: list[tuple[Path, Path]] = []
 
-    reso_groups: dict[tuple[int, int], list[Path]] = {}
-    for p in image_files:
-        img = Image.open(p)
-        size = img.size  # (W, H)
-        img.close()
-        reso_groups.setdefault(size, []).append(p)
+        root_resized = data_dir / ".resized"
+        if root_resized.is_dir():
+            resized_dirs.append((root_resized, data_dir / ".lora"))
 
-    total = len(image_files)
-    cached = 0
-    skipped = 0
+        for child in sorted(data_dir.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            resized = child / ".resized"
+            if resized.is_dir():
+                resized_dirs.append((resized, child / ".lora"))
 
-    pbar = tqdm(total=total, desc="Caching latents")
-    for (w, h), paths in reso_groups.items():
-        for batch_start in range(0, len(paths), args.batch_size):
-            batch_paths = paths[batch_start : batch_start + args.batch_size]
-            tensors = []
-
-            for p in batch_paths:
-                npz_path = get_latents_npz_path(p, (w, h), cache_dir=cache_dir)
-                if npz_path.exists():
-                    latents_size = (h // 8, w // 8)
-                    key = f"latents_{latents_size[0]}x{latents_size[1]}"
-                    try:
-                        npz = np.load(npz_path)
-                        if key in npz:
-                            skipped += 1
-                            pbar.update(1)
-                            pbar.set_postfix_str(f"skip {p.name}")
-                            continue
-                    except Exception:
-                        pass
-
-                img = Image.open(p).convert("RGB")
-                img_np = np.array(img)
-                img_tensor = IMAGE_TRANSFORMS(img_np)
-                tensors.append((p, img_tensor, (w, h)))
-
-            if not tensors:
+        total_cached = 0
+        total_skipped = 0
+        for resized_dir, subset_cache_dir in resized_dirs:
+            print(f"\n--- {resized_dir} → {subset_cache_dir} ---")
+            image_files = sorted(
+                p
+                for p in resized_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if not image_files:
+                print("  (no images found, skipping)")
                 continue
 
-            img_batch = torch.stack([t[1] for t in tensors], dim=0)
-            img_batch = img_batch.to(device=device, dtype=dtype)
+            stems: dict[str, Path] = {}
+            collisions: list[tuple[str, Path, Path]] = []
+            for p in image_files:
+                if p.stem in stems:
+                    collisions.append((p.stem, stems[p.stem], p))
+                else:
+                    stems[p.stem] = p
+            if collisions:
+                print("Duplicate image stems found (caches are stem-keyed):")
+                for stem, a, b in collisions:
+                    print(f"  '{stem}': {a} <-> {b}")
+                sys.exit(1)
 
-            with torch.no_grad():
-                latents = vae.encode_pixels_to_latents(img_batch).cpu()
+            cached, skipped = _cache_for_images(
+                image_files,
+                subset_cache_dir,
+                vae,
+                device,
+                dtype,
+                args.batch_size,
+                label=resized_dir.parent.name or str(data_dir),
+            )
+            print(f"  {cached} cached, {skipped} skipped (already existed)")
+            total_cached += cached
+            total_skipped += skipped
 
-            for i, (p, _, size) in enumerate(tensors):
-                lat = latents[i]  # (16, H/8, W/8)
-                latents_size = lat.shape[-2:]  # H/8, W/8
-                key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}"
+        print(
+            f"\nTree complete: {total_cached} cached, {total_skipped} skipped"
+        )
+    else:
+        if args.recursive:
+            image_files = sorted(
+                p
+                for p in data_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            stems: dict[str, Path] = {}
+            collisions: list[tuple[str, Path, Path]] = []
+            for p in image_files:
+                if p.stem in stems:
+                    collisions.append((p.stem, stems[p.stem], p))
+                else:
+                    stems[p.stem] = p
+            if collisions:
+                print("Duplicate image stems found under --dir (caches are stem-keyed):")
+                for stem, a, b in collisions:
+                    print(f"  '{stem}': {a} <-> {b}")
+                sys.exit(1)
+        else:
+            image_files = sorted(
+                p for p in data_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS
+            )
 
-                npz_path = get_latents_npz_path(p, size, cache_dir=cache_dir)
-                kwargs = {}
-                if npz_path.exists():
-                    npz = np.load(npz_path)
-                    for key in npz.files:
-                        kwargs[key] = npz[key]
-
-                kwargs[f"latents{key_reso_suffix}"] = lat.float().numpy()
-                kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
-                kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array(
-                    [0, 0, size[0], size[1]]
-                )
-
-                np.savez(npz_path, **kwargs)
-
-                cached += 1
-                pbar.update(1)
-                pbar.set_postfix_str(f"{p.name} → {size[0]}x{size[1]}")
-
-    pbar.close()
-    print(
-        f"\nLatent caching complete: {cached} cached, {skipped} skipped (already existed)"
-    )
+        cached, skipped = _cache_for_images(
+            image_files, cache_dir, vae, device, dtype, args.batch_size
+        )
+        print(
+            f"\nLatent caching complete: {cached} cached, {skipped} skipped (already existed)"
+        )
 
     vae.to("cpu")
     del vae

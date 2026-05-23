@@ -177,6 +177,18 @@ class LoRANetworkCfg:
     lora_dim: int = 4
     alpha: float = 1.0
     module_class: Type = LoRAModule
+    # LyCORIS variant selector: "lora" (default), "loha", "locon", "lokr"
+    network_type: str = "lora"
+    # LyCORIS per-variant knobs
+    use_tucker: bool = False
+    decompose_both: bool = False
+    lokr_factor: int = -1
+    use_scalar: bool = False
+    weight_decompose: bool = False
+    full_matrix: bool = False
+    conv_dim: Optional[int] = None
+    conv_alpha: Optional[float] = None
+    scale_weight_norms: Optional[float] = None
     # warm-start path supplies these from the checkpoint; fresh path leaves None
     modules_dim: Optional[Dict[str, int]] = None
     modules_alpha: Optional[Dict[str, float]] = None
@@ -579,10 +591,36 @@ class LoRANetworkCfg:
 
         verbose = _as_bool(kwargs.get("verbose"))
 
+        network_type_raw = kwargs.get("network_type", "lora")
+        network_type = str(network_type_raw).strip().lower() if network_type_raw else "lora"
+        use_tucker = _as_bool(kwargs.get("use_tucker"))
+        decompose_both = _as_bool(kwargs.get("decompose_both"))
+        lokr_factor = int(kwargs.get("lokr_factor", -1))
+        use_scalar = _as_bool(kwargs.get("use_scalar"))
+        weight_decompose = _as_bool(kwargs.get("weight_decompose"))
+        full_matrix = _as_bool(kwargs.get("full_matrix"))
+
+        conv_dim_raw = kwargs.get("conv_dim")
+        conv_dim = int(conv_dim_raw) if conv_dim_raw is not None else None
+        conv_alpha_raw = kwargs.get("conv_alpha")
+        conv_alpha = float(conv_alpha_raw) if conv_alpha_raw is not None else None
+        scale_weight_norms_raw = kwargs.get("scale_weight_norms")
+        scale_weight_norms = float(scale_weight_norms_raw) if scale_weight_norms_raw is not None else None
+
         return cls(
             lora_dim=network_dim,
             alpha=network_alpha,
             module_class=module_class,
+            network_type=network_type,
+            use_tucker=use_tucker,
+            decompose_both=decompose_both,
+            lokr_factor=lokr_factor,
+            use_scalar=use_scalar,
+            weight_decompose=weight_decompose,
+            full_matrix=full_matrix,
+            conv_dim=conv_dim,
+            conv_alpha=conv_alpha,
+            scale_weight_norms=scale_weight_norms,
             train_llm_adapter=train_llm_adapter,
             exclude_patterns=exclude_patterns,
             include_patterns=include_patterns,
