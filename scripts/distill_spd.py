@@ -152,6 +152,14 @@ def main():
     )
     parser.add_argument("--lr", type=float, default=-1.0)
     parser.add_argument("--grad_clip", type=float, default=-1.0)
+    parser.add_argument(
+        "--grad_accum",
+        type=int,
+        default=-1,
+        help="Micro-steps accumulated per optimizer step (resampling the SPD "
+        "stage each one, so updates mix low-/full-res). 1 = off. `iterations` "
+        "counts optimizer steps, so wall-clock scales ~linearly with this.",
+    )
     parser.add_argument("--warmup", type=float, default=-1.0)
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--grad_ckpt", action="store_true", default=False)
@@ -252,6 +260,7 @@ def main():
     lr = float(pick(args.lr, "optim.lr", 1e-4))
     weight_decay = float(_flatten(cfg, "optim.weight_decay", 0.0))
     grad_clip = float(pick(args.grad_clip, "optim.grad_clip", 1.0))
+    grad_accum = max(1, int(pick(args.grad_accum, "optim.grad_accum", 1)))
     warmup = float(pick(args.warmup, "optim.warmup", 0.02))
 
     save_every = int(pick(args.save_every, "io.save_every", 500))
@@ -513,15 +522,22 @@ def main():
 
     # --- Training loop ---
     logger.info("Starting SPD distillation: %d iterations", iterations)
-    data_iter = iter(dataloader)
+    data_iter = [iter(dataloader)]  # boxed so _micro_step can refresh on exhaustion
     running = 0.0
     progress = tqdm(range(iterations), desc="spd")
-    for step in progress:
+    def _micro_step():
+        """One sample → scaled backward. Returns (unscaled_loss, stage_idx).
+
+        Stage is resampled here (not once per optimizer step), so when
+        grad_accum > 1 each update averages gradients across the low-res and
+        full-res regimes instead of swinging between them — the high CoV in the
+        stage losses is regime-switching noise, which accumulation cancels.
+        """
         try:
-            _idx, latents, crossattn_emb, _pooled = next(data_iter)
+            _idx, latents, crossattn_emb, _pooled = next(data_iter[0])
         except StopIteration:
-            data_iter = iter(dataloader)
-            _idx, latents, crossattn_emb, _pooled = next(data_iter)
+            data_iter[0] = iter(dataloader)
+            _idx, latents, crossattn_emb, _pooled = next(data_iter[0])
 
         latents = latents.to(device, dtype=dtype, non_blocking=True)
         crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
@@ -542,7 +558,7 @@ def main():
                 for s in transition_sigmas
             ]
 
-        # Sample one stage for the whole batch (single-resolution per step),
+        # Sample one stage for this micro-batch (single-resolution per forward),
         # weighted by band width.
         stage_idx = int(
             torch.multinomial(band_widths_f, 1, generator=stage_rng).item()
@@ -570,15 +586,22 @@ def main():
             model.set_static_token_count(stage_token_counts[stage_idx])
         pred = _forward_dit(x_t, t, crossattn_emb)
         loss = nn.functional.mse_loss(pred.float(), v_target)
+        # Scale so accumulated grads are the *mean* over micro-steps (matches a
+        # true batch); LR/grad_clip semantics stay invariant to grad_accum.
+        (loss / grad_accum).backward()
+        return loss.item(), stage_idx
 
-        loss.backward()
+    for step in progress:
+        loss_v = 0.0
+        for _ in range(grad_accum):
+            micro_loss, stage_idx = _micro_step()
+            loss_v += micro_loss / grad_accum  # mean micro-loss for this step
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
 
-        loss_v = loss.item()
         running += loss_v
         cur_lr = scheduler.get_last_lr()[0]
         if (step + 1) % log_interval == 0:
