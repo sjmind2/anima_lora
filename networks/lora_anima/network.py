@@ -13,10 +13,13 @@ import torch
 from library.log import setup_logging
 from library.training.metrics import MetricContext
 from networks import NETWORK_REGISTRY, NetworkSpec, lora_save
+from networks.attn_fuse import match_fused_spec
 from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.loading import (
     _parse_reft_layers,
     _refuse_split_hydra_keys,
+    _refuse_split_loha_keys,
+    _refuse_split_lokr_keys,
     _refuse_split_stacked_experts_keys,
     _refuse_unfused_attn_lora_keys,
     _stack_lora_ups,
@@ -307,6 +310,8 @@ class LoRANetwork(torch.nn.Module):
         verbose = cfg.verbose
         alpha = cfg.alpha
         lora_dim = cfg.lora_dim
+        conv_dim = cfg.conv_dim
+        conv_alpha = cfg.conv_alpha
         train_llm_adapter = cfg.train_llm_adapter
         add_reft = cfg.add_reft
         reft_dim = cfg.reft_dim
@@ -507,6 +512,11 @@ class LoRANetwork(torch.nn.Module):
                                             else lora_dim
                                         )
                                         alpha_val = alpha
+                                    elif is_conv2d:
+                                        effective_conv_dim = conv_dim if conv_dim is not None else lora_dim
+                                        if effective_conv_dim > 0:
+                                            dim = effective_conv_dim
+                                            alpha_val = conv_alpha if conv_alpha is not None else alpha
 
                             if dim is None or dim == 0:
                                 if is_linear or is_conv2d_1x1:
@@ -605,7 +615,12 @@ class LoRANetwork(torch.nn.Module):
                     extra_kwargs["use_tucker"] = cfg.use_tucker
                     extra_kwargs["decompose_both"] = cfg.decompose_both
                     extra_kwargs["lokr_factor"] = cfg.lokr_factor
+                    extra_kwargs["use_scalar"] = cfg.use_scalar
+                    extra_kwargs["weight_decompose"] = cfg.weight_decompose
                     extra_kwargs["full_matrix"] = cfg.full_matrix
+                    fuse_spec = match_fused_spec(lora_name)
+                    if fuse_spec is not None:
+                        extra_kwargs["min_out_l"] = len(fuse_spec.component_letters)
                 elif effective_module_class == ChimeraHydraLoRAModule:
                     # Pool split is the chimera's only constructor surface;
                     # σ/FEI feature dims are 0 by design (the network-level
@@ -2354,6 +2369,8 @@ class LoRANetwork(torch.nn.Module):
         # but running hydra first means any non-hydra attention still goes
         # through the normal code path cleanly.
         weights_sd = _refuse_split_hydra_keys(weights_sd)
+        weights_sd = _refuse_split_loha_keys(weights_sd)
+        weights_sd = _refuse_split_lokr_keys(weights_sd)
         # Refuse unfused attn projections (inverse of save_weights defusing).
         weights_sd = _refuse_unfused_attn_lora_keys(weights_sd)
 
@@ -2790,13 +2807,23 @@ class LoRANetwork(torch.nn.Module):
             metadata["ss_network_type"] = self.cfg.network_type
 
         state_dict = self.state_dict()
-        # Drop training-only auxiliary heads from the on-disk artifact. ``repa_head``
-        # is a 3-layer MLP used only for the REPA alignment loss during training; it
-        # carries no ``lora_unet_*`` prefix, isn't consumed at inference or merge,
-        # and adds ~21MB of dead weight to the file. Resume-from-checkpoint will
-        # re-init the head from random — re-converges in a few hundred steps.
         for key in [k for k in state_dict if k.startswith("repa_head.")]:
             del state_dict[key]
+
+        if self.cfg.network_type in ("loha", "locon"):
+            for lora in self.text_encoder_loras + self.unet_loras:
+                if isinstance(lora, (LohaModule, LoConModule)) and lora.scalar != 1.0:
+                    lora_prefix = lora.lora_name
+                    s = lora.scalar.to(state_dict[f"{lora_prefix}.alpha"].device)
+                    if isinstance(lora, LohaModule):
+                        k = f"{lora_prefix}.hada_w1_a"
+                        if k in state_dict:
+                            state_dict[k] = state_dict[k] * s
+                    elif isinstance(lora, LoConModule):
+                        k = f"{lora_prefix}.lora_up.weight"
+                        if k in state_dict:
+                            state_dict[k] = state_dict[k] * s
+
         lora_save.save_network_weights(
             state_dict,
             file=file,
@@ -2882,4 +2909,15 @@ class LoRANetwork(torch.nn.Module):
             scalednorm = updown.norm() * ratio
             norms.append(scalednorm.item())
 
-        return keys_scaled, sum(norms) / len(norms), max(norms)
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if hasattr(lora, "apply_max_norm") and not isinstance(lora, LoRAModule):
+                result = lora.apply_max_norm(max_norm_value, device)
+                if result is not None:
+                    scaled, norm_val = result
+                    if scaled:
+                        keys_scaled += 1
+                    norms.append(norm_val)
+
+        if norms:
+            return keys_scaled, sum(norms) / len(norms), max(norms)
+        return keys_scaled, 0.0, 0.0

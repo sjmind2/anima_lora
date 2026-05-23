@@ -76,6 +76,7 @@ class LohaModule(BaseLoRAModule):
 
         self.org_module_ref = [org_module]
         self._fused = False
+        self.scalar = torch.tensor(1.0)
 
     def make_weight(self, device=None):
         scale = torch.tensor(self.scale, dtype=torch.float32, device=device)
@@ -95,6 +96,8 @@ class LohaModule(BaseLoRAModule):
             w2a = self.hada_w2_a.to(device)
             weight = HadaWeight.apply(w1b, w1a, w2b, w2a, scale)
 
+        weight = weight * self.scalar.to(device)
+
         if self.rank_dropout is not None and self.training:
             drop = (torch.rand(weight.size(0), device=device) > self.rank_dropout).to(
                 weight.dtype
@@ -103,6 +106,19 @@ class LohaModule(BaseLoRAModule):
             weight = weight * drop
 
         return weight
+
+    def apply_max_norm(self, max_norm, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+        with torch.no_grad():
+            orig_norm = self.make_weight(device).norm()
+            norm = torch.clamp(orig_norm, max_norm / 2)
+            desired = torch.clamp(norm, max=max_norm)
+            ratio = desired.cpu() / norm.cpu()
+            scaled = norm != desired
+            if scaled:
+                self.scalar *= ratio
+            return scaled, (orig_norm * ratio).item()
 
     def forward(self, x):
         if not self.enabled or self._fused:
@@ -120,6 +136,8 @@ class LohaModule(BaseLoRAModule):
                     None,
                     self.org_module_ref[0].stride,
                     self.org_module_ref[0].padding,
+                    self.org_module_ref[0].dilation,
+                    self.org_module_ref[0].groups,
                 )
             else:
                 delta = F.linear(x, diff_weight)
@@ -138,6 +156,8 @@ class LohaModule(BaseLoRAModule):
                 None,
                 self.org_module_ref[0].stride,
                 self.org_module_ref[0].padding,
+                self.org_module_ref[0].dilation,
+                self.org_module_ref[0].groups,
             )
         else:
             delta = F.linear(x.float(), diff_weight)
@@ -197,7 +217,7 @@ class LohaModule(BaseLoRAModule):
     def custom_state_dict(self):
         destination = {}
         destination["alpha"] = self.alpha
-        destination["hada_w1_a"] = self.hada_w1_a
+        destination["hada_w1_a"] = self.hada_w1_a * self.scalar.to(self.hada_w1_a.device)
         destination["hada_w1_b"] = self.hada_w1_b
         destination["hada_w2_a"] = self.hada_w2_a
         destination["hada_w2_b"] = self.hada_w2_b

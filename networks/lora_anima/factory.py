@@ -18,6 +18,8 @@ from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.loading import (
     _refuse_split_chimera_keys,
     _refuse_split_hydra_keys,
+    _refuse_split_loha_keys,
+    _refuse_split_lokr_keys,
     _refuse_split_stacked_experts_keys,
     _refuse_unfused_attn_lora_keys,
     _stack_chimera_lora_ups,
@@ -341,6 +343,8 @@ def create_network_from_weights(
     weights_sd = _refuse_split_stacked_experts_keys(weights_sd)
     weights_sd = _refuse_split_hydra_keys(weights_sd)
     weights_sd = _refuse_split_chimera_keys(weights_sd)
+    weights_sd = _refuse_split_loha_keys(weights_sd)
+    weights_sd = _refuse_split_lokr_keys(weights_sd)
     # Refuse unfused attn projections so modules_dim reflects the runtime (qkv/kv fused).
     weights_sd = _refuse_unfused_attn_lora_keys(weights_sd)
 
