@@ -523,10 +523,21 @@ def main():
     # --- Training loop ---
     logger.info("Starting SPD distillation: %d iterations", iterations)
     data_iter = [iter(dataloader)]  # boxed so _micro_step can refresh on exhaustion
-    running = 0.0
     progress = tqdm(range(iterations), desc="spd")
+    # GPU-side logging accumulators — flushed in one stacked .tolist() at every
+    # log_interval, replacing the per-micro-step loss.item() (grad_accum CUDA
+    # syncs per optimizer step) and the per-parameter .item() walk in the
+    # LoRA-norm logging. Mirrors the accumulator pattern in distill_turbo.py.
+    n_stages = len(stages)
+    acc_loss = torch.zeros((), device=device)              # Σ step-mean loss
+    acc_loss_stage = torch.zeros(n_stages, device=device)  # Σ micro-loss by stage
+    acc_stage_cnt = torch.zeros(n_stages, device=device)   # micro-steps by stage
     def _micro_step():
-        """One sample → scaled backward. Returns (unscaled_loss, stage_idx).
+        """One sample → scaled backward. Returns (unscaled_loss_tensor, stage_idx).
+
+        The loss is returned as a *detached GPU tensor* (not ``.item()``) so the
+        accumulation in the training loop stays sync-free; grad_accum micro-steps
+        would otherwise force that many CUDA syncs per optimizer step.
 
         Stage is resampled here (not once per optimizer step), so when
         grad_accum > 1 each update averages gradients across the low-res and
@@ -592,37 +603,51 @@ def main():
         # Scale so accumulated grads are the *mean* over micro-steps (matches a
         # true batch); LR/grad_clip semantics stay invariant to grad_accum.
         (loss / grad_accum).backward()
-        return loss.item(), stage_idx
+        return loss.detach(), stage_idx
 
     for step in progress:
-        loss_v = 0.0
+        step_loss = torch.zeros((), device=device)  # mean micro-loss, GPU-side
         for _ in range(grad_accum):
             micro_loss, stage_idx = _micro_step()
-            loss_v += micro_loss / grad_accum  # mean micro-loss for this step
+            step_loss = step_loss + micro_loss / grad_accum
+            acc_loss_stage[stage_idx] += micro_loss  # python idx → no sync
+            acc_stage_cnt[stage_idx] += 1
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
+        acc_loss.add_(step_loss)
 
-        running += loss_v
-        cur_lr = scheduler.get_last_lr()[0]
         if (step + 1) % log_interval == 0:
-            avg = running / log_interval
-            running = 0.0
+            # LoRA L2 norms: accumulate squared sums on-device and fold them into
+            # the single sync below (was one .item() per trainable parameter).
             with torch.no_grad():
-                up_sq = 0.0
-                down_sq = 0.0
+                up_sq = torch.zeros((), device=device)
+                down_sq = torch.zeros((), device=device)
                 for name, p in network.named_parameters():
                     if not p.requires_grad:
                         continue
-                    s = p.detach().float().pow(2).sum().item()
+                    s = p.detach().float().pow(2).sum()
                     if "lora_up" in name:
-                        up_sq += s
+                        up_sq = up_sq + s
                     elif "lora_down" in name:
-                        down_sq += s
-                up_norm = up_sq**0.5
-                down_norm = down_sq**0.5
+                        down_sq = down_sq + s
+            # One CUDA sync per log boundary: stack every scalar, read once.
+            stage_means = acc_loss_stage / acc_stage_cnt.clamp(min=1)
+            packed = torch.cat(
+                [
+                    (acc_loss / log_interval).reshape(1),
+                    up_sq.sqrt().reshape(1),
+                    down_sq.sqrt().reshape(1),
+                    stage_means,
+                    acc_stage_cnt,
+                ]
+            ).tolist()
+            avg, up_norm, down_norm = packed[0], packed[1], packed[2]
+            stage_vals = packed[3 : 3 + n_stages]
+            stage_cnts = packed[3 + n_stages : 3 + 2 * n_stages]
+            cur_lr = scheduler.get_last_lr()[0]  # CPU-side; no sync
             progress.set_postfix(
                 loss=f"{avg:.5f}",
                 stage=stage_idx,
@@ -634,7 +659,15 @@ def main():
                 writer.add_scalar("train/lr", cur_lr, step + 1)
                 writer.add_scalar("train/lora_up_norm", up_norm, step + 1)
                 writer.add_scalar("train/lora_down_norm", down_norm, step + 1)
-                writer.add_scalar(f"train/loss_stage{stage_idx}", loss_v, step + 1)
+                # Per-stage mean loss over the interval (only stages touched).
+                for si in range(n_stages):
+                    if stage_cnts[si] > 0:
+                        writer.add_scalar(
+                            f"train/loss_stage{si}", stage_vals[si], step + 1
+                        )
+            acc_loss.zero_()
+            acc_loss_stage.zero_()
+            acc_stage_cnt.zero_()
 
         if (step + 1) % save_every == 0 or (step + 1) == iterations:
             _save(step + 1)

@@ -192,17 +192,22 @@ def apply_rotary_pos_emb_qk(
 
     cos_q = cos_.to(q.dtype)
     sin_q = sin_.to(q.dtype)
-    q_rot, q_pass = q[..., :rot_dim], q[..., rot_dim:]
-    q = torch.cat(
-        ((q_rot * cos_q) + (_rotate_half(q_rot, False) * sin_q), q_pass), dim=-1
-    )
+    # For Anima, dim_t+dim_h+dim_w sum to head_dim by construction (see the
+    # assert in VideoRopePosition3DEmb.__init__), so rot_dim == head_dim and the
+    # pass-through slice is empty. Skip the torch.cat in that case — it would
+    # otherwise allocate+copy a full (B,L,H,D) tensor per Q/K per block for
+    # nothing. `rot_dim == q.shape[-1]` is a compile-time constant (head_dim
+    # never varies across buckets), so the branch resolves once under
+    # torch.compile and never recompiles per bucket.
+    q_rot = q[..., :rot_dim]
+    q_emb = (q_rot * cos_q) + (_rotate_half(q_rot, False) * sin_q)
+    q = q_emb if rot_dim == q.shape[-1] else torch.cat((q_emb, q[..., rot_dim:]), dim=-1)
 
     cos_k = cos_q if k.dtype == q.dtype else cos_.to(k.dtype)
     sin_k = sin_q if k.dtype == q.dtype else sin_.to(k.dtype)
-    k_rot, k_pass = k[..., :rot_dim], k[..., rot_dim:]
-    k = torch.cat(
-        ((k_rot * cos_k) + (_rotate_half(k_rot, False) * sin_k), k_pass), dim=-1
-    )
+    k_rot = k[..., :rot_dim]
+    k_emb = (k_rot * cos_k) + (_rotate_half(k_rot, False) * sin_k)
+    k = k_emb if rot_dim == k.shape[-1] else torch.cat((k_emb, k[..., rot_dim:]), dim=-1)
 
     return q, k
 
@@ -1715,18 +1720,25 @@ class Anima(nn.Module):
                 )
             _static_pad_info = (T_s, H_s, W_s, seq_len)
 
-            # Flatten 5D → 2D and pad sequence to target length.
-            # Always pad (even when seq_len == target) to avoid a data-dependent
-            # branch that causes torch.compile recompilation across bucket shapes.
+            # Flatten 5D → 2D and (in pad mode) pad sequence to target length.
+            # The pad is gated on the static Python bool `self.pad_to_static`,
+            # NOT on `target - seq_len > 0`: under torch.compile (full/compile_core
+            # mode, which only runs with pad_to_static=True) seq_len is a SymInt,
+            # so a shape-dependent branch would recompile per bucket — the concern
+            # the original "always pad" comment guarded against. Keying on the
+            # static bool specializes once. In native mode (pad_to_static=False)
+            # target == seq_len by construction, so the pad was a pure no-op copy
+            # of x (~16 MiB) + the two RoPE tensors every forward; skip it.
             x_B_T_H_W_D = x_B_T_H_W_D.flatten(1, 3)
-            x_B_T_H_W_D = torch.nn.functional.pad(
-                x_B_T_H_W_D, (0, 0, 0, target - seq_len)
-            )
+            if self.pad_to_static:
+                x_B_T_H_W_D = torch.nn.functional.pad(
+                    x_B_T_H_W_D, (0, 0, 0, target - seq_len)
+                )
             # Reshape to fake-5D: (B, 1, target, 1, D)
             x_B_T_H_W_D = x_B_T_H_W_D.unsqueeze(1).unsqueeze(3)
 
             # Pad RoPE cos/sin: each (L, 1, 1, D_head) → (target, 1, 1, D_head)
-            if rope_cos_sin is not None:
+            if self.pad_to_static and rope_cos_sin is not None:
                 pad = (0, 0, 0, 0, 0, 0, 0, target - rope_cos_sin[0].shape[0])
                 rope_cos_sin = (
                     torch.nn.functional.pad(rope_cos_sin[0], pad),
