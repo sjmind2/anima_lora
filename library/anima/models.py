@@ -1225,6 +1225,11 @@ class Anima(nn.Module):
         # torch.compile recompilation across different bucket resolutions.
         # Set via set_static_token_count(). None = disabled (original behavior).
         self.static_token_count: Optional[int] = None
+        # When static_token_count is set, whether to zero-pad up to it (single
+        # static shape, one compiled graph) or run each bucket at its native
+        # token count (no padding → no static-pad attention leak; recompiles
+        # once per distinct bucket token-count instead). See set_static_token_count.
+        self.pad_to_static: bool = True
 
         self.build_patch_embed()
         self.build_pos_embed()
@@ -1332,13 +1337,29 @@ class Anima(nn.Module):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-    def set_static_token_count(self, count: Optional[int]):
-        """Enable static-shape training by padding all token sequences to `count`.
+    def set_static_token_count(self, count: Optional[int], pad: bool = True):
+        """Select constant-token-bucket mode and how it feeds torch.compile.
 
-        All bucket resolutions must produce <= `count` spatial tokens after
-        patchification.  Passing None disables static-shape mode.
+        ``count`` is the static token target; all bucket resolutions must
+        produce <= ``count`` spatial tokens after patchification.  Passing
+        None disables the mode entirely (original behavior).
+
+        ``pad`` controls the compile/correctness tradeoff when ``count`` is set:
+
+        * ``pad=True`` (default) — zero-pad every bucket's patch sequence up to
+          ``count`` so all forwards share one shape and one compiled block graph.
+          Under flash this leaks the padded tokens into the real-token output
+          (the AdaLN shift + Q/K/V bias make padded rows non-zero into
+          attention; see bench/static_padding). flex masks it but is ~4.5x slower.
+        * ``pad=False`` — run each bucket at its native token count. No padding
+          → no leak (native flash matches the no-pad ground truth bit-for-bit).
+          Block-compile then traces one graph per distinct bucket token-count
+          (CONSTANT_TOKEN_BUCKETS collapses to 5), a bounded one-time warmup.
+          Incompatible with ``compile_core`` / ``compile_mode='full'`` (that
+          path assumes a single shape-invariant block stack).
         """
         self.static_token_count = count
+        self.pad_to_static = pad
 
     def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None):
         """torch.compile each block's _forward individually.
@@ -1378,6 +1399,11 @@ class Anima(nn.Module):
         """
         assert self.static_token_count is not None, (
             "compile_core requires set_static_token_count() to be called first"
+        )
+        assert self.pad_to_static, (
+            "compile_core requires pad_to_static=True: _run_blocks is only "
+            "shape-invariant when sequences are padded to a single token count. "
+            "Use compile_blocks for the native (no-pad) multi-shape path."
         )
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
@@ -1663,9 +1689,18 @@ class Anima(nn.Module):
         # with t=1, w=1 produces the same flat sequential order as the original.
         _static_pad_info = None
         if self.static_token_count is not None:
-            target = self.static_token_count
             B_s, T_s, H_s, W_s, D_s = x_B_T_H_W_D.shape
             seq_len = T_s * H_s * W_s
+            # pad_to_static: pad up to the global target so every bucket shares
+            #   one shape → one compiled block graph (but the pad leaks into
+            #   flash self-attention; see bench/static_padding).
+            # else (no-pad): target = seq_len, so we *flatten only* (zero pad).
+            #   This is the key to the recompile budget: the block stack must see
+            #   a flat (B,1,L,1,D) sequence keyed solely by token count, otherwise
+            #   dynamo guards on H and W separately and recompiles per *resolution*
+            #   (17 buckets) instead of per token-count (5 distinct). Bit-exact to
+            #   native — it's the gap=0 control the leak probe verifies.
+            target = self.static_token_count if self.pad_to_static else seq_len
             _static_pad_info = (T_s, H_s, W_s, seq_len)
 
             # Flatten 5D → 2D and pad sequence to target length.
@@ -1765,6 +1800,7 @@ class Anima(nn.Module):
         # the recompile limit and falls back to eager, losing flex_attention fusion.
         if (
             _static_pad_info is not None
+            and self.pad_to_static
             and self.attn_mode == "flex"
             and attention_dispatch.create_block_mask is not None
         ):

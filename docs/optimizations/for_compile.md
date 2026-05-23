@@ -123,6 +123,14 @@ When `static_token_count` is set:
 4. Pad RoPE embeddings and extra positional embeddings to match.
 5. After all blocks: squeeze fake dims and strip padding to restore `(B, T, H, W, D)`.
 
+> **Correctness caveat:** under `attn_mode="flash"` (no padding mask) the
+> zero-padded tokens are *not* harmless sinks — AdaLN shift + Q/K/V bias leak
+> them into the real-token output (up to ~6.5% rel-L2 on the 4032-token
+> buckets). The `pad=False` variant (`set_static_token_count(count, pad=False)`,
+> CLI `--no_static_pad`) runs native token counts instead, trading the single
+> padded shape for 5 compiled graphs. See
+> [`no_static_pad.md`](no_static_pad.md) and `bench/static_padding/`.
+
 ### 2.8 Pre-computed BlockMask for flex attention
 
 In static-shape mode, two BlockMasks are created before the block loop:
