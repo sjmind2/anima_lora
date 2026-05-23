@@ -248,7 +248,27 @@ def cmd_preprocess_config(extra):
             "preprocess-config requires --dataset_config <path> and --src <dir>"
         )
 
-    cfg = toml.load(cfg_path)
+    # A real-time scanner (e.g. Windows Defender) often holds a brief exclusive
+    # lock on a *just-created* file, surfaced as PermissionError [Errno 13] on
+    # Windows. The ComfyUI trainer node writes this config milliseconds before
+    # the daemon's preprocess job opens it, so retry through that transient lock
+    # rather than failing the whole chain. A genuinely unreadable file still
+    # raises after the budget is spent.
+    import time
+
+    last_err: OSError | None = None
+    for attempt in range(10):
+        try:
+            cfg = toml.load(cfg_path)
+            break
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.2 * (attempt + 1))
+    else:
+        raise SystemExit(
+            f"could not read {cfg_path} after retrying (last error: {last_err}). "
+            "If this persists, exclude the dataset/temp dir from your antivirus."
+        )
     subsets = [
         sub
         for ds in (cfg.get("datasets") or [])
