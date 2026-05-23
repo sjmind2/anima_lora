@@ -34,3 +34,5 @@ logs
 .anima-update-backups
 node.zip
 _archive/
+.trae/
+origin_image/
