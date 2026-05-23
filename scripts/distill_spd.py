@@ -580,10 +580,13 @@ def main():
         if args.grad_ckpt:  # reentrant checkpoint needs a grad-requiring input
             x_t.requires_grad_()
         v_target = (eps_si - x0_si).float()
-        # Pad this stage's tokens to its constant count so the compiled blocks
-        # see a single shape per stage. No-op when --torch_compile is off.
+        # Native-shape mode for this stage's bucket: the forward runs at its
+        # real token count (no static padding → no flash pad-leak). The per-stage
+        # count value is now just a non-None sentinel enabling the mode;
+        # compile_blocks above traces one graph per (stage × bucket) shape.
+        # No-op when --torch_compile is off.
         if stage_token_counts is not None:
-            model.set_static_token_count(stage_token_counts[stage_idx])
+            model.set_static_token_count(stage_token_counts[stage_idx], pad=False)
         pred = _forward_dit(x_t, t, crossattn_emb)
         loss = nn.functional.mse_loss(pred.float(), v_target)
         # Scale so accumulated grads are the *mean* over micro-steps (matches a

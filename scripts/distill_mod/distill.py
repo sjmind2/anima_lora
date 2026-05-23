@@ -151,15 +151,6 @@ def main():
         help="Disable torch.compile",
     )
     parser.add_argument(
-        "--compile_mode",
-        type=str,
-        choices=["blocks", "full"],
-        default="blocks",
-        help="'blocks': compile each block._forward (default). "
-        "'full': compile the constant-shape _run_blocks stack (one CUDAGraph "
-        "across buckets — requires --no_grad_ckpt and --blocks_to_swap 0).",
-    )
-    parser.add_argument(
         "--compile_inductor_mode",
         type=str,
         default="",
@@ -365,28 +356,24 @@ def main():
     else:
         model.to(device)
 
-    # Static token count: pad all spatial sequences to 4096 tokens so
-    # torch.compile sees a single shape across all bucket resolutions.
-    model.set_static_token_count(4096)
+    # Native-shape buckets: every aspect bucket runs at its real token count
+    # (no static padding → no flash pad-leak into the distillation target). The
+    # value here is just a non-None sentinel enabling the mode; each forward
+    # reshapes to its own seq_len.
+    model.set_static_token_count(4096, pad=False)
 
-    # Compile individual block._forward for speedup.
-    # unsloth_checkpoint wraps Block.forward with @torch._disable_dynamo,
-    # so we compile _forward (the inner computation) not forward.
-    # compile_mode='full' instead compiles the constant-shape _run_blocks stack
-    # — single trace across all buckets, but incompatible with grad ckpt / block swap.
+    # Compile individual block._forward for speedup. unsloth_checkpoint wraps
+    # Block.forward with @torch._disable_dynamo, so we compile _forward (the
+    # inner computation) not forward. Native mode traces one block graph per
+    # distinct latent token count; raise the dynamo cache so every distinct
+    # shape traces instead of falling back to eager mid-warmup.
     if args.torch_compile:
-        if args.compile_mode == "full":
-            assert not args.grad_ckpt, (
-                "compile_mode='full' is incompatible with gradient checkpointing — "
-                "pass --no_grad_ckpt"
-            )
-            assert args.blocks_to_swap == 0, (
-                "compile_mode='full' is incompatible with block swap — "
-                "pass --blocks_to_swap 0"
-            )
-            model.compile_core(mode=args.compile_inductor_mode)
-        else:
-            model.compile_blocks(mode=args.compile_inductor_mode)
+        import torch._dynamo as _dynamo
+
+        _dynamo.config.cache_size_limit = max(
+            _dynamo.config.cache_size_limit, 64
+        )
+        model.compile_blocks(mode=args.compile_inductor_mode)
 
     # Gradient checkpointing with CPU offload: recompute block activations
     # during backward, offloading saved tensors to CPU between forward/backward.
