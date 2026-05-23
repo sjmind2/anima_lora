@@ -4,12 +4,15 @@
 network_type = "locon"
 network_dim = 32
 network_alpha = 32
+conv_dim = 16
+conv_alpha = 16
 learning_rate = 2e-5
 max_train_epochs = 4
 save_every_n_epochs = 2
 checkpointing_epochs = 2
 
 use_tucker = true
+scale_weight_norms = 1.0
 
 # use_ortho = true
 # use_timestep_mask = true

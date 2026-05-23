@@ -26,6 +26,9 @@ class LokrModule(BaseLoRAModule):
         decompose_both=False,
         lokr_factor=-1,
         full_matrix=False,
+        use_scalar=False,
+        weight_decompose=False,
+        min_out_l=1,
     ):
         super().__init__(
             lora_name,
@@ -52,6 +55,8 @@ class LokrModule(BaseLoRAModule):
 
             in_m, in_n = factorization(in_dim, factor)
             out_l, out_k = factorization(out_dim, factor)
+            if out_l < min_out_l and out_k >= min_out_l:
+                out_l, out_k = out_k, out_l
             shape = ((out_l, out_k), (in_m, in_n), *k_size)
             self.tucker = use_tucker and any(k != 1 for k in k_size)
 
@@ -85,6 +90,8 @@ class LokrModule(BaseLoRAModule):
 
             in_m, in_n = factorization(in_dim, factor)
             out_l, out_k = factorization(out_dim, factor)
+            if out_l < min_out_l and out_k >= min_out_l:
+                out_l, out_k = out_k, out_l
             shape = ((out_l, out_k), (in_m, in_n))
 
             if (
@@ -106,12 +113,18 @@ class LokrModule(BaseLoRAModule):
                 self.lokr_w2 = nn.Parameter(torch.empty(shape[0][1], shape[1][1]))
 
         if self.use_w2:
-            torch.nn.init.zeros_(self.lokr_w2)
+            if use_scalar:
+                torch.nn.init.kaiming_uniform_(self.lokr_w2, a=math.sqrt(5))
+            else:
+                torch.nn.init.zeros_(self.lokr_w2)
         else:
             if self.tucker:
                 torch.nn.init.kaiming_uniform_(self.lokr_t2, a=math.sqrt(5))
             torch.nn.init.kaiming_uniform_(self.lokr_w2_a, a=math.sqrt(5))
-            torch.nn.init.zeros_(self.lokr_w2_b)
+            if use_scalar:
+                torch.nn.init.kaiming_uniform_(self.lokr_w2_b, a=math.sqrt(5))
+            else:
+                torch.nn.init.zeros_(self.lokr_w2_b)
 
         if self.use_w1:
             torch.nn.init.kaiming_uniform_(self.lokr_w1, a=math.sqrt(5))
@@ -121,6 +134,33 @@ class LokrModule(BaseLoRAModule):
 
         self.org_module_ref = [org_module]
         self._fused = False
+
+        if self.use_w1 and self.use_w2:
+            self.scale = 1.0
+            self.alpha = torch.tensor(float(self.lora_dim))
+
+        if use_scalar:
+            self.scalar = nn.Parameter(torch.tensor(0.0))
+        else:
+            self.register_buffer("scalar", torch.tensor(1.0), persistent=False)
+
+        self.wd = weight_decompose
+        if weight_decompose:
+            org_weight = org_module.weight.data.clone().float()
+            out_dim = org_weight.shape[0]
+            if org_module.__class__.__name__ == "Conv2d":
+                self.dora_norm_dims = 2
+                self.dora_scale = nn.Parameter(
+                    torch.norm(org_weight.reshape(out_dim, -1), dim=1, keepdim=True)
+                    .reshape(out_dim, *[1] * (org_weight.dim() - 1))
+                )
+            else:
+                self.dora_norm_dims = 0
+                self.dora_scale = nn.Parameter(
+                    torch.norm(org_weight, dim=1, keepdim=True)
+                )
+        else:
+            self.dora_norm_dims = 0
 
     def make_weight(self, device=None):
         w1 = (self.lokr_w1 if self.use_w1 else self.lokr_w1_a @ self.lokr_w1_b).to(device)
@@ -153,6 +193,47 @@ class LokrModule(BaseLoRAModule):
 
         return weight
 
+    def apply_max_norm(self, max_norm, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+        with torch.no_grad():
+            orig_norm = self.make_weight(device).norm()
+            norm = torch.clamp(orig_norm, max_norm / 2)
+            desired = torch.clamp(norm, max=max_norm)
+            ratio = desired.cpu() / norm.cpu()
+            scaled = norm != desired
+            if scaled:
+                modules = 4 - self.use_w1 - self.use_w2 + (not self.use_w2 and self.tucker)
+                r = ratio ** (1 / modules)
+                if self.use_w1:
+                    self.lokr_w1 *= r
+                else:
+                    self.lokr_w1_a *= r
+                    self.lokr_w1_b *= r
+                if self.use_w2:
+                    self.lokr_w2 *= r
+                else:
+                    if self.tucker:
+                        self.lokr_t2 *= r
+                    self.lokr_w2_a *= r
+                    self.lokr_w2_b *= r
+            return scaled, (orig_norm * ratio).item()
+
+    def apply_weight_decompose(self, weight, multiplier=None):
+        if multiplier is None:
+            multiplier = self.multiplier
+        if self.dora_norm_dims == 2:
+            weight_norm = (
+                torch.norm(weight.reshape(weight.shape[0], -1), dim=1, keepdim=True)
+                .reshape(weight.shape[0], *[1] * (weight.dim() - 1))
+            ) + torch.finfo(weight.dtype).eps
+        else:
+            weight_norm = torch.norm(weight, dim=1, keepdim=True) + torch.finfo(weight.dtype).eps
+        scale = self.dora_scale / weight_norm
+        if multiplier != 1:
+            scale = multiplier * (scale - 1) + 1
+        return weight * scale
+
     def forward(self, x):
         if not self.enabled or self._fused:
             return self.org_forward(x)
@@ -160,8 +241,26 @@ class LokrModule(BaseLoRAModule):
         org_forwarded = self.org_forward(x)
 
         if not self.training:
-            diff_weight = self.make_weight(x.device).to(org_forwarded.dtype)
+            diff_weight = self.make_weight(x.device).to(org_forwarded.dtype) * self.scalar
             diff_weight = diff_weight.view(self.shape)
+            if self.wd:
+                base_weight = self.org_module_ref[0].weight.data.to(x.device).float()
+                new_weight = self.apply_weight_decompose(base_weight + diff_weight.float())
+                delta_weight = new_weight - base_weight
+                delta_weight = delta_weight.to(org_forwarded.dtype)
+                if self.org_module_ref[0].__class__.__name__ == "Conv2d":
+                    delta = F.conv2d(
+                        x,
+                        delta_weight,
+                        None,
+                        self.org_module_ref[0].stride,
+                        self.org_module_ref[0].padding,
+                        self.org_module_ref[0].dilation,
+                        self.org_module_ref[0].groups,
+                    )
+                else:
+                    delta = F.linear(x, delta_weight)
+                return org_forwarded + delta
             if self.org_module_ref[0].__class__.__name__ == "Conv2d":
                 delta = F.conv2d(
                     x,
@@ -169,6 +268,8 @@ class LokrModule(BaseLoRAModule):
                     None,
                     self.org_module_ref[0].stride,
                     self.org_module_ref[0].padding,
+                    self.org_module_ref[0].dilation,
+                    self.org_module_ref[0].groups,
                 )
             else:
                 delta = F.linear(x, diff_weight)
@@ -177,8 +278,26 @@ class LokrModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        diff_weight = self.make_weight(x.device).float()
+        diff_weight = self.make_weight(x.device).float() * self.scalar
         diff_weight = diff_weight.view(self.shape)
+
+        if self.wd:
+            base_weight = self.org_module_ref[0].weight.data.to(x.device).float()
+            new_weight = self.apply_weight_decompose(base_weight + diff_weight)
+            delta_weight = new_weight - base_weight
+            if self.org_module_ref[0].__class__.__name__ == "Conv2d":
+                delta = F.conv2d(
+                    x.float(),
+                    delta_weight,
+                    None,
+                    self.org_module_ref[0].stride,
+                    self.org_module_ref[0].padding,
+                    self.org_module_ref[0].dilation,
+                    self.org_module_ref[0].groups,
+                )
+            else:
+                delta = F.linear(x.float(), delta_weight)
+            return org_forwarded + delta.to(org_forwarded.dtype)
 
         if self.org_module_ref[0].__class__.__name__ == "Conv2d":
             delta = F.conv2d(
@@ -187,6 +306,8 @@ class LokrModule(BaseLoRAModule):
                 None,
                 self.org_module_ref[0].stride,
                 self.org_module_ref[0].padding,
+                self.org_module_ref[0].dilation,
+                self.org_module_ref[0].groups,
             )
         else:
             delta = F.linear(x.float(), diff_weight)
@@ -256,9 +377,9 @@ class LokrModule(BaseLoRAModule):
         destination = {}
         destination["alpha"] = self.alpha
         if self.use_w1:
-            destination["lokr_w1"] = self.lokr_w1
+            destination["lokr_w1"] = self.lokr_w1 * self.scalar
         else:
-            destination["lokr_w1_a"] = self.lokr_w1_a
+            destination["lokr_w1_a"] = self.lokr_w1_a * self.scalar
             destination["lokr_w1_b"] = self.lokr_w1_b
         if self.use_w2:
             destination["lokr_w2"] = self.lokr_w2
@@ -267,4 +388,6 @@ class LokrModule(BaseLoRAModule):
             destination["lokr_w2_b"] = self.lokr_w2_b
             if self.tucker:
                 destination["lokr_t2"] = self.lokr_t2
+        if self.wd:
+            destination["dora_scale"] = self.dora_scale
         return destination

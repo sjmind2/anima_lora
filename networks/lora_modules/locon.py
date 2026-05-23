@@ -74,6 +74,7 @@ class LoConModule(BaseLoRAModule):
 
         self.org_module_ref = [org_module]
         self._fused = False
+        self.scalar = torch.tensor(1.0)
 
     def make_weight(self, device=None):
         wa = self.lora_up.weight.to(device)
@@ -87,6 +88,19 @@ class LoConModule(BaseLoRAModule):
             weight = wa.view(wa.size(0), -1) @ wb.view(wb.size(0), -1)
         weight = weight.view(self.shape)
         return weight
+
+    def apply_max_norm(self, max_norm, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+        with torch.no_grad():
+            orig_norm = self.make_weight(device).norm() * self.scale
+            norm = torch.clamp(orig_norm, max_norm / 2)
+            desired = torch.clamp(norm, max=max_norm)
+            ratio = desired.cpu() / norm.cpu()
+            scaled = norm != desired
+            if scaled:
+                self.scalar *= ratio
+            return scaled, (orig_norm * ratio).item()
 
     def forward(self, x):
         if not self.enabled or self._fused:
@@ -106,7 +120,7 @@ class LoConModule(BaseLoRAModule):
                 )
             else:
                 delta = F.linear(x, diff_weight)
-            return org_forwarded + delta * self.multiplier * self.scale
+            return org_forwarded + delta * self.multiplier * self.scale * self.scalar.to(x.device)
 
         if self._skip_module():
             return org_forwarded
@@ -122,25 +136,24 @@ class LoConModule(BaseLoRAModule):
 
         if self.org_module_ref[0].__class__.__name__ == "Conv2d":
             delta = F.conv2d(
-                x.float(),
-                diff_weight,
-                None,
-                self.org_module_ref[0].stride,
-                self.org_module_ref[0].padding,
-            )
+                    x.float(),
+                    diff_weight,
+                    None,
+                    self.org_module_ref[0].stride,
+                    self.org_module_ref[0].padding,
+                    self.org_module_ref[0].dilation,
+                    self.org_module_ref[0].groups,
+                )
         else:
             delta = F.linear(x.float(), diff_weight)
 
-        return org_forwarded + (delta * self.multiplier * self.scale).to(org_forwarded.dtype)
+        return org_forwarded + (delta * self.multiplier * self.scale * self.scalar.to(x.device)).to(org_forwarded.dtype)
 
     def get_weight(self, multiplier=None):
         if multiplier is None:
             multiplier = self.multiplier
         weight = self.make_weight().to(torch.float)
-        if self._has_channel_scale and weight.dim() == 2:
-            down_w = self.lora_down.weight.to(torch.float)
-            down_w = down_w * self.inv_scale.to(down_w).unsqueeze(0)
-        return multiplier * weight * self.scale
+        return multiplier * weight * self.scale * self.scalar.to(weight.device)
 
     def merge_to(self, sd, dtype, device):
         with torch.no_grad():
@@ -174,7 +187,7 @@ class LoConModule(BaseLoRAModule):
                     down_weight.permute(1, 0, 2, 3), up_weight
                 ).permute(1, 0, 2, 3)
 
-            w += self.multiplier * diff * self.scale
+            w += self.multiplier * diff * self.scale * self.scalar.to(device)
             weight.data.copy_(w.to(dtype))
 
     def fuse_weight(self):
@@ -196,7 +209,7 @@ class LoConModule(BaseLoRAModule):
     def custom_state_dict(self):
         destination = {}
         destination["alpha"] = self.alpha
-        destination["lora_up.weight"] = self.lora_up.weight
+        destination["lora_up.weight"] = self.lora_up.weight * self.scalar.to(self.lora_up.weight.device)
         destination["lora_down.weight"] = self.lora_down.weight
         if self.tucker:
             destination["lora_mid.weight"] = self.lora_mid.weight

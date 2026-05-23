@@ -141,6 +141,8 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     "decompose_both",
     "lokr_factor",
     "full_matrix",
+    "conv_dim",
+    "conv_alpha",
 )
 
 
@@ -294,7 +296,7 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         name="lokr",
         module_class=LokrModule,
         save_variant="standard",
-        kwarg_flags=("use_tucker", "decompose_both", "lokr_factor", "full_matrix"),
+        kwarg_flags=("use_tucker", "decompose_both", "lokr_factor", "use_scalar", "weight_decompose", "full_matrix"),
     ),
 }
 

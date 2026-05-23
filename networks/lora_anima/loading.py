@@ -527,3 +527,147 @@ def _refuse_unfused_attn_lora_keys(
                 state_dict.pop(f"{shared_prefix}{suf}_proj.{subk}", None)
 
     return state_dict
+
+
+def _refuse_split_loha_keys(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    for shared_prefix, spec in iter_split_groups(state_dict, ".hada_w1_b"):
+        suffixes = spec.component_letters
+        w1_a_list: List[torch.Tensor] = []
+        w1_b_list: List[torch.Tensor] = []
+        w2_a_list: List[torch.Tensor] = []
+        w2_b_list: List[torch.Tensor] = []
+        alpha_list: List[Optional[torch.Tensor]] = []
+        t1_list: List[Optional[torch.Tensor]] = []
+        t2_list: List[Optional[torch.Tensor]] = []
+        complete = True
+        for suf in suffixes:
+            cp = f"{shared_prefix}{suf}_proj"
+            if f"{cp}.hada_w1_a" not in state_dict or f"{cp}.hada_w1_b" not in state_dict:
+                complete = False
+                break
+            w1_a_list.append(state_dict[f"{cp}.hada_w1_a"])
+            w1_b_list.append(state_dict[f"{cp}.hada_w1_b"])
+            w2_a_list.append(state_dict.get(f"{cp}.hada_w2_a"))
+            w2_b_list.append(state_dict.get(f"{cp}.hada_w2_b"))
+            alpha_list.append(state_dict.get(f"{cp}.alpha"))
+            t1_list.append(state_dict.get(f"{cp}.hada_t1"))
+            t2_list.append(state_dict.get(f"{cp}.hada_t2"))
+        if not complete:
+            continue
+
+        if any(w2_a is None for w2_a in w2_a_list):
+            continue
+        if any(w2_b is None for w2_b in w2_b_list):
+            continue
+
+        is_tucker = t1_list[0] is not None
+        split_dim = 1 if is_tucker else 0
+
+        w1_a_fused = torch.cat(w1_a_list, dim=split_dim).contiguous()
+        w2_a_fused = torch.cat(w2_a_list, dim=split_dim).contiguous()
+
+        fused_prefix = f"{shared_prefix}{spec.fused_letters}_proj"
+        state_dict[f"{fused_prefix}.hada_w1_a"] = w1_a_fused
+        state_dict[f"{fused_prefix}.hada_w1_b"] = w1_b_list[0]
+        state_dict[f"{fused_prefix}.hada_w2_a"] = w2_a_fused
+        state_dict[f"{fused_prefix}.hada_w2_b"] = w2_b_list[0]
+        if alpha_list[0] is not None:
+            state_dict[f"{fused_prefix}.alpha"] = alpha_list[0]
+        if is_tucker:
+            state_dict[f"{fused_prefix}.hada_t1"] = t1_list[0]
+            state_dict[f"{fused_prefix}.hada_t2"] = t2_list[0]
+
+        for suf in suffixes:
+            cp = f"{shared_prefix}{suf}_proj"
+            for subk in (
+                "hada_w1_a",
+                "hada_w1_b",
+                "hada_w2_a",
+                "hada_w2_b",
+                "alpha",
+                "hada_t1",
+                "hada_t2",
+            ):
+                state_dict.pop(f"{cp}.{subk}", None)
+    return state_dict
+
+
+def _refuse_split_lokr_keys(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    for sentinel in (".lokr_w1", ".lokr_w1_b"):
+        for shared_prefix, spec in iter_split_groups(state_dict, sentinel):
+            suffixes = spec.component_letters
+            use_w1 = sentinel == ".lokr_w1"
+            w1_parts: List[torch.Tensor] = []
+            w1_b_list: List[Optional[torch.Tensor]] = []
+            w2_list: List[Optional[torch.Tensor]] = []
+            w2_a_list: List[Optional[torch.Tensor]] = []
+            w2_b_list: List[Optional[torch.Tensor]] = []
+            t2_list: List[Optional[torch.Tensor]] = []
+            alpha_list: List[Optional[torch.Tensor]] = []
+            dora_scale_list: List[Optional[torch.Tensor]] = []
+            complete = True
+            for suf in suffixes:
+                cp = f"{shared_prefix}{suf}_proj"
+                if use_w1:
+                    wk = f"{cp}.lokr_w1"
+                else:
+                    wk = f"{cp}.lokr_w1_b"
+                if wk not in state_dict:
+                    complete = False
+                    break
+                if use_w1:
+                    w1_parts.append(state_dict[wk])
+                else:
+                    w1_parts.append(state_dict[f"{cp}.lokr_w1_a"])
+                    w1_b_list.append(state_dict.get(f"{cp}.lokr_w1_b"))
+                w2_list.append(state_dict.get(f"{cp}.lokr_w2"))
+                w2_a_list.append(state_dict.get(f"{cp}.lokr_w2_a"))
+                w2_b_list.append(state_dict.get(f"{cp}.lokr_w2_b"))
+                t2_list.append(state_dict.get(f"{cp}.lokr_t2"))
+                alpha_list.append(state_dict.get(f"{cp}.alpha"))
+                dora_scale_list.append(state_dict.get(f"{cp}.dora_scale"))
+            if not complete:
+                continue
+
+            w1_fused = torch.cat(w1_parts, dim=0).contiguous()
+
+            fused_prefix = f"{shared_prefix}{spec.fused_letters}_proj"
+            if use_w1:
+                state_dict[f"{fused_prefix}.lokr_w1"] = w1_fused
+            else:
+                state_dict[f"{fused_prefix}.lokr_w1_a"] = w1_fused
+                state_dict[f"{fused_prefix}.lokr_w1_b"] = w1_b_list[0]
+
+            if w2_list[0] is not None:
+                state_dict[f"{fused_prefix}.lokr_w2"] = w2_list[0]
+            elif w2_a_list[0] is not None and w2_b_list[0] is not None:
+                state_dict[f"{fused_prefix}.lokr_w2_a"] = w2_a_list[0]
+                state_dict[f"{fused_prefix}.lokr_w2_b"] = w2_b_list[0]
+                if t2_list[0] is not None:
+                    state_dict[f"{fused_prefix}.lokr_t2"] = t2_list[0]
+
+            if alpha_list[0] is not None:
+                state_dict[f"{fused_prefix}.alpha"] = alpha_list[0]
+
+            if dora_scale_list[0] is not None:
+                state_dict[f"{fused_prefix}.dora_scale"] = dora_scale_list[0]
+
+            for suf in suffixes:
+                cp = f"{shared_prefix}{suf}_proj"
+                for subk in (
+                    "lokr_w1",
+                    "lokr_w1_a",
+                    "lokr_w1_b",
+                    "lokr_w2",
+                    "lokr_w2_a",
+                    "lokr_w2_b",
+                    "lokr_t2",
+                    "alpha",
+                    "dora_scale",
+                ):
+                    state_dict.pop(f"{cp}.{subk}", None)
+    return state_dict
