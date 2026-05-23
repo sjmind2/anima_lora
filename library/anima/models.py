@@ -1289,6 +1289,15 @@ class Anima(nn.Module):
             nn.Linear(model_channels, model_channels),
         )
 
+        # Whether the per-forward pooled_text_proj path runs. Default off: the
+        # base DiT checkpoint never carries these weights (re-zeroed on load), so
+        # the proj is a no-op and the max-reduce + 2 linears are pure per-step
+        # overhead. Flipped True only where the module becomes active —
+        # ``load_pooled_text_proj`` (inference / DCW) and distill-mod training.
+        # A plain Python bool set once at load: it guards once under compile (like
+        # ``pad_to_static``) and never toggles per-forward, so no recompile churn.
+        self.enable_pooled_text_modulation = False
+
         # Modulation guidance runtime state as non-persistent buffers (zeros = off).
         # Registered unconditionally so the forward can do unconditional arithmetic
         # (``t_emb + schedule[l] * delta``) without a Python-level None/zero branch —
@@ -1763,7 +1772,10 @@ class Anima(nn.Module):
         # - pooled_text_override: use this tensor instead of computing from crossattn_emb
         #   (used to decouple modulation from prefix/postfix tokens)
         # - skip_pooled_text_proj: disable entirely (for distillation teacher forward)
-        if not skip_pooled_text_proj:
+        # The enable flag short-circuits the whole max/proj path when no trained
+        # pooled_text_proj is loaded (the common LoRA train/infer case) — bit-exact
+        # to running it, since the output layer is zero-init there.
+        if self.enable_pooled_text_modulation and not skip_pooled_text_proj:
             if pooled_text_override is not None:
                 pooled_text = pooled_text_override
             elif crossattn_emb is not None:

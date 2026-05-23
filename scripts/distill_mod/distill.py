@@ -395,6 +395,11 @@ def main():
     for param in model.pooled_text_proj.parameters():
         param.requires_grad_(True)
 
+    # Arm the student forward's pooled_text_proj path. The output layer starts
+    # zero-init, so without this the gate would skip the proj and starve its
+    # gradient — the teacher forward still passes skip_pooled_text_proj=True.
+    model.enable_pooled_text_modulation = True
+
     # Train pooled_text_proj in float32 for precision
     model.pooled_text_proj.to(dtype=torch.float32)
 
