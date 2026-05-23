@@ -12,6 +12,9 @@ from networks.lora_modules.ortho import (
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
 )
+from networks.lora_modules.loha import LohaModule
+from networks.lora_modules.lokr import LokrModule
+from networks.lora_modules.locon import LoConModule
 from networks.lora_modules.reft import ReFTModule
 from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
 
@@ -20,6 +23,9 @@ __all__ = [
     "ChimeraHydraInferenceModule",
     "ChimeraHydraLoRAModule",
     "HydraLoRAModule",
+    "LohaModule",
+    "LoConModule",
+    "LokrModule",
     "LoRAModule",
     "OrthoHydraLoRAModule",
     "OrthoLoRAModule",

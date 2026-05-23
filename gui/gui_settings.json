@@ -1,7 +1,7 @@
 {
-  "language": "ko",
+  "language": "en",
   "caption_shuffle_variants": 4,
-  "caption_tag_dropout_rate": 0.1,
+  "caption_tag_dropout_rate": 0.05,
   "mit_text_threshold": 0.8,
   "mit_dilate": 5
 }

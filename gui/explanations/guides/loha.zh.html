@@ -1,0 +1,6 @@
+<h2>LOHA</h2>
+<p>低秩Hadamard积分解。</p>
+<p><b>公式</b>: ΔW = (A@B) ⊙ (C@D) × scale</p>
+<p>两个低秩矩阵的Hadamard（逐元素）乘积给出有效秩 <code>dim²</code>，仅需 <code>2×dim×(M+N)</code> 参数——在相同参数预算下比标准LoRA具有更强的表达能力。</p>
+<p><b>Scale</b>: <code>scale = alpha / dim</code>。推荐范围 <b>0.1–0.5</b>。scale 过大（如 1.0）会导致权重更新幅度过大，严重影响输出质量。</p>
+<p><b>建议</b>: <code>dim=32, alpha=16</code>（scale=0.5）是良好的起点。降低 alpha 或增大 dim 可进一步减小 scale。</p>

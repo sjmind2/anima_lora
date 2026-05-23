@@ -45,6 +45,7 @@ from networks.lora_modules import (
     StackedExpertsLoRAModule,
 )
 from networks.lora_modules.lora import rename_dora_and_defuse_standard
+from networks.attn_fuse import match_fused_spec
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -146,6 +147,187 @@ def _build_stacked_experts_state_dict(
 # ---------------------------------------------------------------------------
 
 
+def defuse_loha_qkv(state_dict):
+    fused_groups = []
+    for key in list(state_dict.keys()):
+        if not key.endswith(".hada_w1_b"):
+            continue
+        prefix = key.removesuffix(".hada_w1_b")
+        spec = match_fused_spec(prefix)
+        if spec is not None:
+            fused_groups.append((prefix, spec))
+
+    for prefix, spec in fused_groups:
+        component_letters = spec.component_letters
+        n = len(component_letters)
+        is_tucker = f"{prefix}.hada_t1" in state_dict
+
+        w1_a = state_dict.pop(f"{prefix}.hada_w1_a", None)
+        w1_b = state_dict.pop(f"{prefix}.hada_w1_b")
+        w2_a = state_dict.pop(f"{prefix}.hada_w2_a", None)
+        w2_b = state_dict.pop(f"{prefix}.hada_w2_b")
+        alpha = state_dict.pop(f"{prefix}.alpha", None)
+        t1 = state_dict.pop(f"{prefix}.hada_t1", None) if is_tucker else None
+        t2 = state_dict.pop(f"{prefix}.hada_t2", None) if is_tucker else None
+
+        if is_tucker:
+            w1_a_chunks = w1_a.chunk(n, dim=1)
+            w2_a_chunks = w2_a.chunk(n, dim=1)
+        else:
+            w1_a_chunks = w1_a.chunk(n, dim=0)
+            w2_a_chunks = w2_a.chunk(n, dim=0)
+
+        base_prefix = prefix.removesuffix(spec.fused_frag)
+        for letter, w1_a_c, w2_a_c in zip(component_letters, w1_a_chunks, w2_a_chunks):
+            new_prefix = base_prefix + spec.component_frag(letter)
+            state_dict[f"{new_prefix}.hada_w1_a"] = w1_a_c
+            state_dict[f"{new_prefix}.hada_w1_b"] = w1_b.clone()
+            state_dict[f"{new_prefix}.hada_w2_a"] = w2_a_c
+            state_dict[f"{new_prefix}.hada_w2_b"] = w2_b.clone()
+            if alpha is not None:
+                state_dict[f"{new_prefix}.alpha"] = alpha.clone()
+
+            if is_tucker:
+                state_dict[f"{new_prefix}.hada_t1"] = t1.clone()
+                state_dict[f"{new_prefix}.hada_t2"] = t2.clone()
+
+
+def defuse_lokr_qkv(state_dict):
+    fused_groups = []
+    for key in list(state_dict.keys()):
+        for sentinel in (".lokr_w1", ".lokr_w1_b"):
+            if key.endswith(sentinel):
+                prefix = key.removesuffix(sentinel)
+                spec = match_fused_spec(prefix)
+                if spec is not None:
+                    fused_groups.append((prefix, spec))
+                break
+
+    seen = set()
+    deduped_groups = []
+    for prefix, spec in fused_groups:
+        if prefix not in seen:
+            seen.add(prefix)
+            deduped_groups.append((prefix, spec))
+
+    for prefix, spec in deduped_groups:
+        component_letters = spec.component_letters
+        n = len(component_letters)
+
+        use_w1 = f"{prefix}.lokr_w1" in state_dict
+        use_w2 = f"{prefix}.lokr_w2" in state_dict
+
+        if use_w1:
+            split_dim = state_dict[f"{prefix}.lokr_w1"].shape[0]
+        else:
+            split_dim = state_dict[f"{prefix}.lokr_w1_a"].shape[0]
+        if split_dim < n:
+            w1_key = f"{prefix}.lokr_w1" if use_w1 else f"{prefix}.lokr_w1_a"
+            w1b_key = f"{prefix}.lokr_w1_b" if not use_w1 else None
+            w2_key = f"{prefix}.lokr_w2" if use_w2 else None
+            w2a_key = f"{prefix}.lokr_w2_a" if not use_w2 else None
+            w2b_key = f"{prefix}.lokr_w2_b" if not use_w2 else None
+            t2_key = f"{prefix}.lokr_t2"
+            alpha_key = f"{prefix}.alpha"
+            dora_key = f"{prefix}.dora_scale"
+            has_t2 = t2_key in state_dict
+            has_dora = dora_key in state_dict
+
+            alpha_val = state_dict.pop(alpha_key, None)
+            dora_val = state_dict.pop(dora_key, None) if has_dora else None
+            lora_dim = state_dict[w1b_key].shape[0] if w1b_key else 1
+
+            if use_w1:
+                w1_val = state_dict.pop(w1_key)
+            else:
+                w1a_val = state_dict.pop(w1_key)
+                w1b_val = state_dict.pop(w1b_key)
+                w1_val = w1a_val @ w1b_val
+            if use_w2:
+                w2_val = state_dict.pop(w2_key)
+            else:
+                w2a_val = state_dict.pop(w2a_key)
+                w2b_val = state_dict.pop(w2b_key)
+                t2_val = state_dict.pop(t2_key, None) if has_t2 else None
+                if t2_val is not None:
+                    from networks.lora_modules.lycoris_functional import rebuild_tucker
+                    w2_val = rebuild_tucker(t2_val, w2a_val, w2b_val)
+                else:
+                    w2_val = w2a_val @ w2b_val
+
+            from networks.lora_modules.lycoris_functional import make_kron
+            scale = 1.0 if (use_w1 and use_w2) else (float(alpha_val.item()) / lora_dim if alpha_val is not None else 1.0)
+            delta = make_kron(w1_val.float(), w2_val.float(), scale)
+            if delta.shape[0] % n != 0:
+                state_dict[w1_key] = w1_val
+                if alpha_val is not None:
+                    state_dict[alpha_key] = alpha_val
+                if dora_val is not None:
+                    state_dict[dora_key] = dora_val
+                continue
+            delta_chunks = delta.chunk(n, dim=0)
+            dora_chunks = dora_val.chunk(n, dim=0) if dora_val is not None else None
+
+            base_prefix = prefix.removesuffix(spec.fused_frag)
+            for i, letter in enumerate(component_letters):
+                new_prefix = base_prefix + spec.component_frag(letter)
+                chunk_i = delta_chunks[i].clone()
+                per_out = chunk_i.shape[0]
+                per_in = chunk_i.shape[1] if chunk_i.dim() == 2 else chunk_i.shape[1] * int(torch.tensor(chunk_i.shape[2:]).prod().item())
+                state_dict[f"{new_prefix}.lokr_w1"] = chunk_i.reshape(per_out, per_in) if chunk_i.dim() > 2 else chunk_i
+                state_dict[f"{new_prefix}.lokr_w2"] = torch.ones(1, 1, *chunk_i.shape[2:]) if chunk_i.dim() > 2 else torch.ones(1, 1)
+                state_dict[f"{new_prefix}.alpha"] = torch.tensor(float(lora_dim))
+                if dora_chunks is not None:
+                    state_dict[f"{new_prefix}.dora_scale"] = dora_chunks[i].clone()
+            for k in [w1_key, w1b_key, w2_key, w2a_key, w2b_key, t2_key]:
+                if k is not None:
+                    state_dict.pop(k, None)
+            continue
+
+        alpha = state_dict.pop(f"{prefix}.alpha", None)
+        dora_scale = state_dict.pop(f"{prefix}.dora_scale", None)
+        dora_scale_chunks = dora_scale.chunk(n, dim=0) if dora_scale is not None else None
+
+        if use_w1:
+            w1 = state_dict.pop(f"{prefix}.lokr_w1")
+            w1_chunks = w1.chunk(n, dim=0)
+        else:
+            w1_a = state_dict.pop(f"{prefix}.lokr_w1_a")
+            w1_b = state_dict.pop(f"{prefix}.lokr_w1_b")
+            w1_a_chunks = w1_a.chunk(n, dim=0)
+
+        if use_w2:
+            w2 = state_dict.pop(f"{prefix}.lokr_w2")
+        else:
+            w2_a = state_dict.pop(f"{prefix}.lokr_w2_a")
+            w2_b = state_dict.pop(f"{prefix}.lokr_w2_b")
+            t2 = state_dict.pop(f"{prefix}.lokr_t2", None)
+
+        base_prefix = prefix.removesuffix(spec.fused_frag)
+        for i, letter in enumerate(component_letters):
+            new_prefix = base_prefix + spec.component_frag(letter)
+
+            if use_w1:
+                state_dict[f"{new_prefix}.lokr_w1"] = w1_chunks[i]
+            else:
+                state_dict[f"{new_prefix}.lokr_w1_a"] = w1_a_chunks[i]
+                state_dict[f"{new_prefix}.lokr_w1_b"] = w1_b.clone()
+
+            if use_w2:
+                state_dict[f"{new_prefix}.lokr_w2"] = w2.clone()
+            else:
+                state_dict[f"{new_prefix}.lokr_w2_a"] = w2_a.clone()
+                state_dict[f"{new_prefix}.lokr_w2_b"] = w2_b.clone()
+                if t2 is not None:
+                    state_dict[f"{new_prefix}.lokr_t2"] = t2.clone()
+
+            if alpha is not None:
+                state_dict[f"{new_prefix}.alpha"] = alpha.clone()
+
+            if dora_scale_chunks is not None:
+                state_dict[f"{new_prefix}.dora_scale"] = dora_scale_chunks[i]
+
+
 def save_network_weights(
     state_dict: Dict[str, torch.Tensor],
     *,
@@ -222,6 +404,8 @@ def save_network_weights(
         return
 
     # Standard (lora / ortho / dora) write path.
+    defuse_loha_qkv(state_dict)
+    defuse_lokr_qkv(state_dict)
     rename_dora_and_defuse_standard(state_dict)
 
     if dtype is not None:
