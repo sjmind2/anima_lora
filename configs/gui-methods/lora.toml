@@ -1,15 +1,81 @@
+<<<<<<< Updated upstream
 network_dim = 32
 network_alpha = 32
+<<<<<<< Updated upstream
 learning_rate = 0.0004
 max_train_epochs = 2
+=======
+learning_rate = 2e-5
+max_train_epochs = 4
+=======
+network_dim = 16
+network_alpha = 8
+learning_rate = 0.0002
+max_train_epochs = 20
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 save_every_n_epochs = 2
 checkpointing_epochs = 2
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
-caption_dropout_rate = 0.1
-output_name = "anima"
+caption_dropout_rate = 0.03
+output_name = "anima_lora"
 blocks_to_swap = 0
 use_cmmd = false
+output_dir = "output/ckpt_12"
+source_image_dir = "O:/LoRATraining/hanechan"
+lr_scheduler = "cosine"
+[[datasets]]
+validation_split_num = 0
+validation_split = 0.0
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.resized"
+cache_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.lora"
+num_repeats = 1
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/1_hanechan_v8_upper/.resized"
+cache_dir = "post_image_dataset/hanechan/1_hanechan_v8_upper/.lora"
+num_repeats = 1
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/3_hanechan_v8_lying/.resized"
+cache_dir = "post_image_dataset/hanechan/3_hanechan_v8_lying/.lora"
+num_repeats = 3
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/3_hanechan_v8_other/.resized"
+cache_dir = "post_image_dataset/hanechan/3_hanechan_v8_other/.lora"
+num_repeats = 3
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/4_hanechan_v8_face/.resized"
+cache_dir = "post_image_dataset/hanechan/4_hanechan_v8_face/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/5_hanechan_v8_above/.resized"
+cache_dir = "post_image_dataset/hanechan/5_hanechan_v8_above/.lora"
+num_repeats = 5
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/8_hanechan_v8_low/.resized"
+cache_dir = "post_image_dataset/hanechan/8_hanechan_v8_low/.lora"
+num_repeats = 8
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/8_hanechan_v8_wide/.resized"
+cache_dir = "post_image_dataset/hanechan/8_hanechan_v8_wide/.lora"
+num_repeats = 8
+recursive = true
+
 
 [variant]
 family = "lora"

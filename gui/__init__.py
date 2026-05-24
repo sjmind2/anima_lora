@@ -726,7 +726,10 @@ def _widget(v: Any, key: str = "") -> QWidget:
         return w
     if isinstance(v, int):
         w = QSpinBox()
-        w.setRange(0, 10000)
+        if key == "lokr_factor":
+            w.setRange(-1, 10000)
+        else:
+            w.setRange(0, 10000)
         w.setValue(v)
         w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         w.wheelEvent = lambda e: e.ignore()

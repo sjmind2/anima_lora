@@ -100,3 +100,14 @@ def make_kron(w1, w2, scale):
     if scale != 1:
         rebuild = rebuild * scale
     return rebuild
+
+
+def factored_kron_forward(x, w1, w2):
+    out_l, in_m = w1.shape
+    out_k, in_n = w2.shape
+    leading = x.shape[:-1]
+    x_flat = x.reshape(-1, in_m * in_n)
+    X = x_flat.reshape(x_flat.shape[0], in_m, in_n)
+    temp = X @ w2.T
+    result = torch.einsum("pr,brk->bpk", w1, temp)
+    return result.reshape(*leading, out_l * out_k)

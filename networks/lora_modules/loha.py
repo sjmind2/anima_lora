@@ -8,6 +8,25 @@ from networks.lora_modules.base import BaseLoRAModule
 from networks.lora_modules.lycoris_functional import HadaWeight, HadaWeightTucker
 
 
+class LohaLinearFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight):
+        out = F.linear(x.float(), weight)
+        ctx.save_for_backward(x, weight)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, weight = ctx.saved_tensors
+        go = grad_out.float()
+        x_f = x.float()
+        grad_x = go.matmul(weight).to(x.dtype)
+        grad_weight = go.reshape(-1, go.shape[-1]).transpose(0, 1).matmul(
+            x_f.reshape(-1, x_f.shape[-1])
+        )
+        return grad_x, grad_weight
+
+
 class LohaModule(BaseLoRAModule):
     supports_conv2d = True
 
@@ -76,7 +95,7 @@ class LohaModule(BaseLoRAModule):
 
         self.org_module_ref = [org_module]
         self._fused = False
-        self.scalar = torch.tensor(1.0)
+        self.register_buffer("scalar", torch.tensor(1.0), persistent=False)
 
     def make_weight(self, device=None):
         scale = torch.tensor(self.scale, dtype=torch.float32, device=device)
@@ -111,6 +130,13 @@ class LohaModule(BaseLoRAModule):
         if device is None:
             device = next(self.parameters()).device
         with torch.no_grad():
+            w1a_n = self.hada_w1_a.to(device).norm()
+            w1b_n = self.hada_w1_b.to(device).norm()
+            w2a_n = self.hada_w2_a.to(device).norm()
+            w2b_n = self.hada_w2_b.to(device).norm()
+            upper_bound = w1a_n * w1b_n * w2a_n * w2b_n * abs(self.scale) * self.scalar.to(device).abs()
+            if upper_bound.item() <= max_norm:
+                return False, upper_bound.item()
             orig_norm = self.make_weight(device).norm()
             norm = torch.clamp(orig_norm, max_norm / 2)
             desired = torch.clamp(norm, max=max_norm)
@@ -160,7 +186,7 @@ class LohaModule(BaseLoRAModule):
                 self.org_module_ref[0].groups,
             )
         else:
-            delta = F.linear(x.float(), diff_weight)
+            delta = LohaLinearFn.apply(x, diff_weight)
 
         return org_forwarded + (delta * self.multiplier).to(org_forwarded.dtype)
 

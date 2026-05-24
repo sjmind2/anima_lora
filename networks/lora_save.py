@@ -171,9 +171,19 @@ def defuse_loha_qkv(state_dict):
         t2 = state_dict.pop(f"{prefix}.hada_t2", None) if is_tucker else None
 
         if is_tucker:
+            if w1_a.shape[1] % n != 0 or w2_a.shape[1] % n != 0:
+                raise ValueError(
+                    f"defuse_loha_qkv: Tucker w1_a dim1={w1_a.shape[1]} or w2_a dim1={w2_a.shape[1]} "
+                    f"not divisible by n={n} for prefix={prefix}"
+                )
             w1_a_chunks = w1_a.chunk(n, dim=1)
             w2_a_chunks = w2_a.chunk(n, dim=1)
         else:
+            if w1_a.shape[0] % n != 0 or w2_a.shape[0] % n != 0:
+                raise ValueError(
+                    f"defuse_loha_qkv: w1_a dim0={w1_a.shape[0]} or w2_a dim0={w2_a.shape[0]} "
+                    f"not divisible by n={n} for prefix={prefix}"
+                )
             w1_a_chunks = w1_a.chunk(n, dim=0)
             w2_a_chunks = w2_a.chunk(n, dim=0)
 
@@ -221,7 +231,7 @@ def defuse_lokr_qkv(state_dict):
             split_dim = state_dict[f"{prefix}.lokr_w1"].shape[0]
         else:
             split_dim = state_dict[f"{prefix}.lokr_w1_a"].shape[0]
-        if split_dim < n:
+        if split_dim < n or split_dim % n != 0:
             w1_key = f"{prefix}.lokr_w1" if use_w1 else f"{prefix}.lokr_w1_a"
             w1b_key = f"{prefix}.lokr_w1_b" if not use_w1 else None
             w2_key = f"{prefix}.lokr_w2" if use_w2 else None
