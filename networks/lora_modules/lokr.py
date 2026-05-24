@@ -8,6 +8,129 @@ from networks.lora_modules.base import BaseLoRAModule
 from networks.lora_modules.lycoris_functional import make_kron, factorization, rebuild_tucker
 
 
+class KronLinearFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w1, w2, scalar):
+        out_l, in_m = w1.shape
+        out_k, in_n = w2.shape
+        leading = x.shape[:-1]
+        x_f = x.float().reshape(-1, in_m * in_n)
+        w1_f = w1.float()
+        w2_f = w2.float()
+        X = x_f.reshape(x_f.shape[0], in_m, in_n)
+        temp = X @ w2_f.T
+        result = torch.einsum("pr,brk->bpk", w1_f, temp)
+        out = result.reshape(x_f.shape[0], out_l * out_k)
+        out = (out * scalar).to(x.dtype)
+        out = out.reshape(*leading, out_l * out_k)
+        ctx.save_for_backward(x, w1, w2, scalar)
+        ctx._leading = leading
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, w1, w2, scalar = ctx.saved_tensors
+        leading = ctx._leading
+        out_l, in_m = w1.shape
+        out_k, in_n = w2.shape
+        x_f = x.float().reshape(-1, in_m * in_n)
+        w1_f = w1.float()
+        w2_f = w2.float()
+        X = x_f.reshape(x_f.shape[0], in_m, in_n)
+        temp = X @ w2_f.T
+        result = torch.einsum("pr,brk->bpk", w1_f, temp)
+        fwd_out = result.reshape(x_f.shape[0], out_l * out_k)
+        go = grad_out.float().reshape(-1, out_l * out_k)
+        grad_fwd = go * scalar
+        grad_scalar = (go * fwd_out).sum()
+        grad_result = grad_fwd.reshape(x_f.shape[0], out_l, out_k)
+        grad_w1 = torch.einsum("bpk,brk->pr", grad_result, temp)
+        grad_temp = torch.einsum("pr,bpk->brk", w1_f, grad_result)
+        grad_X = grad_temp @ w2_f
+        grad_w2 = torch.einsum("brk,brs->ks", grad_temp, X)
+        grad_x = grad_X.reshape(x.shape)
+        return grad_x.to(x.dtype), grad_w1.to(w1.dtype), grad_w2.to(w2.dtype), grad_scalar.to(scalar.dtype)
+
+
+class KronLinearTwoStageFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w1_a, w1_b, w2_a, w2_b, scalar):
+        r1 = w1_b.shape[0]
+        r2 = w2_b.shape[0]
+        leading = x.shape[:-1]
+        in_m = w1_b.shape[1]
+        in_n = w2_b.shape[1]
+        x_f = x.float().reshape(-1, in_m * in_n)
+        w1b_f = w1_b.float()
+        w2b_f = w2_b.float()
+        w1a_f = w1_a.float()
+        w2a_f = w2_a.float()
+        X = x_f.reshape(x_f.shape[0], in_m, in_n)
+        temp1 = X @ w2b_f.T
+        result1 = torch.einsum("pr,brk->bpk", w1b_f, temp1)
+        z = result1.reshape(x_f.shape[0], r1 * r2)
+        in_m_a = w1_a.shape[1]
+        in_n_a = w2_a.shape[1]
+        Z = z.reshape(x_f.shape[0], in_m_a, in_n_a)
+        temp2 = Z @ w2a_f.T
+        result2 = torch.einsum("pr,brk->bpk", w1a_f, temp2)
+        out = result2.reshape(x_f.shape[0], w1_a.shape[0] * w2_a.shape[0])
+        out = (out * scalar).to(x.dtype)
+        out = out.reshape(*leading, w1_a.shape[0] * w2_a.shape[0])
+        ctx.save_for_backward(x, w1_a, w1_b, w2_a, w2_b, scalar)
+        ctx._leading = leading
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, w1_a, w1_b, w2_a, w2_b, scalar = ctx.saved_tensors
+        leading = ctx._leading
+        r1 = w1_b.shape[0]
+        r2 = w2_b.shape[0]
+        in_m = w1_b.shape[1]
+        in_n = w2_b.shape[1]
+        out_l_a = w1_a.shape[0]
+        out_k_a = w2_a.shape[0]
+        in_m_a = w1_a.shape[1]
+        in_n_a = w2_a.shape[1]
+        x_f = x.float().reshape(-1, in_m * in_n)
+        w1b_f = w1_b.float()
+        w2b_f = w2_b.float()
+        w1a_f = w1_a.float()
+        w2a_f = w2_a.float()
+        X = x_f.reshape(x_f.shape[0], in_m, in_n)
+        temp1 = X @ w2b_f.T
+        result1 = torch.einsum("pr,brk->bpk", w1b_f, temp1)
+        z = result1.reshape(x_f.shape[0], r1 * r2)
+        Z = z.reshape(x_f.shape[0], in_m_a, in_n_a)
+        temp2 = Z @ w2a_f.T
+        result2 = torch.einsum("pr,brk->bpk", w1a_f, temp2)
+        fwd_out = result2.reshape(x_f.shape[0], out_l_a * out_k_a)
+        go = grad_out.float().reshape(-1, out_l_a * out_k_a)
+        grad_fwd2 = go * scalar
+        grad_scalar = (go * fwd_out).sum()
+        grad_result2 = grad_fwd2.reshape(x_f.shape[0], out_l_a, out_k_a)
+        grad_w1a = torch.einsum("bpk,brk->pr", grad_result2, temp2)
+        grad_temp2 = torch.einsum("pr,bpk->brk", w1a_f, grad_result2)
+        grad_Z = grad_temp2 @ w2a_f
+        grad_w2a = torch.einsum("brk,brs->ks", grad_temp2, Z)
+        grad_z = grad_Z.reshape(x_f.shape[0], r1 * r2)
+        grad_result1 = grad_z.reshape(x_f.shape[0], r1, r2)
+        grad_w1b = torch.einsum("bpk,brk->pr", grad_result1, temp1)
+        grad_temp1 = torch.einsum("pr,bpk->brk", w1b_f, grad_result1)
+        grad_X = grad_temp1 @ w2b_f
+        grad_w2b = torch.einsum("brk,brs->ks", grad_temp1, X)
+        grad_x = grad_X.reshape(x.shape)
+        return (
+            grad_x.to(x.dtype),
+            grad_w1a.to(w1_a.dtype),
+            grad_w1b.to(w1_b.dtype),
+            grad_w2a.to(w2_a.dtype),
+            grad_w2b.to(w2_b.dtype),
+            grad_scalar.to(scalar.dtype),
+        )
+
+
 class LokrModule(BaseLoRAModule):
     supports_conv2d = True
 
@@ -197,6 +320,22 @@ class LokrModule(BaseLoRAModule):
         if device is None:
             device = next(self.parameters()).device
         with torch.no_grad():
+            if self.use_w1:
+                w1_n = self.lokr_w1.to(device).norm()
+            else:
+                w1_n = self.lokr_w1_a.to(device).norm() * self.lokr_w1_b.to(device).norm()
+            if self.use_w2:
+                w2_n = self.lokr_w2.to(device).norm()
+            elif self.tucker:
+                t2 = self.lokr_t2.to(device)
+                w2a = self.lokr_w2_a.to(device)
+                w2b = self.lokr_w2_b.to(device)
+                w2_n = t2.norm() * w2a.norm() * w2b.norm()
+            else:
+                w2_n = self.lokr_w2_a.to(device).norm() * self.lokr_w2_b.to(device).norm()
+            upper_bound = w1_n * w2_n * abs(self.scale) * self.scalar.to(device).abs()
+            if upper_bound.item() <= max_norm:
+                return False, upper_bound.item()
             orig_norm = self.make_weight(device).norm()
             norm = torch.clamp(orig_norm, max_norm / 2)
             desired = torch.clamp(norm, max=max_norm)
@@ -278,10 +417,9 @@ class LokrModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        diff_weight = self.make_weight(x.device).float() * self.scalar
-        diff_weight = diff_weight.view(self.shape)
-
         if self.wd:
+            diff_weight = self.make_weight(x.device).float() * self.scalar
+            diff_weight = diff_weight.view(self.shape)
             base_weight = self.org_module_ref[0].weight.data.to(x.device).float()
             new_weight = self.apply_weight_decompose(base_weight + diff_weight)
             delta_weight = new_weight - base_weight
@@ -300,6 +438,8 @@ class LokrModule(BaseLoRAModule):
             return org_forwarded + delta.to(org_forwarded.dtype)
 
         if self.org_module_ref[0].__class__.__name__ == "Conv2d":
+            diff_weight = self.make_weight(x.device).float() * self.scalar
+            diff_weight = diff_weight.view(self.shape)
             delta = F.conv2d(
                 x.float(),
                 diff_weight,
@@ -310,7 +450,26 @@ class LokrModule(BaseLoRAModule):
                 self.org_module_ref[0].groups,
             )
         else:
-            delta = F.linear(x.float(), diff_weight)
+            if not self.use_w1 and not self.use_w2:
+                delta = KronLinearTwoStageFn.apply(
+                    x, self.lokr_w1_a, self.lokr_w1_b,
+                    self.lokr_w2_a, self.lokr_w2_b, self.scalar * self.scale,
+                )
+            else:
+                if self.use_w1:
+                    w1 = self.lokr_w1
+                else:
+                    w1 = self.lokr_w1_a @ self.lokr_w1_b
+                if self.use_w2:
+                    w2 = self.lokr_w2
+                else:
+                    w2 = self.lokr_w2_a @ self.lokr_w2_b
+                delta = KronLinearFn.apply(x, w1, w2, self.scalar * self.scale)
+            if self.rank_dropout is not None and self.training:
+                drop = (torch.rand(delta.shape[-1], device=x.device) > self.rank_dropout).to(
+                    delta.dtype
+                )
+                delta = delta * drop
 
         return org_forwarded + (delta * self.multiplier).to(org_forwarded.dtype)
 
