@@ -9,7 +9,11 @@ from safetensors.torch import save_file
 from networks.lora_anima.factory import create_network_from_weights
 
 
-def _write_safetensors(tmp_path: Path, tensors: dict[str, torch.Tensor], metadata: dict[str, str] | None = None) -> Path:
+def _write_safetensors(
+    tmp_path: Path,
+    tensors: dict[str, torch.Tensor],
+    metadata: dict[str, str] | None = None,
+) -> Path:
     p = tmp_path / "ckpt.safetensors"
     save_file(tensors, str(p), metadata=metadata)
     return p
@@ -53,7 +57,9 @@ class TestFactoryLohaLoad:
             f"{prefix}.lora_up.weight": torch.randn(8, 4),
             f"{prefix}.alpha": torch.tensor(4.0),
         }
-        path = _write_safetensors(tmp_path, tensors, metadata={"ss_network_type": "locon"})
+        path = _write_safetensors(
+            tmp_path, tensors, metadata={"ss_network_type": "locon"}
+        )
         with pytest.raises(Exception) as exc_info:
             create_network_from_weights(1.0, str(path), None, None, None)
         assert not isinstance(exc_info.value, NameError), (

@@ -30,7 +30,6 @@ class KronLinearFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         x, w1, w2, scalar = ctx.saved_tensors
-        leading = ctx._leading
         out_l, in_m = w1.shape
         out_k, in_n = w2.shape
         x_f = x.float().reshape(-1, in_m * in_n)
@@ -84,7 +83,6 @@ class KronLinearTwoStageFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         x, w1_a, w1_b, w2_a, w2_b, scalar = ctx.saved_tensors
-        leading = ctx._leading
         r1 = w1_b.shape[0]
         r2 = w2_b.shape[0]
         in_m = w1_b.shape[1]

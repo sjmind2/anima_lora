@@ -513,13 +513,14 @@ def _run_epoch_steps(
         device = accelerator.device
         step = 0
         batch = first_batch
-        exhausted = False
         while True:
             state.current_step.value = state.global_step
             _profiler_step_begin(state)
             loss = _run_step(trainer, state, batch)
             _profiler_step_end(state)
-            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(state)
+            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(
+                state
+            )
             if accelerator.sync_gradients:
                 state.progress_bar.update(1)
                 state.global_step += 1
@@ -551,7 +552,9 @@ def _run_epoch_steps(
                 indices = _pre_generate_shuffle_indices(
                     state.train_dataloader, gen, epoch + 1
                 )
-                next_prefetch = _EpochPrefetch(state.train_dataloader, indices, accelerator.device)
+                next_prefetch = _EpochPrefetch(
+                    state.train_dataloader, indices, accelerator.device
+                )
                 next_prefetch.start()
 
             step += 1
@@ -579,7 +582,9 @@ def _run_epoch_steps(
 
             _profiler_step_end(state)
 
-            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(state)
+            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(
+                state
+            )
 
             if accelerator.sync_gradients:
                 state.progress_bar.update(1)
@@ -614,7 +619,9 @@ def _run_epoch_steps(
                 indices = _pre_generate_shuffle_indices(
                     state.train_dataloader, gen, epoch + 1
                 )
-                next_prefetch = _EpochPrefetch(state.train_dataloader, indices, accelerator.device)
+                next_prefetch = _EpochPrefetch(
+                    state.train_dataloader, indices, accelerator.device
+                )
                 next_prefetch.start()
 
     return next_prefetch

@@ -139,8 +139,14 @@ def test_load_adapter_recognizes_chimera(tmp_path):
 
     path = tmp_path / "anima_chimera_chimera.safetensors"
     _write_chimera_checkpoint(
-        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=3,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
     )
 
     bundle = adapter.load_adapter(str(path))
@@ -170,8 +176,14 @@ def test_load_adapter_rejects_misshaped_freq_router(tmp_path):
     adapter._adapter_cache.clear()
     path = tmp_path / "bad_chimera.safetensors"
     _write_chimera_checkpoint(
-        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=3,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
     )
     sd = load_file(str(path))
     sd["freq_router.net.2.weight"] = torch.randn(99, 8)
@@ -191,8 +203,14 @@ def test_chimera_pre_hook_emits_pi_f(tmp_path):
     adapter._adapter_cache.clear()
     path = tmp_path / "anima_chimera.safetensors"
     _write_chimera_checkpoint(
-        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=4,
+        path,
+        K_c=3,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=4,
     )
     bundle = adapter.load_adapter(str(path))
     chimera = bundle["hydra"]["chimera"]
@@ -236,8 +254,14 @@ def test_chimera_hook_dispatches_dual_pool(tmp_path):
     K_c, K_f = 3, 2
     path = tmp_path / "anima_chimera.safetensors"
     _write_chimera_checkpoint(
-        path, K_c=K_c, K_f=K_f, rank=rank, in_dim=in_dim, out_dim=out_dim,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=K_c,
+        K_f=K_f,
+        rank=rank,
+        in_dim=in_dim,
+        out_dim=out_dim,
+        fei_dim=2,
+        sigma_dim=0,
     )
     bundle = adapter.load_adapter(str(path))
     hydra = bundle["hydra"]
@@ -353,8 +377,14 @@ def test_load_adapter_recognizes_chimera_dual_a(tmp_path):
 
     path = tmp_path / "anima_chimera_dual_chimera.safetensors"
     _write_chimera_dual_a_checkpoint(
-        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=3,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
     )
 
     bundle = adapter.load_adapter(str(path))
@@ -393,8 +423,14 @@ def test_chimera_dual_a_hook_dispatches_two_pools(tmp_path):
     K_c, K_f = 3, 2
     path = tmp_path / "anima_chimera_dual.safetensors"
     _write_chimera_dual_a_checkpoint(
-        path, K_c=K_c, K_f=K_f, rank=rank, in_dim=in_dim, out_dim=out_dim,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=K_c,
+        K_f=K_f,
+        rank=rank,
+        in_dim=in_dim,
+        out_dim=out_dim,
+        fei_dim=2,
+        sigma_dim=0,
     )
     bundle = adapter.load_adapter(str(path))
     cd = bundle["chimera_dual_a"]
@@ -513,8 +549,15 @@ def test_load_adapter_recognizes_crossattn_content_router(tmp_path):
 
     path = tmp_path / "anima_chimera_crossattn_chimera.safetensors"
     _write_chimera_dual_a_crossattn_checkpoint(
-        path, K_c=4, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0, cr_input_dim=1024,
+        path,
+        K_c=4,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
+        cr_input_dim=1024,
     )
 
     bundle = adapter.load_adapter(str(path))
@@ -535,8 +578,15 @@ def test_load_adapter_recognizes_crossattn_emb_content_router(tmp_path):
 
     path = tmp_path / "anima_chimera_crossattn_emb_chimera.safetensors"
     _write_chimera_dual_a_crossattn_checkpoint(
-        path, K_c=4, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0, cr_input_dim=1024,
+        path,
+        K_c=4,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
+        cr_input_dim=1024,
         source_stamp="crossattn_emb",
     )
 
@@ -565,8 +615,14 @@ def test_load_adapter_rejects_crossattn_without_content_router_keys(tmp_path):
     adapter._adapter_cache.clear()
     path = tmp_path / "bad_crossattn_chimera.safetensors"
     _write_chimera_dual_a_crossattn_checkpoint(
-        path, K_c=4, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=4,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
     )
     sd = load_file(str(path))
     for k in [k for k in list(sd.keys()) if k.startswith("content_router.")]:
@@ -586,8 +642,16 @@ def test_content_router_llm_adapter_hook_emits_pi_c(tmp_path):
     adapter._adapter_cache.clear()
     path = tmp_path / "anima_chimera_crossattn.safetensors"
     _write_chimera_dual_a_crossattn_checkpoint(
-        path, K_c=4, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0, cr_input_dim=16, cr_hidden=8,
+        path,
+        K_c=4,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
+        cr_input_dim=16,
+        cr_hidden=8,
     )
     bundle = adapter.load_adapter(str(path))
     cr = bundle["chimera_dual_a"]["content_router"]
@@ -619,8 +683,14 @@ def test_chimera_dual_a_hook_uses_global_pi_c(tmp_path):
     K_c, K_f = 3, 2
     path = tmp_path / "anima_chimera_crossattn_dual.safetensors"
     _write_chimera_dual_a_crossattn_checkpoint(
-        path, K_c=K_c, K_f=K_f, rank=rank, in_dim=in_dim, out_dim=out_dim,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=K_c,
+        K_f=K_f,
+        rank=rank,
+        in_dim=in_dim,
+        out_dim=out_dim,
+        fei_dim=2,
+        sigma_dim=0,
     )
     bundle = adapter.load_adapter(str(path))
     cd = bundle["chimera_dual_a"]
@@ -682,8 +752,14 @@ def test_chimera_dual_a_metadata_mismatch_rejected(tmp_path):
     adapter._adapter_cache.clear()
     path = tmp_path / "bad_dual_chimera.safetensors"
     _write_chimera_dual_a_checkpoint(
-        path, K_c=3, K_f=2, rank=4, in_dim=8, out_dim=8,
-        fei_dim=2, sigma_dim=0,
+        path,
+        K_c=3,
+        K_f=2,
+        rank=4,
+        in_dim=8,
+        out_dim=8,
+        fei_dim=2,
+        sigma_dim=0,
     )
     sd = load_file(str(path))
     with safe_open(str(path), framework="pt") as f:

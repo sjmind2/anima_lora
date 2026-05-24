@@ -67,12 +67,14 @@ def _resolve_default_mask_dir(image_dir: Optional[str] = None) -> Optional[str]:
     if image_dir:
         parent = str(Path(image_dir).parent)
         candidates_list.append(os.path.join(parent, ".masks"))
-    candidates_list.extend([
-        "post_image_dataset/masks",
-        "masks/merged",
-        "masks/sam",
-        "masks/mit",
-    ])
+    candidates_list.extend(
+        [
+            "post_image_dataset/masks",
+            "masks/merged",
+            "masks/sam",
+            "masks/mit",
+        ]
+    )
     for candidate in candidates_list:
         if os.path.isdir(candidate):
             return candidate

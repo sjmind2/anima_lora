@@ -246,9 +246,7 @@ class _Server(ThreadingHTTPServer):
         if sys.platform == "win32":
             import socket
 
-            self.socket.setsockopt(
-                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1
-            )
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
     def __init__(self, addr, manager: JobManager):

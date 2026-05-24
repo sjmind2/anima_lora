@@ -123,7 +123,7 @@ def resize_to_buckets(
         if root_images:
             subsets.append(("__root__", src, dst / ".resized"))
         for child in sorted(src.iterdir()):
-            if child.is_dir() and not child.name.startswith('.'):
+            if child.is_dir() and not child.name.startswith("."):
                 subsets.append((child.name, child, dst / child.name / ".resized"))
 
         total_stats = PreprocessStats()

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import glob
 import os
-from pathlib import Path
-
-import pytest
 
 
 CACHE_SUFFIX = "_anima.npz"
@@ -15,7 +12,9 @@ def _build_search_dirs(cache_dir: str | None, image_dir: str | None) -> list[str
     if cache_dir and os.path.isdir(cache_dir):
         npz_search_dirs.append(cache_dir)
     if image_dir and os.path.isdir(image_dir):
-        if not npz_search_dirs or os.path.abspath(cache_dir) != os.path.abspath(image_dir):
+        if not npz_search_dirs or os.path.abspath(cache_dir) != os.path.abspath(
+            image_dir
+        ):
             npz_search_dirs.append(image_dir)
     return npz_search_dirs
 
@@ -25,7 +24,9 @@ def _glob_npz(search_dirs: list[str], recursive: bool = False) -> list[str]:
     for search_dir in search_dirs:
         if recursive:
             npz_paths.extend(
-                glob.glob(os.path.join(search_dir, "**", "*" + CACHE_SUFFIX), recursive=True)
+                glob.glob(
+                    os.path.join(search_dir, "**", "*" + CACHE_SUFFIX), recursive=True
+                )
             )
         else:
             npz_paths.extend(glob.glob(os.path.join(search_dir, "*" + CACHE_SUFFIX)))

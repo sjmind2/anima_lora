@@ -43,8 +43,7 @@ STRINGS: dict[str, str] = {
     "preprocess_masking_mit": "MIT 蒙版 (漫画文字)",
     "preprocess_sam_prompts": "SAM 提示词 (每行一个):",
     "preprocess_sam_prompts_tip": (
-        "SAM3 要查找的文本提示词,每行一个。"
-        "默认值: 'speech bubble' 和 'text bubble'。"
+        "SAM3 要查找的文本提示词,每行一个。默认值: 'speech bubble' 和 'text bubble'。"
     ),
     "preprocess_sam_threshold": "SAM 阈值 (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
@@ -53,8 +52,7 @@ STRINGS: dict[str, str] = {
     ),
     "preprocess_dilate": "膨胀 (px):",
     "preprocess_dilate_tip": (
-        "对二值蒙版应用的膨胀像素数。值越大蒙版边缘越往外扩。"
-        "默认 5。设为 0 表示禁用。"
+        "对二值蒙版应用的膨胀像素数。值越大蒙版边缘越往外扩。默认 5。设为 0 表示禁用。"
     ),
     "preprocess_mit_threshold": "MIT 文字阈值 (0.0–1.0):",
     "preprocess_mit_threshold_tip": (
@@ -71,9 +69,7 @@ STRINGS: dict[str, str] = {
         "在蒙版生成阶段运行 MIT/ComicTextDetector 文字分割。"
         "取消勾选则跳过 MIT,仅使用 SAM。"
     ),
-    "preprocess_mask_nothing_enabled": (
-        "SAM 和 MIT 蒙版至少需启用一项。"
-    ),
+    "preprocess_mask_nothing_enabled": ("SAM 和 MIT 蒙版至少需启用一项。"),
     "preprocess_status_resized": "已调整大小的图像: {n}",
     "preprocess_status_caches": "缓存 — latents: {lat}, text: {te}, PE: {pe}",
     "preprocess_status_masks": "蒙版: {masks}",
@@ -149,19 +145,16 @@ STRINGS: dict[str, str] = {
     "train_running_daemon": "训练 (运行中……)",
     "update_success_title": "更新已应用",
     "update_success_message": (
-        "anima_lora 已更新至 {v}。\n\n"
-        "请关闭并重新启动 GUI 以加载新代码。"
+        "anima_lora 已更新至 {v}。\n\n请关闭并重新启动 GUI 以加载新代码。"
     ),
     "update_success_badge": "已更新 → {v} (需重启生效)",
     "update_dryrun_done_title": "试运行结束",
     "update_dryrun_done_message": (
-        "试运行已完成 —— 未写入任何文件。"
-        "查看日志可了解真实更新会改动什么。"
+        "试运行已完成 —— 未写入任何文件。查看日志可了解真实更新会改动什么。"
     ),
     "update_failed_title": "更新失败",
     "update_failed_message": (
-        "更新以退出码 {code} 退出。"
-        "详情请查看日志;工作树可能已部分修改。"
+        "更新以退出码 {code} 退出。详情请查看日志;工作树可能已部分修改。"
     ),
     "resume_checkpoint_title": "继续训练?",
     "resume_checkpoint_question": (

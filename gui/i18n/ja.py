@@ -58,8 +58,7 @@ STRINGS: dict[str, str] = {
     ),
     "preprocess_mit_threshold": "MIT テキストしきい値 (0.0–1.0):",
     "preprocess_mit_threshold_tip": (
-        "MIT/ComicTextDetector テキストセグメンタの信頼度しきい値。"
-        "デフォルト 0.8。"
+        "MIT/ComicTextDetector テキストセグメンタの信頼度しきい値。デフォルト 0.8。"
     ),
     "preprocess_run_mask": "マスキング実行",
     "preprocess_run_sam_mask": "SAM マスキング実行",

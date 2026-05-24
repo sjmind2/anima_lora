@@ -79,9 +79,9 @@ def _resolve_router_compute():
         if str(_VENDOR) not in sys.path:
             sys.path.insert(0, str(_VENDOR))
         for k in [
-            k for k in list(sys.modules)
-            if k.startswith(("library.", "networks."))
-            or k in ("library", "networks")
+            k
+            for k in list(sys.modules)
+            if k.startswith(("library.", "networks.")) or k in ("library", "networks")
         ]:
             del sys.modules[k]
         return importlib.import_module("library.inference.router_compute")
@@ -115,7 +115,7 @@ from .chimera import (  # noqa: E402 — see ordering note above
     _apply_chimera_dual_a_to_model,
     _attach_single_a_chimera_metadata,
     _finalize_dual_a_chimera,
-    _make_chimera_dual_a_hook,
+    _make_chimera_dual_a_hook,  # noqa: F401 — re-exported for tests
     _make_chimera_hook,
     _make_chimera_pre_hook,
     _make_content_router_llm_adapter_hook,
@@ -227,12 +227,20 @@ def _parse_lycoris(weights_sd: Dict[str, torch.Tensor]) -> Optional[dict]:
     locon_tucker: Dict[str, dict] = {}
 
     _LOHA_SUFFIXES = (
-        ".hada_w1_a", ".hada_w1_b", ".hada_w2_a", ".hada_w2_b",
-        ".hada_t1", ".hada_t2",
+        ".hada_w1_a",
+        ".hada_w1_b",
+        ".hada_w2_a",
+        ".hada_w2_b",
+        ".hada_t1",
+        ".hada_t2",
     )
     _LOKR_SUFFIXES = (
-        ".lokr_w1", ".lokr_w1_a", ".lokr_w1_b",
-        ".lokr_w2", ".lokr_w2_a", ".lokr_w2_b",
+        ".lokr_w1",
+        ".lokr_w1_a",
+        ".lokr_w1_b",
+        ".lokr_w2",
+        ".lokr_w2_a",
+        ".lokr_w2_b",
         ".lokr_t2",
     )
 
@@ -310,23 +318,28 @@ def _extract_lora_sd(
     hydra_prefixes = {
         key.rsplit(".lora_ups.", 1)[0] for key in weights_sd if ".lora_ups." in key
     }
-    chimera_dual_a_prefixes = {
-        key.rsplit(".lora_ups_c.", 1)[0]
-        for key in weights_sd
-        if ".lora_ups_c." in key
-    } | {
-        key.rsplit(".lora_ups_f.", 1)[0]
-        for key in weights_sd
-        if ".lora_ups_f." in key
-    } | {
-        key[: -len(".lora_down_c.weight")]
-        for key in weights_sd
-        if key.endswith(".lora_down_c.weight")
-    } | {
-        key[: -len(".lora_down_f.weight")]
-        for key in weights_sd
-        if key.endswith(".lora_down_f.weight")
-    }
+    chimera_dual_a_prefixes = (
+        {
+            key.rsplit(".lora_ups_c.", 1)[0]
+            for key in weights_sd
+            if ".lora_ups_c." in key
+        }
+        | {
+            key.rsplit(".lora_ups_f.", 1)[0]
+            for key in weights_sd
+            if ".lora_ups_f." in key
+        }
+        | {
+            key[: -len(".lora_down_c.weight")]
+            for key in weights_sd
+            if key.endswith(".lora_down_c.weight")
+        }
+        | {
+            key[: -len(".lora_down_f.weight")]
+            for key in weights_sd
+            if key.endswith(".lora_down_f.weight")
+        }
+    )
 
     out: Dict[str, torch.Tensor] = {}
     has_up = False
@@ -337,7 +350,11 @@ def _extract_lora_sd(
             continue
         if key.startswith("content_router."):
             continue
-        if key.endswith(".lora_up_weight") or key.endswith(".lora_up_c_weight") or key.endswith(".lora_up_f_weight"):
+        if (
+            key.endswith(".lora_up_weight")
+            or key.endswith(".lora_up_c_weight")
+            or key.endswith(".lora_up_f_weight")
+        ):
             continue
         prefix = key.split(".", 1)[0]
         if prefix in hydra_prefixes:
@@ -483,9 +500,7 @@ def load_adapter(file_path: str) -> dict:
         # shape (shared ``lora_down`` + per-expert ``lora_ups.{i}``) plus
         # a top-level ``freq_router.net.*`` block and K_c-narrowed per-
         # Linear content router. No-op when ss_use_chimera_hydra != "true".
-        _attach_single_a_chimera_metadata(
-            hydra, weights_sd, file_metadata, file_path
-        )
+        _attach_single_a_chimera_metadata(hydra, weights_sd, file_metadata, file_path)
 
     # ChimeraHydra dual-A on-disk format (post-c4851b6): two independent A's
     # per Linear (``lora_down_c.weight`` + ``lora_down_f.weight``) and two
@@ -545,9 +560,7 @@ def load_adapter(file_path: str) -> dict:
     if bundle["chimera_dual_a"] is not None:
         cd = bundle["chimera_dual_a"]
         cr_tag = (
-            ", ContentRouter=crossattn"
-            if cd.get("content_router") is not None
-            else ""
+            ", ContentRouter=crossattn" if cd.get("content_router") is not None else ""
         )
         summary.append(
             f"ChimeraDualA(K_c={cd['num_experts_content']} + K_f="
@@ -559,7 +572,11 @@ def load_adapter(file_path: str) -> dict:
         summary.append(f"ReFT({len(bundle['reft'])} blocks)")
     if bundle["lycoris"] is not None:
         lyc_parts = []
-        for vname, vkey in [("LOHA", "loha"), ("LOKR", "lokr"), ("LOCON-Tucker", "locon_tucker")]:
+        for vname, vkey in [
+            ("LOHA", "loha"),
+            ("LOKR", "lokr"),
+            ("LOCON-Tucker", "locon_tucker"),
+        ]:
             vmods = bundle["lycoris"].get(vkey)
             if vmods:
                 lyc_parts.append(f"{vname}({len(vmods)} modules)")
@@ -898,7 +915,7 @@ def _apply_hydra_live_to_model(model, hydra_data: dict, strength: float) -> int:
         )
 
         try:
-            linear = _resolve_module(model, module_path)
+            _resolve_module(model, module_path)
         except (AttributeError, IndexError, ValueError) as e:
             skipped.append(f"{prefix}: resolve {module_path} failed ({e})")
             continue
@@ -1068,9 +1085,7 @@ def _apply_lora_sd_to_model(model, lora_sd: Dict[str, torch.Tensor], strength: f
     model.add_patches(loaded, strength)
 
 
-def _apply_lycoris_to_model(
-    model, lycoris_data: dict, strength: float
-) -> int:
+def _apply_lycoris_to_model(model, lycoris_data: dict, strength: float) -> int:
     """Apply LyCORIS (LOHA / LOKR / LOCON-Tucker) weights as ComfyUI diff patches.
 
     Each module's diff weight is reconstructed from its factored form and
@@ -1114,12 +1129,8 @@ def _apply_lycoris_to_model(
             if "hada_t1" in mod and "hada_t2" in mod:
                 t1 = mod["hada_t1"].float()
                 t2 = mod["hada_t2"].float()
-                r1 = torch.einsum(
-                    "i j ..., j r, i p -> p r ...", t1, w1b, w1a
-                )
-                r2 = torch.einsum(
-                    "i j ..., j r, i p -> p r ...", t2, w2b, w2a
-                )
+                r1 = torch.einsum("i j ..., j r, i p -> p r ...", t1, w1b, w1a)
+                r2 = torch.einsum("i j ..., j r, i p -> p r ...", t2, w2b, w2a)
                 diff = r1 * r2 * scale
             else:
                 diff = (w1a @ w1b) * (w2a @ w2b) * scale
@@ -1147,9 +1158,7 @@ def _apply_lycoris_to_model(
                 t2 = mod["lokr_t2"].float()
                 w2a = mod["lokr_w2_a"].float()
                 w2b = mod["lokr_w2_b"].float()
-                w2 = torch.einsum(
-                    "i j ..., i p, j r -> p r ...", t2, w2a, w2b
-                )
+                w2 = torch.einsum("i j ..., i p, j r -> p r ...", t2, w2a, w2b)
             else:
                 w2a = mod["lokr_w2_a"].float()
                 w2b = mod["lokr_w2_b"].float()
@@ -1197,8 +1206,7 @@ def _apply_lycoris_to_model(
             up_w = up.view(up.size(0), -1).transpose(0, 1)
             down_w = down.view(down.size(0), -1)
             diff = (
-                torch.einsum("i j ..., i p, j r -> p r ...", mid, up_w, down_w)
-                * scale
+                torch.einsum("i j ..., i p, j r -> p r ...", mid, up_w, down_w) * scale
             )
 
             patches[comfy_key] = ("diff", (diff,))
@@ -1277,7 +1285,7 @@ def _apply_reft_to_model(model, reft_blocks: Dict[int, dict], strength: float) -
                 f"ReFT block index {idx} out of range [0, {num_blocks}); skipping"
             )
             continue
-        block = diffusion.blocks[idx]
+        diffusion.blocks[idx]
         hook = _make_reft_hook(params, strength)
         hook_key = f"diffusion_model.blocks.{idx}._forward_hooks"
         if hook_key in model.object_patches:

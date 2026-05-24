@@ -61,10 +61,14 @@ class TestDetectSubsetDirs:
 
 
 class TestResolveMaskDirTreeMode:
-    def test_per_subset_masks_highest_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_per_subset_masks_highest_priority(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         subset_masks = tmp_path / "post_image_dataset" / "mychar" / "4_a" / ".masks"
         subset_masks.mkdir(parents=True)
-        (tmp_path / "post_image_dataset" / "mychar" / "4_a" / ".resized").mkdir(parents=True)
+        (tmp_path / "post_image_dataset" / "mychar" / "4_a" / ".resized").mkdir(
+            parents=True
+        )
         global_masks = tmp_path / "post_image_dataset" / "masks"
         global_masks.mkdir(parents=True)
 
@@ -79,8 +83,12 @@ class TestResolveMaskDirTreeMode:
             str(tmp_path / "post_image_dataset" / "mychar" / "4_a"), ".masks"
         )
 
-    def test_fallback_to_global_when_no_subset_masks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        (tmp_path / "post_image_dataset" / "mychar" / "4_a" / ".resized").mkdir(parents=True)
+    def test_fallback_to_global_when_no_subset_masks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "post_image_dataset" / "mychar" / "4_a" / ".resized").mkdir(
+            parents=True
+        )
         global_masks = tmp_path / "post_image_dataset" / "masks"
         global_masks.mkdir(parents=True)
 
@@ -93,7 +101,9 @@ class TestResolveMaskDirTreeMode:
 
         assert result == "post_image_dataset/masks"
 
-    def test_no_image_dir_backward_compatible(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_image_dir_backward_compatible(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         global_masks = tmp_path / "post_image_dataset" / "masks"
         global_masks.mkdir(parents=True)
 
@@ -105,7 +115,9 @@ class TestResolveMaskDirTreeMode:
 
         assert result == "post_image_dataset/masks"
 
-    def test_legacy_masks_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_legacy_masks_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         legacy = tmp_path / "masks" / "merged"
         legacy.mkdir(parents=True)
 
@@ -117,7 +129,9 @@ class TestResolveMaskDirTreeMode:
 
         assert result == "masks/merged"
 
-    def test_returns_none_when_nothing_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_returns_none_when_nothing_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.chdir(tmp_path)
 
         from library.datasets.subsets import _resolve_default_mask_dir
@@ -127,7 +141,9 @@ class TestResolveMaskDirTreeMode:
         assert result is None
 
 
-def _resolve_mask_path(image_path: Path, current_dir: Path | None, root: Path) -> Path | None:
+def _resolve_mask_path(
+    image_path: Path, current_dir: Path | None, root: Path
+) -> Path | None:
     if current_dir is None:
         return None
     try:
@@ -145,7 +161,10 @@ def _resolve_mask_path(image_path: Path, current_dir: Path | None, root: Path) -
     if subset_masks.is_file():
         return subset_masks
 
-    for candidate_root in (root / "post_image_dataset" / "masks", root / "masks" / "merged"):
+    for candidate_root in (
+        root / "post_image_dataset" / "masks",
+        root / "masks" / "merged",
+    ):
         candidate = candidate_root / rel_parent / name
         if candidate.is_file():
             return candidate
