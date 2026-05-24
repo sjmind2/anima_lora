@@ -200,36 +200,21 @@ ComfyUI's LyCORIS loader node natively supports LOHA, LOKR, and LOCON weight for
 - **LOCON for Linear layers** is mathematically identical to standard LoRA. The only difference is Tucker decomposition support for Conv2d layers. If your target architecture has no Conv2d layers (e.g. DiT-based models), LOCON produces the same result as standard LoRA.
 - **LOHA effective rank** is $r^2$, but the actual expressiveness is constrained by the Hadamard product structure — it is not equivalent to a rank-$r^2$ LoRA. The Hadamard product introduces element-wise multiplicative interactions that standard LoRA does not have.
 - **LOKR factorization quality** depends on `lokr_factor`. A poor factorization (e.g. one factor = 1) degrades to a standard matrix and loses the Kronecker structure's efficiency. Use `lokr_factor = -1` (auto) or a value that evenly divides both $d_\text{in}$ and $d_\text{out}$.
-- **LOKR `lokr_factor` divisibility constraint.** When `lokr_factor > 0`, the `factorization()` function requires `dimension % lokr_factor == 0` for **both** `d_in` and `d_out`. If this condition is not met for a given layer, the function **silently falls back to automatic search** — your explicit factor value is ignored for that layer.
+- **LOKR `lokr_factor` and QKV fusion constraint.** Anima-base-v1.0 DiT fuses Q/K/V into a single `qkv_proj` Linear layer (`[6144, 2048]`). When saving checkpoints for ComfyUI compatibility, this fused module must be split back into separate `q_proj`/`k_proj`/`v_proj`. The split requires `factorization(6144, factor)` to produce an `out_l` divisible by 3. If `out_l % 3 != 0`, the save pipeline falls back to reconstructing the full delta matrix, producing checkpoint files ~690 MB instead of ~10 MB.
 
-  **Anima-base-v1.0 DiT layer dimensions** (the dimensions LyCORIS actually sees at training time):
+  The code now automatically adjusts `out_l` to the nearest divisible value. **Recommended `lokr_factor` values:**
 
-  | Layer | Weight shape | d_in | d_out | Notes |
-  |-------|-------------|------|-------|-------|
-  | `self_attn.qkv_proj` | `[6144, 2048]` | 2048 | 6144 | Q/K/V fused: 2048×3 |
-  | `self_attn.output_proj` | `[2048, 2048]` | 2048 | 2048 | Square |
-  | `cross_attn.q_proj` | `[2048, 2048]` | 2048 | 2048 | Q not fused |
-  | `cross_attn.kv_proj` | `[4096, 1024]` | 1024 | 4096 | K/V fused: 2048×2 |
-  | `cross_attn.output_proj` | `[2048, 2048]` | 2048 | 2048 | Square |
-  | `mlp.layer1` | `[8192, 2048]` | 2048 | 8192 | 4× expansion |
-  | `mlp.layer2` | `[2048, 8192]` | 8192 | 2048 | Inverse |
-  | `llm_adapter.*_proj` | `[1024, 1024]` | 1024 | 1024 | Text encoder adapter |
+  | `lokr_factor` | Raw `out_l` | Adjusted `out_l` | Checkpoint size |
+  |---------------|------------|------------------|----------------|
+  | **-1** (auto) | auto | auto | ~10 MB |
+  | **6** | 6 | 6 (no change) | ~13 MB |
+  | **12** | 12 | 12 (no change) | ~7 MB |
+  | **24** | 24 | 24 (no change) | ~4 MB |
+  | **4** | 4 | **3** (adjusted) | ~10 MB |
+  | **8** | 8 | **6** (adjusted) | ~13 MB |
+  | **16** | 16 | **12** (adjusted) | ~7 MB |
 
-  **Recommended `lokr_factor` values for Anima:**
-
-  | `lokr_factor` | 2048 | 6144 | 4096 | 8192 | 1024 | Notes |
-  |---------------|------|------|------|------|------|-------|
-  | **-1** (auto) | ✅ | ✅ | ✅ | ✅ | ✅ | Always works; finds most balanced pair |
-  | **4** | ✅ 512 | ✅ 1536 | ✅ 1024 | ✅ 2048 | ✅ 256 | Divides all Anima dimensions |
-  | **8** | ✅ 256 | ✅ 768 | ✅ 512 | ✅ 1024 | ✅ 128 | Good balance of granularity |
-  | **16** | ✅ 128 | ✅ 384 | ✅ 256 | ✅ 512 | ✅ 64 | Recommended default |
-  | **32** | ✅ 64 | ✅ 192 | ✅ 128 | ✅ 256 | ✅ 32 | Larger factors → fewer parameters |
-  | **3** | ❌ | ✅ 2048 | ❌ | ✅ 2730 | ❌ | **Fails for 2048/4096/1024** — silently ignored |
-
-  **Practical guidance:**
-  - Use `lokr_factor = -1` (auto) unless you need precise control over factorization shape
-  - `lokr_factor = 16` works for **all** Anima DiT layers and is a good starting point
-  - `lokr_factor = 3` is **not recommended** — it only divides 6144 and 8192, so `self_attn.output_proj` (2048×2048), `cross_attn.q_proj` (2048×2048), and `llm_adapter` layers (1024×1024) will silently use auto factorization instead
+  All values now produce correctly-sized checkpoints. Using a factor that is a multiple of 3 (6, 12, 24) avoids the adjustment entirely. Use `lokr_factor = -1` (auto) for the most balanced factorization.
 - **No HydraLoRA / OrthoLoRA composition.** These variants cannot be combined with HydraLoRA's multi-head routing or OrthoLoRA's Cayley re-parameterization. The factorization structure is incompatible.
 - **Checkpoint continuation.** Loading a LyCORIS safetensors file for continued training requires the correct `network_type` — the key prefix is auto-detected, but module dimensions must match.
 - **DoRA (weight_decompose)** is only available for LOKR. LOCON and LOHA do not implement weight decomposition.
