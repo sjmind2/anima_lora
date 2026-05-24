@@ -5,8 +5,6 @@ Model: https://huggingface.co/a-b-c-x-y-z/Manga-Text-Segmentation-2025
 """
 
 import argparse
-import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,7 +19,6 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import walk_images
 

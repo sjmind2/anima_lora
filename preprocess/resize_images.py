@@ -10,11 +10,8 @@ The walk → filter → parallel resize → caption-mirror loop lives in
 """
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import resize_to_buckets, tqdm_progress
 

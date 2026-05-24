@@ -18,13 +18,10 @@ model load + the one-time uncond sidecar staging.
 """
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import cache_text_embeddings, tqdm_progress
 from library.runtime.cli import add_io_args

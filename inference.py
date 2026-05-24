@@ -21,6 +21,7 @@ from library.models import qwen_vae as qwen_image_autoencoder_kl
 from library.runtime.device import clean_memory_on_device
 from library.inference import (
     get_generation_settings,
+    resolve_seed,
     check_inputs,
     load_dit_model,
     load_text_encoder,
@@ -682,7 +683,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         return
 
     gen_settings = get_generation_settings(args)
-    dit_weight_dtype = gen_settings.dit_weight_dtype
+    dit_weight_dtype = torch.bfloat16
     device = gen_settings.device
 
     # 1. Prepare VAE
@@ -901,6 +902,9 @@ def process_interactive(args: argparse.Namespace) -> None:
                 prompt_data = parse_prompt_line(line)
                 prompt_args = apply_overrides(args, prompt_data)
 
+                # Pin the resolved seed for save_output (generate() no longer
+                # writes it back to the namespace).
+                prompt_args.seed = resolve_seed(prompt_args)
                 latent = generate(prompt_args, gen_settings, shared_models)
 
                 save_output(prompt_args, vae, latent, device)
@@ -1014,6 +1018,9 @@ def main():
         else:
             # Single prompt mode
             gen_settings = get_generation_settings(args)
+            # generate() no longer writes the resolved seed back to args, so
+            # pin it here for save_output()'s filename + metadata.
+            args.seed = resolve_seed(args)
             latent = generate(args, gen_settings)
 
             clean_memory_on_device(device)

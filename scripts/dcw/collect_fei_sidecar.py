@@ -44,7 +44,6 @@ import torch
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from library.anima import weights as anima_utils  # noqa: E402
 from library.inference import sampling as inference_utils  # noqa: E402

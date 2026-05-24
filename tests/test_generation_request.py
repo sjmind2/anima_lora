@@ -17,6 +17,7 @@ from __future__ import annotations
 import inference
 import pytest
 
+from library.inference.generation import resolve_seed
 from library.inference.request import GenerationRequest
 
 # Minimal argv covering the parser's two required args + a prompt, used as the
@@ -163,11 +164,13 @@ def test_to_args_accepts_injected_parser():
 
 
 def test_frozen_request_is_reusable_across_seeds():
-    """generate() mutates the namespace's seed, not the request — so one request
-    builds independent namespaces."""
+    """Each to_args() builds an independent namespace, and the frozen request is
+    never written back — so resolving a seed on one namespace can't leak to
+    another (or to the request)."""
     req = GenerationRequest(prompt="p")  # seed unset
     a, b = req.to_args(), req.to_args()
-    a.seed = 111  # simulate generate()'s in-place seed resolution
+    a.seed = resolve_seed(a)  # caller-side seed resolution (generate() reads it)
+    assert isinstance(a.seed, int)  # a got a concrete seed
     assert b.seed is None  # the other namespace is untouched
     assert req.seed is None  # the request never changed
 

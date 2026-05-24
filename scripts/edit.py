@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,10 +41,6 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from typing import Optional
-
-# Make ``anima_lora/`` importable when this script is invoked as
-# ``python scripts/edit.py``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from library.anima import text_strategies  # noqa: E402
 from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS  # noqa: E402

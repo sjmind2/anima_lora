@@ -46,11 +46,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from library.datasets.buckets import DCW_ASPECT_NAMES  # noqa: E402
 from library.inference.uncond import (  # noqa: E402
@@ -92,7 +89,7 @@ def main() -> None:
         type=str,
         default=str(DEFAULT_UNCOND_DIR),
         help=(
-            "Where to stage the T5(\"\") sidecar. Model-scoped, lives at the "
+            'Where to stage the T5("") sidecar. Model-scoped, lives at the '
             "dataset root above the per-pipeline cache subdirs so every "
             "training/distill run can share one file."
         ),

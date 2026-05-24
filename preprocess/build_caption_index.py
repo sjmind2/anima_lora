@@ -32,12 +32,10 @@ identity-pair sampler, artist balancing, dataset analytics.
 import argparse
 import json
 import os
-import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 DEFAULT_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 DEFAULT_OUT = "post_image_dataset/captions/caption_index.json"

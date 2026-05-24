@@ -24,6 +24,7 @@ _ATTR_TO_MODULE = {
     "save_output": "output",
     # models
     "load_dit_model": "models",
+    "attach_adapters": "models",
     "load_text_encoder": "models",
     "load_shared_models": "models",
     # text
@@ -38,6 +39,7 @@ _ATTR_TO_MODULE = {
     # generation
     "GenerationSettings": "generation",
     "get_generation_settings": "generation",
+    "resolve_seed": "generation",
     "compute_tile_positions": "generation",
     "create_tile_blend_weight": "generation",
     "generate_body": "generation",

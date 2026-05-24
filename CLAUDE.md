@@ -68,6 +68,8 @@ Gotchas: `merge` refuses ReFT / Hydra moe / postfix (not foldable) unless `--all
 
 | File | Purpose |
 |------|---------|
+| `anima_lora/__init__.py` | **Programmatic front door** — lazy (PEP 562) re-export of the curated embedder entry points (`generate`, `get_generation_settings`, `GenerationRequest`, `load_method_preset`, `load_dit_model`, `load_vae`, …) + `ROOT` (repo root). `import anima_lora` instead of reverse-engineering `main()`s. |
+| `examples/` | Runnable API scripts (`01`–`04` high-level flows, `05`–`06` raw primitives). `examples/README.md` is the embedder guide. |
 | `train.py` | `AnimaTrainer` — main training loop via HF Accelerate |
 | `inference.py` | Standalone image generation (`--help` for all flags) |
 | `networks/spectrum.py` | Spectrum inference acceleration |
@@ -76,6 +78,10 @@ Gotchas: `merge` refuses ReFT / Hydra moe / postfix (not foldable) unless `--all
 | `scripts/tasks/` + `scripts/experimental_tasks/` | Where command bodies actually live (`_common.py` = shared helpers) |
 
 Docs: shipped method deep-dives in `docs/methods/`, experimental in `docs/experimental/`, active proposals in `docs/proposal/`, retired material under `_archive/`.
+
+## Programmatic API (embedders)
+
+`uv sync` installs the repo editable, so `anima_lora` is importable anywhere. It's a thin façade — canonical homes are unchanged (`library.inference` / `library.config.io` / `library.anima.weights` / `library.models.qwen_vae` / `library.runtime.device`). Inference is **request-driven**: build a typed `GenerationRequest`, call `.to_args()` (which routes through `inference.parse_args` so every `getattr()`-read knob is populated; long-tail method flags ride `extra_argv`). Adapter family lives **in the checkpoint metadata**, not the call — the DiT loader merges-or-keeps-live accordingly. Prompt encoding installs two process-global strategy singletons lazily (`ensure_text_strategies`). Model/config paths still resolve relative to CWD — **run from the repo root**; override defaults with `ANIMA_DIT` / `ANIMA_VAE` / `ANIMA_TEXT_ENCODER`.
 
 ## Config flow
 
@@ -90,7 +96,8 @@ Subsets accept `cache_dir` — redirects all VAE/TE/PE caches to that dir with s
 
 ## Architecture
 
-- **Modular `library/`**: `train_util.py` is a re-exporting facade; code lives in domain subpackages — `anima/` (DiT model, training helpers, weights, strategy), `datasets/`, `training/` (optimizer/scheduler/checkpoint + loss/sampler/metric registries), `inference/` (engine: generation, sampling, models, text, adapters, sampler_context; plug-ins split into `corrections/` — DCW / SMC-CFG / mod-guidance — and `editing/` — DirectEdit + postfix inversion), `models/` (VAE, metadata spec), `captioning/` (Anima Tagger), `vision/` (vision tower/resampler), `config/` (schema + loader), `io/` (cache + safetensors), `runtime/` (device/offloading/noise), `env.py`, `log.py`.
+- **Modular `library/`**: `train_util.py` is a re-exporting facade; code lives in domain subpackages — `anima/` (DiT model, training helpers, weights, strategy), `datasets/` (incl. `cache.py` = general cached-pair train reader `CachedDataset`, re-exported by `distill.py` for back-compat), `training/` (optimizer/scheduler/checkpoint + loss/sampler/metric registries), `inference/` (engine: generation, sampling, models, text, adapters, sampler_context, `request.py` = typed `GenerationRequest`; plug-ins split into `corrections/` — DCW / SMC-CFG / mod-guidance — and `editing/` — DirectEdit + postfix inversion), `preprocess/` (dataset-caching **orchestration**: `images`/`latents`/`text`/`pe` — the scan→group-by-shape→batched-encode→idempotent-write loops), `models/` (VAE, metadata spec), `captioning/` (Anima Tagger), `vision/` (vision tower/resampler), `config/` (schema + loader), `io/` (`cache.py` = cache-path resolution + suffixes + discovery, `safetensors.py`), `runtime/` (device/offloading/noise + `cli.py` shared argparse surface + `harness.py` `build_anima` model-build harness), `env.py`, `log.py`.
+- **Tooling layering contract** (see `docs/proposal/tooling_architecture.md`): **primitives** (`library/*` — load a model, encode a batch, resolve a cache path) → **façade** (`anima_lora/` — embedder entry points) → **orchestration** (`library/preprocess/`, `library/runtime/harness.py` — drive primitives over a whole dataset/run) → **entry points** (`preprocess/*.py`, `bench/**/run_bench.py`, `scripts/**`, `tasks.py` — thin argparse wrappers). `preprocess/*.py` are now thin CLI shells over `library/preprocess/`. `bench/`, `scripts/`, `preprocess/` are **not** installed packages (only `anima_lora`/`library`/`networks` are) — they keep a `sys.path` bootstrap to import siblings.
 - **Strategy pattern** for tokenization/encoding (`library/anima/strategy.py`, `library/strategy_base.py`).
 - **Pluggable adapters** under `networks/` — selected via `network_module` + (for LoRA family) the three-axis routing cfg. LoRA modules in `networks/lora_modules/` coordinated by `networks/lora_anima/`; IP-Adapter/EasyControl in `networks/methods/`; attention dispatcher `networks/attention_dispatch.py`; Spectrum `networks/spectrum.py`; SPD `networks/spd.py`. **See `networks/CLAUDE.md`** for the per-module map, three-axis surface, and dispatch invariants.
 
@@ -104,6 +111,9 @@ The pretrained model expects max-padded text encoder outputs — zero-padded pos
 
 ### Lazy model loading
 DiT loads AFTER text-encoder/VAE caching and unloading, to avoid OOM: text encoder → cache → free → VAE → cache → free → load DiT → attach adapter → train.
+
+### compile-after-apply (`build_anima`)
+`torch.compile` traces the adapter's monkey-patched forward, so `compile_blocks()` MUST run **after** `network.apply_to` + `load_weights`. `library/runtime/harness.py::build_anima` is the shared harness encoding this ordering (promoted from `bench/_anima.py`); use it from `bench`/`scripts`/`preprocess` rather than open-coding load→apply→compile.
 
 ## Methods
 
@@ -126,7 +136,7 @@ Each method has a deep-dive doc; the prose below is one-line orientation plus th
 
 ## Preprocessing & scripts
 
-Data-prep scripts in `preprocess/` (resize → VAE latents → text embeddings → PE features → masks); see file headers for flags and `make preprocess-{resize,vae,te,pe,pooled}` / `make mask`. Utility scripts in `scripts/` — notably `distill_mod/` (mod-guidance distillation), `merge_to_dit.py`, `dcw/` (DCW v4 calibration pipeline), `anima_tagger/cli.py`, `edit.py`, `export_logs_json.py`.
+Data-prep scripts in `preprocess/` (resize → VAE latents → text embeddings → PE features → masks); see file headers for flags and `make preprocess-{resize,vae,te,pe,pooled}` / `make mask`. **The caching logic moved to `library/preprocess/` — these scripts are now thin argparse wrappers**; edit the orchestration in the library, the flags in the script. Utility scripts in `scripts/` — notably `distill_mod/` (mod-guidance distillation), `merge_to_dit.py`, `dcw/` (DCW v4 calibration pipeline), `anima_tagger/cli.py`, `edit.py`, `export_logs_json.py`.
 
 Caches live under `post_image_dataset/lora/`: `{stem}_{WxH}_anima.npz` (VAE), `{stem}_anima_te.safetensors` (text), `{stem}_anima_pe.safetensors` (PE). TE caching reads `.txt` from `image_dataset/` (the caption master); training reads only cached embeddings.
 

@@ -25,9 +25,12 @@ for every default** the generation code reads via ``getattr`` — this dataclass
 only carries the knobs an embedder commonly sets, and the long tail
 (spectrum / dcw / ip-adapter / … sub-knobs) rides through ``extra_argv``.
 
-The request is frozen: ``generate()`` mutates ``args.seed`` on the *namespace*
-``to_args()`` returns, not on the request, so one ``GenerationRequest`` is safe to
-reuse across seeds (build a fresh namespace per call).
+The request is frozen and ``generate()`` does not write back to the namespace
+``to_args()`` returns, so one ``GenerationRequest`` is safe to reuse across seeds
+(build a fresh namespace per call). When ``seed`` is unset, ``generate()``
+resolves a fresh random seed per call via ``resolve_seed(args)`` without storing
+it — call ``resolve_seed`` yourself (and assign ``args.seed``) if you need the
+concrete seed for saving.
 """
 
 from __future__ import annotations

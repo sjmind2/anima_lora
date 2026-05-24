@@ -16,11 +16,8 @@ The reduction loop lives in ``library/preprocess/text.py``.
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.io.cache import TE_CACHE_SUFFIX  # noqa: E402
 from library.preprocess import cache_pooled_text, tqdm_progress  # noqa: E402

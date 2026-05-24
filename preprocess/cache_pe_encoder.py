@@ -32,13 +32,11 @@ targets the participation-ratio-6 manifold collapse on this dataset (see
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import (
     cache_pe_features,

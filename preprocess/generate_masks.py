@@ -2,8 +2,6 @@
 """Generate text/speech-bubble masks for training images using SAM3."""
 
 import argparse
-import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,7 +17,6 @@ from PIL import Image
 from tqdm import tqdm
 
 # Allow running from preprocess/ subdirectory
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import walk_images
 
