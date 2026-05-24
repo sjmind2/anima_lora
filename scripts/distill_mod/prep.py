@@ -205,8 +205,8 @@ def main() -> None:
         action="store_true",
         help=(
             "Disable torch.compile of the DiT block stack. Compile is on by "
-            "default (one CUDAGraph across every bucket via set_static_token_count); "
-            "auto-skipped when --blocks_to_swap > 0."
+            "default (compile_blocks: native-shape flatten, one block graph per "
+            "token-count family); auto-skipped when --blocks_to_swap > 0."
         ),
     )
     parser.add_argument(

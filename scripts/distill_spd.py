@@ -44,7 +44,6 @@ from library.datasets.distill import CachedDataset  # noqa: E402
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
-    _snap,
     spd_schedule_bands,
     spd_stage_target,
 )
@@ -70,43 +69,6 @@ def _flatten(cfg: dict, key_path: str, default):
         node = node[part]
     return node
 
-
-def _stage_static_token_counts(
-    samples, stages, patch: int, patch_temporal: int = 1, granule: int = 64
-) -> list[int]:
-    """Per-stage constant token count for static-shape compile (Option B).
-
-    Enumerates every *unique* latent bucket present in the dataset and replays
-    the SPD low-pass snap math (``networks.spd.dct_lowpass_init``) to find the
-    largest patchified token count any bucket produces at each stage scale, then
-    rounds up to a ``granule`` margin. Padding each stage's batch to its own
-    count collapses the aspect-bucket axis (many shapes → one per stage) while
-    keeping low-res stages cheap — the per-step ``set_static_token_count`` then
-    feeds torch.compile exactly ``len(stages)`` distinct shapes.
-
-    Token count mirrors ``forward_mini_train_dit``: ``(T//pt)*(h//p)*(w//p)`` for
-    a ``(1, h, w)`` latent grid (Anima images are single-frame, T=1).
-    """
-    res_set = {get_latent_resolution(npz_path) for npz_path, _te in samples}
-    buckets = []
-    for res in res_set:
-        a, b = res.split("x")
-        buckets.append((int(a), int(b)))
-
-    counts: list[int] = []
-    for s in stages:
-        mx = 0
-        for Hl, Wl in buckets:
-            if s < 1.0:
-                h = min(_snap(Hl * s, patch), Hl)
-                w = min(_snap(Wl * s, patch), Wl)
-            else:
-                h, w = Hl, Wl
-            tok = (1 // patch_temporal) if patch_temporal > 1 else 1
-            tok *= (h // patch) * (w // patch)
-            mx = max(mx, tok)
-        counts.append(((mx + granule - 1) // granule) * granule)
-    return counts
 
 def main():
     parser = argparse.ArgumentParser(
@@ -436,11 +398,12 @@ def main():
         import torch._dynamo as _dynamo
 
         n_buckets = len({get_latent_resolution(npz) for npz, _te in dataset.samples})
+        # SPD runs each stage at a downsampled resolution NOT in
+        # CONSTANT_TOKEN_BUCKETS, so distinct shapes = stages × buckets — far more
+        # than the 2 full-res families compile_blocks budgets for internally.
+        # Pre-raise the limit here; compile_blocks' max() won't lower it. fwd+bwd
+        # entries share the one `_forward` bytecode, so give headroom.
         n_shapes = len(stages) * max(1, n_buckets)
-        stage_token_counts = _stage_static_token_counts(
-            dataset.samples, stages, patch, model.patch_temporal
-        )
-        # fwd + bwd entries share the one `_forward` bytecode; give headroom.
         _dynamo.config.cache_size_limit = max(
             _dynamo.config.cache_size_limit, 2 * n_shapes + 8
         )
@@ -621,13 +584,10 @@ def main():
         if args.grad_ckpt:  # reentrant checkpoint needs a grad-requiring input
             x_t.requires_grad_()
         v_target = (eps_si - x0_si).float()
-        # Native-shape mode for this stage's bucket: the forward runs at its
-        # real token count (no static padding → no flash pad-leak). The per-stage
-        # count value is now just a non-None sentinel enabling the mode;
-        # compile_blocks above traces one graph per (stage × bucket) shape.
-        # No-op when --torch_compile is off.
-        if stage_token_counts is not None:
-            model.set_static_token_count(stage_token_counts[stage_idx], pad=False)
+        # Native shapes: the forward runs at this stage's real token count (no
+        # padding → no flash pad-leak). Flattening is enabled once by
+        # compile_blocks above, which traces one graph per (stage × bucket) shape
+        # keyed on the real seq_len — nothing per-step to set here.
         pred = _forward_dit(x_t, t, crossattn_emb)
         loss = nn.functional.mse_loss(pred.float(), v_target)
         # Scale so accumulated grads are the *mean* over micro-steps (matches a
