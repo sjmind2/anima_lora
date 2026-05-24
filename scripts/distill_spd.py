@@ -38,6 +38,11 @@ from tqdm import tqdm  # noqa: E402
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
+from library.runtime.harness import (  # noqa: E402
+    compile_dit_blocks,
+    enable_training_grad_ckpt,
+    place_dit_for_training,
+)
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
@@ -354,18 +359,9 @@ def main():
     )
 
     # Block swap / device placement.
-    if args.blocks_to_swap > 0:
-        model.enable_block_swap(args.blocks_to_swap, device)
-        model.move_to_device_except_swap_blocks(device)
-        model.switch_block_swap_for_training()
-    else:
-        model.to(device)
+    place_dit_for_training(model, device, blocks_to_swap=args.blocks_to_swap)
 
-    if args.grad_ckpt:
-        model.enable_gradient_checkpointing(unsloth_offload=True)
-        logger.info("gradient checkpointing: on (unsloth CPU offload)")
-    else:
-        logger.info("gradient checkpointing: off")
+    enable_training_grad_ckpt(model, enabled=args.grad_ckpt)
     model.train()
 
     # Freeze base DiT; only the LoRA params train. apply_to add_module'd the
@@ -392,28 +388,27 @@ def main():
     # backward graph so none falls back to eager. Recompiles are a one-time
     # warmup cost, not a correctness issue.
     if args.torch_compile:
-        import torch._dynamo as _dynamo
-
-        n_buckets = len({get_latent_resolution(npz) for npz, _te in dataset.samples})
         # SPD runs each stage at a downsampled resolution NOT in
         # CONSTANT_TOKEN_BUCKETS, so distinct shapes = stages × buckets — far more
         # than the 2 full-res families compile_blocks budgets for internally.
-        # Pre-raise the limit here; compile_blocks' max() won't lower it. fwd+bwd
+        # Size the dynamo cache to cover every (stage x bucket) shape; fwd+bwd
         # entries share the one `_forward` bytecode, so give headroom.
+        n_buckets = len({get_latent_resolution(npz) for npz, _te in dataset.samples})
         n_shapes = len(stages) * max(1, n_buckets)
-        _dynamo.config.cache_size_limit = max(
-            _dynamo.config.cache_size_limit, 2 * n_shapes + 8
+        compile_dit_blocks(
+            model,
+            enabled=True,
+            cache_size_limit=2 * n_shapes + 8,
+            backend=args.dynamo_backend,
+            mode=args.compile_inductor_mode,
         )
-        model.compile_blocks(args.dynamo_backend, mode=args.compile_inductor_mode)
         logger.info(
             "torch_compile: %d block._forward compiled (backend=%s, mode=%s); "
-            "up to %d (stage x bucket) shapes recompile over the first steps "
-            "(cache_size_limit=%d).",
+            "up to %d (stage x bucket) shapes recompile over the first steps.",
             len(model.blocks),
             args.dynamo_backend,
             args.compile_inductor_mode,
             n_shapes,
-            _dynamo.config.cache_size_limit,
         )
 
     # --- Optimizer + warmup→cosine ---

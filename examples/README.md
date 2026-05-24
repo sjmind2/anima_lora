@@ -39,6 +39,7 @@ is to show the raw primitives. Either way each script keeps a `sys.path` shim so
 |---|---|---|
 | [`05_load_models.py`](05_load_models.py) | Load DiT / VAE / text encoder directly; encode a prompt to the DiT-ready cross-attn embedding | DiT + VAE + text encoder |
 | [`06_vae_and_dataset.py`](06_vae_and_dataset.py) | VAE pixel↔latent round-trip; iterate the on-disk training cache (`CachedDataset`) | VAE (+ cache for part B) |
+| [`07_frozen_dit_training_build.py`](07_frozen_dit_training_build.py) | Frozen DiT + fresh adapter build for *training* via the `harness` helpers (`place_dit_for_training` / `compile_dit_blocks` / `enable_training_grad_ckpt`) — the `scripts/distill_*` model-build sequence | DiT |
 
 ## Setup
 
@@ -63,6 +64,7 @@ python examples/04_train_lora.py --max_train_epochs 8
 python examples/05_load_models.py --prompt "a lighthouse at dusk"
 python examples/06_vae_and_dataset.py                       # iterate the cache
 python examples/06_vae_and_dataset.py --image some/photo.png  # VAE round-trip
+python examples/07_frozen_dit_training_build.py             # build a trainable adapter
 ```
 
 ## Notes for embedders

@@ -16,6 +16,14 @@ Training and inference algorithms.
 | [methods/invert.md](methods/invert.md) | Embedding inversion — optimize text embeddings (full and K-slot reference) |
 | [methods/spectrum.md](methods/spectrum.md) | Spectrum — training-free inference acceleration via Chebyshev forecasting |
 
+## Findings
+
+Negative results and feasibility probes — methods evaluated and not adopted.
+
+| Doc | Description |
+|-----|-------------|
+| [findings/selfflow.md](findings/selfflow.md) | Self-Flow rep-loss — falsified on the frozen Anima backbone (no information asymmetry to distill; alignment target trivially satisfiable) |
+
 ## Optimizations
 
 Compiler, kernel, and hardware setup.
