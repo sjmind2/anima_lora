@@ -62,7 +62,6 @@ def _path_overrides() -> dict:
     global _PATH_OVERRIDES_CACHE
     if _PATH_OVERRIDES_CACHE is not None:
         return _PATH_OVERRIDES_CACHE
-    sys.path.insert(0, str(ROOT))
     try:
         from library.config.io import load_path_overrides
 
@@ -98,7 +97,6 @@ def bespoke_preset_flags(preset: str) -> list[str]:
     ``--no_grad_ckpt`` (the trainable footprints here are tiny; ckpt is a perf
     loss when VRAM isn't tight). Other preset keys are silently dropped.
     """
-    sys.path.insert(0, str(ROOT))
     try:
         from library.config.io import load_preset_section
     except Exception as e:  # noqa: BLE001

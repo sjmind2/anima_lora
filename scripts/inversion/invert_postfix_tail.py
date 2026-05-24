@@ -48,11 +48,8 @@ import argparse
 import json
 import logging
 import random
-import sys
 from pathlib import Path
 
-ANIMA_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ANIMA_ROOT))
 
 import torch  # noqa: E402
 
@@ -204,9 +201,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Optimization
-    p.add_argument(
-        "--steps", type=int, default=50, help="Optimization steps per image"
-    )
+    p.add_argument("--steps", type=int, default=50, help="Optimization steps per image")
     p.add_argument("--lr", type=float, default=0.01, help="Learning rate (AdamW)")
     p.add_argument(
         "--lr_schedule",
@@ -404,12 +399,8 @@ def _load_anima(args, device: torch.device):
             # dynamo cache (compile_blocks' max() won't lower it).
             import torch._dynamo as _dynamo
 
-            _dynamo.config.cache_size_limit = max(
-                _dynamo.config.cache_size_limit, 64
-            )
-            anima.compile_blocks(
-                backend="inductor", mode=args.compile_inductor_mode
-            )
+            _dynamo.config.cache_size_limit = max(_dynamo.config.cache_size_limit, 64)
+            anima.compile_blocks(backend="inductor", mode=args.compile_inductor_mode)
         else:
             logger.info("torch.compile disabled (--no_compile_blocks)")
     return anima

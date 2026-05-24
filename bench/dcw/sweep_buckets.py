@@ -58,12 +58,10 @@ from __future__ import annotations
 import argparse
 import shlex
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
 
@@ -77,10 +75,12 @@ PRESETS: dict[str, list[tuple[int, int]]] = {
     # 1.0 → 2.0 with mirrored pairs. Right shape for calibrator
     # training data: 4 distinct aspect ratios.
     "aspect4": [
-        (1024, 1024),                  # 1.00
-        (1152, 896), (896, 1152),      # 1.29
-        (1248, 832), (832, 1248),      # 1.50
-        (768, 1344),      # 2.00
+        (1024, 1024),  # 1.00
+        (1152, 896),
+        (896, 1152),  # 1.29
+        (1248, 832),
+        (832, 1248),  # 1.50
+        (768, 1344),  # 2.00
     ],
     # All 17 constant-token buckets. Overkill for most analyses.
     "all": list(CONSTANT_TOKEN_BUCKETS),
@@ -183,12 +183,19 @@ def main() -> int:
     t0 = time.time()
     for i, (w, h) in enumerate(buckets, 1):
         label = f"{args.label}-{w}x{h}"
-        cmd = py_cmd + [
-            str(script),
-            "--image_w", str(w),
-            "--image_h", str(h),
-            "--label", label,
-        ] + extra
+        cmd = (
+            py_cmd
+            + [
+                str(script),
+                "--image_w",
+                str(w),
+                "--image_h",
+                str(h),
+                "--label",
+                label,
+            ]
+            + extra
+        )
 
         print(f"[{i}/{len(buckets)}] {w}x{h} label={label}")
         print(f"  $ {' '.join(shlex.quote(c) for c in cmd)}")
@@ -212,10 +219,7 @@ def main() -> int:
         print()
 
     total = time.time() - t0
-    print(
-        f"sweep done in {total:.0f}s — "
-        f"{len(successes)} ok, {len(failures)} failed."
-    )
+    print(f"sweep done in {total:.0f}s — {len(successes)} ok, {len(failures)} failed.")
     if successes and not args.dry_run:
         per_bucket = ", ".join(f"{w}x{h}:{e:.0f}s" for (w, h), e in successes)
         print(f"per-bucket wall: {per_bucket}")

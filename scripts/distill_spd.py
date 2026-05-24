@@ -27,11 +27,8 @@ import argparse
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
@@ -522,9 +519,10 @@ def main():
     # syncs per optimizer step) and the per-parameter .item() walk in the
     # LoRA-norm logging. Mirrors the accumulator pattern in distill_turbo.py.
     n_stages = len(stages)
-    acc_loss = torch.zeros((), device=device)              # Σ step-mean loss
+    acc_loss = torch.zeros((), device=device)  # Σ step-mean loss
     acc_loss_stage = torch.zeros(n_stages, device=device)  # Σ micro-loss by stage
-    acc_stage_cnt = torch.zeros(n_stages, device=device)   # micro-steps by stage
+    acc_stage_cnt = torch.zeros(n_stages, device=device)  # micro-steps by stage
+
     def _micro_step():
         """One sample → scaled backward. Returns (unscaled_loss_tensor, stage_idx).
 
@@ -564,9 +562,7 @@ def main():
 
         # Sample one stage for this micro-batch (single-resolution per forward),
         # weighted by band width.
-        stage_idx = int(
-            torch.multinomial(band_widths_f, 1, generator=stage_rng).item()
-        )
+        stage_idx = int(torch.multinomial(band_widths_f, 1, generator=stage_rng).item())
         # Bands depend only on the schedule, so reuse the precomputed ones;
         # only jitter (which builds a fresh `trans`) needs a recompute.
         t_lo, t_hi = (
