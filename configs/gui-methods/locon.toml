@@ -14,7 +14,7 @@ output_name = "anima-locon"
 blocks_to_swap = 0
 use_cmmd = false
 scale_weight_norms = 1.0
-source_image_dir = "O:/LoRATraining/RuneFactoryRNKTrainingDir - 副本"
+source_image_dir = "<SOURCE_IMAGE_DIR>"
 lr_scheduler = "cosine"
 [[datasets]]
 validation_split_num = 0

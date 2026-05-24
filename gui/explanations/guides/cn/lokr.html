@@ -1,0 +1,5 @@
+<h2>LOKR</h2>
+<p>低秩Kronecker积分解。</p>
+<p><b>公式</b>: ΔW = kron(W1, W2) × scale</p>
+<p>将权重维度分解为较小的因子对，然后使用Kronecker积重建全秩结构。根据 <code>network_dim</code> 与维度大小自动在完整矩阵和低秩分解之间选择。</p>
+<p><b>关键选项</b>: <code>decompose_both=true</code>（同时分解W1和W2），<code>lokr_factor=-1</code>（自动因子分解）。</p>

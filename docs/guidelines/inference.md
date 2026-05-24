@@ -21,7 +21,7 @@ python inference.py \
 The canned `make test` target picks the latest bakeable LoRA in `output/ckpt/`
 and runs against the values above (`INFERENCE_BASE` in
 `scripts/tasks/_common.py`). The `inference.py` argparse defaults differ
-(`--infer_steps 50`, `--flow_shift 5.0`, `--guidance_scale 3.5`,
+(`--infer_steps 50`, `--flow_shift 3.0`, `--guidance_scale 3.5`,
 `--attn_mode torch`, `--sampler euler`) — `make test` is the more
 representative starting point.
 
@@ -31,7 +31,8 @@ representative starting point.
 |--------|--------------|
 | `make test` | Latest LoRA |
 | `make test SPECTRUM=1` | Latest LoRA + Spectrum acceleration |
-| `make test-mod` | Latest distilled `pooled_text_proj` (modulation guidance) |
+| `make test MOD=1` | Latest LoRA + distilled `pooled_text_proj` (modulation guidance). Composes with `SPECTRUM=1`. |
+| `make test NOLORA=1` | Bare DiT (skips `--lora_weight`). Compose with `MOD=1` for a mod-only sample. |
 | `make test-hydra` | Latest HydraLoRA / FeRA `*_moe.safetensors` (router-live) |
 | `make test-merge` | Inference against a baked DiT under `MODEL_DIR=` |
 | `make test-dcw` | Latest LoRA + DCW scalar bias correction (λ = -0.015) |
@@ -61,7 +62,7 @@ representative starting point.
 | `--easycontrol_image_match_size` | off | Match target H/W to ref bucket |
 | `--infer_steps` | 50 | Denoising steps (28 via `make test`) |
 | `--guidance_scale` | 3.5 | Text CFG scale (4.0 via `make test`) |
-| `--flow_shift` | 5.0 | Flow-matching schedule shift (1.0 via `make test`) |
+| `--flow_shift` | 3.0 | Flow-matching schedule shift (1.0 via `make test`) |
 | `--sampler` | `euler` | `euler` (deterministic ODE), `er_sde` (stochastic), `lcm` (x0 re-noise — distilled few-step models) |
 | `--attn_mode` | `torch` | `torch` / `flash` / `flex` / `sageattn` / `xformers` (`sdpa` alias) |
 | `--from_file` | — | Batch prompts from a text file |

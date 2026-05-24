@@ -1,12 +1,14 @@
-# Anima Adapter / Postfix Loaders (ComfyUI)
+# Anima Adapter / FeRA / Soft-Token Loaders (ComfyUI)
 
-Two ComfyUI custom nodes that load Anima-trained interventions and dispatch them through ComfyUI's patching system. Each node does one thing; chain them with the MODEL socket when a workflow needs both.
+Three ComfyUI custom nodes that load Anima-trained interventions and dispatch them through ComfyUI's patching system. Each node does one thing; chain them with the MODEL socket when a workflow needs more than one.
 
-Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/postfix.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
+Algorithm-level notes live in the main docs tree (`docs/methods/hydra-lora.md`, `docs/methods/reft.md`, `docs/experimental/soft_tokens.md`). This README covers only what's ComfyUI-specific: detection, installation paths, and the node's changelog.
+
+> **Retired:** the **Anima Postfix Loader** was removed when the postfix training method was archived (soft tokens superseded it — see the repo's `_archive/postfix/`). Older changelog entries below still reference it as history.
 
 ## Install
 
-Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The two nodes appear as **Anima Adapter Loader** and **Anima Postfix Loader** in the loaders menu.
+Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custom_nodes/`, restart ComfyUI. The nodes appear as **Anima Adapter Loader**, **Anima FeRA Loader**, and **Anima Soft Tokens Loader** in the loaders menu.
 
 ## The loaders
 
@@ -20,14 +22,14 @@ Drop `custom_nodes/comfyui-hydralora/` (this directory) into your ComfyUI `custo
 
 Sniffs the safetensors header and routes each component independently — you get correct behavior whether the file contains plain LoRA, a `*_moe.safetensors` hydra checkpoint (σ-conditional or FeRA-style FEI-conditional), a ReFT-only file, or any combination. The two strength sliders are useful for ablation ("is it the LoRA or the ReFT doing the anatomy fix?") and for dialing back either branch when one overshoots.
 
-### Anima Postfix Loader
+### Anima Soft Tokens Loader
 
 | Input | Purpose |
 |-------|---------|
-| `postfix` | safetensors file with prefix / postfix / cond keys |
-| `strength_postfix` | scales the postfix / prefix delta |
+| `soft_tokens` | safetensors file with `tokens` + `t_offsets.weight` keys (`make exp-soft-tokens`) |
+| `strength` | scales the spliced soft tokens (0 = no-op) |
 
-Mode (prefix / postfix / cond) is auto-detected from the file's keys. When chaining with the adapter loader, put the postfix loader *after* the adapter loader so the postfix wrapper sees the model with adapter modifications already in place.
+SoftREPA-parameterization soft tokens (Lee et al., arXiv:2503.08250): a bank of per-layer, per-timestep-bucket learned vectors is spliced into the crossattn embedding *inside* the first `n_layers` DiT blocks. Each block gets its own splice via a `forward_pre_hook` that rewrites the block's `crossattn_emb` argument — soft tokens use a *different* per-layer vector at each block; a `diffusion_model` pre-hook records the per-step sigma and precomputes the bank. Applies to the whole batch (both CFG branches) — soft tokens are part of the conditioning the trainer always saw. `n_layers` / `K` / `n_t_buckets` / splice position are read from the checkpoint (tensor shapes + `ss_splice_position`). Chain after the adapter loader when a workflow needs more than one.
 
 ## How each component applies
 
@@ -41,9 +43,11 @@ FeRA-style FEI routing (`make exp-fera` checkpoints): when the checkpoint's safe
 
 **ChimeraHydra dual-pool routing** (`make chimera` checkpoints, files named `*_chimera.safetensors`): the per-Linear router is narrowed to `K_c` outputs and reads pooled rank-R `lx` only (no σ/FEI columns). A network-level FreqRouter MLP (`Linear → SiLU → Linear → softmax/τ`, weights under `freq_router.net.*`) runs once per denoising step on `concat(FEI(z_t), sinusoidal(σ))` and broadcasts `π_f ∈ (B, K_f)` to every chimera Linear via shared state. Each per-Linear hook concatenates `[π_c, π_f]` over the full `E = K_c + K_f` experts and dispatches the standard Hydra einsum/bmm. Detected from `ss_use_chimera_hydra=true` plus the chimera-specific `ss_num_experts_content` / `ss_num_experts_freq` / `ss_chimera_*` metadata.
 
+When chimera was trained with `content_router_source = "crossattn"` (`ss_chimera_content_router_source="crossattn"` in metadata), the per-Linear content router is replaced by a single network-level `ContentRouter` MLP fed pooled post-LLM-adapter `crossattn_emb`. A second `forward_hook` is installed on `diffusion_model.llm_adapter._forward_hooks` that pools its output to `(B, D)`, runs the MLP, and writes `π_c` into the same shared state as `π_f`. Per-Linear chimera hooks then broadcast that `π_c` instead of running their own pooled-`lx` softmax. The per-Linear `router.weight`/`router.bias` keys are absent from the file in this mode. See changelog 3.5.0.
+
 **ReFT** → per-block `forward_hook` installed via `ModelPatcher.add_object_patch` on `diffusion_model.blocks.<idx>._forward_hooks`. The hook adds `R^T · (ΔW · h + b) · scale · strength` to the block output.
 
-**Prefix / postfix / cond** → `ModelPatcher.add_object_patch` on `diffusion_model.forward`, splicing learned vectors into the T5-compatible crossattn embedding *after* the LLM adapter + pad-to-512 step. Positive-batch rows only via `cond_or_uncond` from `transformer_options` (CFG-safe).
+**Soft tokens** → per-block `forward_pre_hook` installed via `ModelPatcher.add_object_patch` on each of the first `n_layers` `diffusion_model.blocks.<idx>._forward_pre_hooks`, plus one `diffusion_model._forward_pre_hooks` pre-hook. The block pre-hook rewrites the block's `crossattn_emb` positional arg (overwriting the K padding-tail slots for `end_of_sequence`, or scattering after the real text tokens for `front_of_padding`); `forward` itself is untouched, same invariant as Hydra/ReFT. The model-level pre-hook recovers the `[0, 1]` sigma from comfy's `sigma × 1000` FLOW timesteps (`ModelSamplingDiscreteFlow` multiplier), bucketizes it, and precomputes the `(n_layers, B, K, D)` token bank the block hooks index. All hook installs go through `get_model_object`, so soft tokens compose with a prior adapter pre-hook on the same `_forward_pre_hooks` dict rather than clobbering it.
 
 ## Why forward hooks, not `forward` override
 
@@ -55,14 +59,47 @@ For both HydraLoRA and ReFT we install a `forward_hook` rather than overriding `
 |------|------|
 | `adapter.py` | LoRA / Hydra / ReFT loading, parsing, hook install |
 | `fera.py` | Author-faithful + plan2 stacked-experts FeRA loading |
-| `postfix.py` | Prefix / postfix / cond context splicing |
-| `nodes.py` | `AnimaAdapterLoader` / `AnimaFeraLoader` / `AnimaPostfixLoader` |
+| `soft_tokens.py` | SoftREPA soft-token bank loading + per-block splice pre-hooks |
+| `nodes.py` | `AnimaAdapterLoader` / `AnimaFeraLoader` / `AnimaSoftTokensLoader` |
 | `__init__.py` | Re-exports `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` |
 | `_vendor/` | Generated by `scripts/sync_vendor.py` — bundled copy of the router-compute kernels so the node works when not sitting inside the anima_lora repo |
 
 The pure-compute router math (FEI 2-band / FEI n-band high-to-low, σ sinusoidal features, σ-band partition mask) lives in `library/inference/router_compute.py` in the main repo. `adapter.py` resolves it live when the node is inside anima_lora, falls back to `_vendor/library/inference/router_compute.py` when standalone. Trained router weights are bit-sensitive to these kernels, so the vendored copy must stay in lockstep with the live tree — re-run `make vendor-sync` (or `python scripts/sync_vendor.py`) before publishing a new node version.
 
 ## Changelog
+
+### 3.7.0 — 2026-05-20 — Retire the Anima Postfix Loader
+
+The postfix training method was archived (soft tokens superseded it — see the repo's `_archive/postfix/`), so `AnimaPostfixLoader` and `postfix.py` were removed. The node package now ships three loaders: `AnimaAdapterLoader`, `AnimaFeraLoader`, `AnimaSoftTokensLoader`. Existing workflows that referenced the postfix loader will need to drop that node. Soft tokens (`AnimaSoftTokensLoader`) cover the per-block crossattn-splice use case going forward. No change to the other loaders.
+
+### 3.6.1 — 2026-05-20 — Postfix `cond+ortho` (v4) support + drop the `forward` override
+
+`AnimaPostfixLoader` now loads the current `mode=cond` checkpoints (`make exp-postfix`, output `anima_postfix_ortho_v4`). Two parts:
+
+- **cond+ortho format.** The trainer's cond head was rewritten (commit `e989d64`) to `LayerNorm → Linear → GELU → Linear` emitting `K(K-1)/2 + 1` scalars — a Cayley rotation seed `S(c)` + magnitude `λ(c)` — over a frozen `ortho_basis`, with maxabs-pooling of the content tokens. The node reconstructed the *old* 2-layer `K×D` format and crashed on `cond_mlp.2.weight` (now a GELU). It now mirrors `networks/methods/postfix.py::append_postfix` exactly: maxabs-pool → `postfix(c) = Cayley(S(c) − S(c)ᵀ) @ ortho_basis · λ(c)` (verified bit-for-bit against the trainer). Legacy 2-layer non-ortho cond checkpoints are no longer loadable (they're already unloadable on the trainer side). `postfix` (free-param) and `prefix` paths are unchanged.
+- **No more `diffusion_model.forward` override.** Postfix previously replaced the model forward to run `preprocess_text_embeds` itself — which stranded the DiT's own `x_embedder.proj` on CPU under ComfyUI's dynamic-VRAM / cast-weights staging walk (`mat2 is on cpu`), the same failure mode that retired the hydra σ-capture `forward` wrapper in 2.1.1. The model already runs the LLM adapter inside `forward` and hands the same post-adapter `crossattn_emb` to every block, so the splice moved to a per-block `with_kwargs` `forward_pre_hook` on every block (reading `cond_or_uncond` from `transformer_options` to keep positive-only routing). `forward` is left intact — same hook-not-override invariant as Hydra/ReFT/soft-tokens. Outputs are unchanged on setups where the node already worked.
+
+### 3.6.0 — 2026-05-20 — Soft-token inference (`AnimaSoftTokensLoader`)
+
+New node `AnimaSoftTokensLoader` runs SoftREPA-parameterization soft tokens (Lee et al., arXiv:2503.08250) at inference — the `networks/methods/soft_tokens.py` checkpoints from `make exp-soft-tokens` were previously training-only on the ComfyUI side.
+
+- Detection: the file's `tokens` `(n_layers, K, D)` + `t_offsets.weight` `(n_t_buckets, n_layers·D)` tensors. `n_layers` / `K` / `n_t_buckets` are inferred from the shapes; splice position from `ss_splice_position` (`end_of_sequence` default, or `front_of_padding`).
+- Application: a per-block `forward_pre_hook` on the first `n_layers` `diffusion_model.blocks.<idx>._forward_pre_hooks` rewrites each block's `crossattn_emb` arg with that block's spliced bank; a `diffusion_model._forward_pre_hooks` pre-hook records the per-step sigma and precomputes the `(n_layers, B, K, D)` bank. `forward` is never overridden (Hydra/ReFT invariant).
+- Sigma convention: comfy hands the FLOW model `timesteps = sigma × 1000` (`ModelSamplingDiscreteFlow`, multiplier 1000), so the pre-hook divides by 1000 to recover the `[0, 1]` sigma the trainer's t-bucket index uses (`train.py` draws `[0,1]`-scaled timesteps).
+- Applies to the whole batch (both CFG branches), matching training — not positive-only like postfix.
+- Composes with the adapter / postfix loaders: hook installs go through `get_model_object`, so a prior adapter pre-hook on `diffusion_model._forward_pre_hooks` is preserved rather than clobbered.
+
+### 3.5.0 — 2026-05-19 — ChimeraHydra global ContentRouter (`content_router_source="crossattn"`)
+
+`AnimaAdapterLoader` now supports chimera checkpoints trained with the network-level ContentRouter — one MLP per network, fed pooled post-LLM-adapter `crossattn_emb`, broadcasting `π_c` to every chimera Linear. The per-Linear pooled-`lx_c` softmax is replaced by a global "caption regime" axis (analogous to the freq pool's FreqRouter). Mutually exclusive with the default per-Linear path; selected at training time via `content_router_source = "crossattn"` in `configs/methods/chimera.toml`.
+
+- Detection key: `ss_chimera_content_router_source == "crossattn"` in safetensors metadata. The loader parses top-level `content_router.net.{0,2}.weight/bias` into `chimera_data["content_router"]` and honors `ss_chimera_content_router_layer_norm` for the parameterless LN flag.
+- The per-Linear `router.weight`/`router.bias` keys (shape `(K_c, rank)`) are **absent** under this mode — the loader no longer requires them on chimera prefixes when `content_router_source == "crossattn"`. Other modes (per-Linear router, default) are unchanged.
+- New application hook: `_make_content_router_llm_adapter_hook` is installed as a `forward_hook` on `diffusion_model.llm_adapter._forward_hooks`. It captures the post-T5 features `(B, L_text, D)`, zero-pads to 512 (matches `Anima.preprocess_text_embeds`), RMS-pools over the sequence dim, optionally LayerNorms over D, runs `Linear → SiLU → Linear → softmax/τ`, and writes `π_c` into the same shared state the FreqRouter already uses. Per-Linear chimera hooks broadcast `π_c` from that state (uniform `1/K_c` fallback on the very first compile-cache miss).
+- CFG batching composes naturally — cond and uncond rows go through one `diffusion_model.forward` and the hook produces per-row gates because their text differs.
+- Composes with `AnimaPostfixLoader` (postfix splices `crossattn_emb` at the block level, which fires after the llm_adapter hook, so the content router always sees the unmodified post-T5 features).
+- Hard error if the file claims crossattn but is missing `content_router.net.*`, or if the loaded DiT has no `llm_adapter` (non-Anima base).
+- Single-A (3.3.0) and dual-A (3.4.0) chimera formats both pick this up; the parser is one helper (`_parse_chimera_content_router`) shared across both branches.
 
 ### 3.4.0 — 2026-05-15 — ChimeraHydra dual-A on-disk format
 
@@ -158,3 +195,189 @@ Applied in `adapter.py`:
 ### 2.0.0 — 2026-04-20 — rank-R router rewiring
 
 Live-routing hook updated to mirror the training-time forward exactly: RMS pool over the sequence dim of the post-`lora_down` rank-R signal, not mean-pool over the raw layer input. Corresponding training fix is in `docs/methods/hydra-lora.md` §Fixes (2026-04-20 entry) — pre-fix routers never learned, so old checkpoints are refused at load.
+
+---
+
+## XY Plot Suite
+
+The XY Plot suite is a set of ComfyUI nodes for automated parameter sweeps and grid image generation. Source files: `xyplot.py` (core nodes), `xy_inputs.py` (XY input nodes), `grid.py` (grid assembly).
+
+### Nodes
+
+| Node Name | Category | Purpose |
+|-----------|----------|---------|
+| Anima Efficient Loader | Anima XY Plot | Load UNet + CLIP + VAE + optional LoRA adapter, encode prompts, create empty latent |
+| Anima Efficient KSampler | Anima XY Plot | Sample with optional XY Plot grid generation |
+| Anima XY Plot | Anima XY Plot | Collect X and Y axis inputs for parameter sweep |
+| XY Input (Anima): Seeds | Anima XY Plot / XY Input | Sweep over sequential seeds |
+| XY Input (Anima): Steps | Anima XY Plot / XY Input | Sweep over sampling steps |
+| XY Input (Anima): CFG Scale | Anima XY Plot / XY Input | Sweep over CFG guidance values |
+| XY Input (Anima): Denoise | Anima XY Plot / XY Input | Sweep over denoise strength |
+| XY Input (Anima): Sampler/Scheduler | Anima XY Plot / XY Input | Compare sampler/scheduler pairs |
+| XY Input (Anima): Positive Prompt S/R | Anima XY Plot / XY Input | Search-and-replace in positive prompt |
+| XY Input (Anima): Negative Prompt S/R | Anima XY Plot / XY Input | Search-and-replace in negative prompt |
+| XY Input (Anima): Anima Adapter | Anima XY Plot / XY Input | Sweep over different Anima adapter files |
+| XY Input (Anima): Anima Adapter Strength | Anima XY Plot / XY Input | Sweep over LoRA/HydraLoRA strength |
+| XY Input (Anima): Anima ReFT Strength | Anima XY Plot / XY Input | Sweep over ReFT strength |
+| XY Input (Anima): Checkpoint | Anima XY Plot / XY Input | Sweep over UNet checkpoints |
+| XY Input (Anima): VAE | Anima XY Plot / XY Input | Sweep over VAE files |
+| XY Input (Anima): LoRA | Anima XY Plot / XY Input | Sweep over standard ComfyUI LoRA files |
+
+> **Retired:** `XY Input (Anima): Postfix` was removed when the postfix training method was archived (see changelog 3.7.0).
+
+### Anima Efficient Loader
+
+Loads all inference components in a single node and produces a `DEPENDENCIES` tuple used by the KSampler to re-clone the base model for each sweep point.
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `unet_name` | dropdown | — | Diffusion model (from `diffusion_models` / `unet` folder) |
+| `clip_name` | dropdown | — | Text encoder (from `text_encoders` / `clip` folder) |
+| `vae_name` | dropdown | — | VAE file (from `vae` folder) |
+| `lora_name` | dropdown | None | Optional Anima adapter (LoRA / HydraLoRA / ReFT / FeRA); "None" skips loading |
+| `strength_lora` | FLOAT | 1.0 | LoRA + HydraLoRA delta scale (−2.0 to 2.0) |
+| `strength_reft` | FLOAT | 1.0 | ReFT residual edit scale (−2.0 to 2.0) |
+| `positive` | STRING | "" | Positive prompt text |
+| `negative` | STRING | "" | Negative prompt text |
+| `empty_latent_width` | INT | 512 | Latent width (must be multiple of 64) |
+| `empty_latent_height` | INT | 512 | Latent height (must be multiple of 64) |
+| `batch_size` | INT | 1 | Number of latent images |
+
+**Outputs:**
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `MODEL` | MODEL | Loaded (and optionally adapter-patched) model |
+| `CONDITIONING+` | CONDITIONING | Encoded positive conditioning |
+| `CONDITIONING-` | CONDITIONING | Encoded negative conditioning |
+| `LATENT` | LATENT | Empty latent tensor |
+| `VAE` | VAE | Loaded VAE |
+| `CLIP` | CLIP | Loaded CLIP text encoder |
+| `DEPENDENCIES` | DEPENDENCIES | Tuple of `(base_model, clip, vae_name, lora_name, strength_lora, strength_reft, positive, negative, width, height, batch_size)` — used by the KSampler to clone the base model per sweep point |
+
+### Anima Efficient KSampler
+
+Full-featured sampler with optional XY Plot grid generation. When no `xyplot` input is connected, it behaves as a standard KSampler with VAE decode. When an `xyplot` is connected, it iterates over all X × Y parameter combinations and produces a labeled grid image.
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | MODEL | — | Model from Efficient Loader |
+| `seed` | INT | 0 | Base random seed |
+| `steps` | INT | 20 | Sampling steps |
+| `cfg` | FLOAT | 7.0 | CFG guidance scale |
+| `sampler_name` | dropdown | — | Sampler algorithm |
+| `scheduler` | dropdown | — | Noise schedule |
+| `positive` | CONDITIONING | — | Positive conditioning |
+| `negative` | CONDITIONING | — | Negative conditioning |
+| `latent_image` | LATENT | — | Input latent |
+| `denoise` | FLOAT | 1.0 | Denoising strength (0.0–1.0) |
+| `add_noise` | ["enable", "disable"] | enable | Whether to add initial noise |
+| `start_at_step` | INT | 0 | Start step for partial denoising |
+| `end_at_step` | INT | 10000 | End step for partial denoising |
+| `return_with_leftover_noise` | ["enable", "disable"] | disable | Keep leftover noise in output |
+| `preview_method` | dropdown | auto | Latent preview method (auto / latent2rgb / taesd / vae_decoded_only / none) |
+| `optional_vae` | VAE | — | VAE for decoding (required for XY Plot output) |
+| `optional_clip` | CLIP | — | CLIP for prompt re-encoding |
+| `dependencies` | DEPENDENCIES | — | Dependencies tuple from Efficient Loader |
+| `xyplot` | ANIMA_XYPLOT | — | XY Plot configuration from Anima XY Plot node |
+
+**Outputs:**
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `MODEL` | MODEL | Passthrough model |
+| `CONDITIONING+` | CONDITIONING | Passthrough positive conditioning |
+| `CONDITIONING-` | CONDITIONING | Passthrough negative conditioning |
+| `LATENT` | LATENT | Passthrough latent |
+| `VAE` | VAE | Passthrough VAE |
+| `IMAGE` | IMAGE | Decoded image(s) or grid image |
+
+**XY Plot integration.** When `xyplot` is connected, the KSampler:
+1. Iterates over all `x_values × y_values` combinations.
+2. For each combination, clones the base model from `DEPENDENCIES` and applies the sweep parameter via `_apply_param`.
+3. Samples, decodes via VAE, and collects the result as a PIL image.
+3. Assembles all images into a labeled grid using `grid.py`.
+4. Returns the grid (or individual images, depending on `ksampler_output_images` setting).
+
+Supported parameter types that `_apply_param` handles: `seeds`, `steps`, `cfg`, `sampler_scheduler`, `denoise`, `positive_prompt_sr`, `negative_prompt_sr`, `anima_adapter`, `anima_adapter_strength`, `anima_reft_strength`, `lora`, `checkpoint`, `vae`.
+
+### Anima XY Plot
+
+Collects X and Y axis sweep definitions from XY Input nodes into a single configuration dict consumed by the KSampler.
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `x` | ANIMA_XY | — | X axis sweep definition (required) |
+| `y` | ANIMA_XY | — | Y axis sweep definition (optional; single-axis sweep if omitted) |
+| `grid_spacing` | INT | 0 | Pixel spacing between grid cells (0–500) |
+| `XY_flip` | ["False", "True"] | False | Swap X and Y axes in the grid layout |
+| `Y_label_orientation` | ["Horizontal", "Vertical"] | Horizontal | Orientation of Y axis labels |
+| `ksampler_output_images` | ["Images", "Plot"] | Plot | "Images" returns all individual images; "Plot" returns the assembled grid |
+
+**Outputs:**
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `xyplot` | ANIMA_XYPLOT | Plot configuration dict |
+
+**How axes are collected.** Each XY Input node outputs an `ANIMA_XY` dict with `type`, `values`, `label`, and optional `search` fields. The XY Plot node packages the X and Y dicts together with grid layout settings. The KSampler reads these at sampling time and iterates `len(x_values) × len(y_values)` times, applying each parameter combination before sampling.
+
+### XY Input Nodes
+
+All XY Input nodes output `ANIMA_XY` and live under the **Anima XY Plot / XY Input** category. They produce value lists for a single sweep axis.
+
+| Node | Inputs | Sweep Values |
+|------|--------|--------------|
+| **Seeds** | `seed_count` (1+), `first_seed` | Sequential seeds: `first_seed, first_seed+1, …` |
+| **Steps** | `first_step`, `last_step`, `step_count` | Evenly spaced step counts via `np.linspace` |
+| **CFG Scale** | `first_cfg`, `last_cfg`, `cfg_count` | Evenly spaced CFG values |
+| **Denoise** | `first_denoise`, `last_denoise`, `denoise_count` | Evenly spaced denoise strengths (0.0–1.0) |
+| **Sampler/Scheduler** | `input_count` + up to 10 `(sampler, scheduler)` pairs | List of sampler/scheduler tuples |
+| **Positive Prompt S/R** | `search`, `replace_count` + up to 10 `replace_N` strings | First value uses original text (no replace); subsequent values replace `search` → `replace_N` in the positive prompt |
+| **Negative Prompt S/R** | `search`, `replace_count` + up to 10 `replace_N` strings | Same as Positive Prompt S/R but for the negative prompt |
+| **Anima Adapter** | `input_count` + up to 10 `(adapter, strength_lora, strength_reft)` triples | Different adapter files with per-file strength controls |
+| **Anima Adapter Strength** | `first_strength`, `last_strength`, `strength_count` | Evenly spaced LoRA/HydraLoRA strength values |
+| **Anima ReFT Strength** | `first_strength`, `last_strength`, `strength_count` | Evenly spaced ReFT strength values |
+| **Checkpoint** | `input_count` + up to 10 UNet names | Different diffusion model checkpoints |
+| **VAE** | `input_count` + up to 10 VAE names | Different VAE files |
+| **LoRA** | `input_count` + up to 10 `(lora_name, model_strength, clip_strength)` triples | Standard ComfyUI LoRA files with per-file model/clip strength |
+
+> **Note:** The Postfix XY Input node was retired along with the Anima Postfix Loader (changelog 3.7.0).
+
+### Workflow Example: CFG Sweep
+
+The following steps describe how to set up a CFG sweep workflow that generates a grid of images across different CFG guidance values:
+
+1. **Add an Anima Efficient Loader node.** Select your UNet, CLIP, VAE, and optionally an Anima adapter. Enter positive and negative prompts. Set the desired image dimensions.
+
+2. **Add an XY Input (Anima): CFG Scale node.** Set `first_cfg = 1.0`, `last_cfg = 15.0`, `cfg_count = 5`. This produces 5 evenly spaced CFG values: 1.0, 4.5, 8.0, 11.5, 15.0.
+
+3. **Add an Anima XY Plot node.** Connect the CFG Scale output to the `x` input. Set `grid_spacing = 0`, `XY_flip = False`, `ksampler_output_images = Plot`.
+
+4. **Add an Anima Efficient KSampler node.** Wire the outputs:
+   - `Anima Efficient Loader` → `MODEL`, `CONDITIONING+`, `CONDITIONING-`, `LATENT` → `Anima Efficient KSampler`
+   - `Anima Efficient Loader` → `VAE` → `optional_vae`
+   - `Anima Efficient Loader` → `DEPENDENCIES` → `dependencies`
+   - `Anima XY Plot` → `xyplot`
+
+5. **Run the workflow.** The KSampler generates 5 images (one per CFG value) and assembles them into a single labeled grid with "CFG: 1.0", "CFG: 4.5", etc. as column headers.
+
+For a 2D sweep (e.g., CFG on X axis, seeds on Y axis), add a second XY Input node for seeds, connect it to the `y` input of Anima XY Plot, and the KSampler produces a full grid with `cfg_count × seed_count` images.
+
+### Output
+
+When `ksampler_output_images = "Plot"`, the KSampler assembles all sampled images into a single grid image using `grid.py`. The grid includes:
+- **Column headers** (X axis labels): centered above each column, auto-sized font.
+- **Row labels** (Y axis labels): left of each row, configurable as horizontal or vertical text.
+- **Configurable spacing** between cells via `grid_spacing`.
+- **Background**: white by default.
+
+The grid is returned as a `IMAGE` tensor (HWC, float32 [0, 1]) and also sent to ComfyUI's PreviewImage node for display. The image is saved via ComfyUI's standard image saving mechanism (output folder / temp folder depending on ComfyUI settings).
+
+When `ksampler_output_images = "Images"`, the KSampler returns all individual decoded images concatenated along the batch dimension instead of the grid — useful for saving individual frames or further processing.

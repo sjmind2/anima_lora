@@ -3,9 +3,9 @@
 Owns the per-epoch / per-step body that used to live inline in
 ``AnimaTrainer.train()``. The entrypoint is :func:`run_training_loop`, which
 takes a built :class:`LoopState` plus the trainer instance so override hooks
-(``process_batch``, ``on_step_start``, ``sample_images``, ``_run_validation``,
+(``process_batch``, ``on_step_start``, ``sample_images``,
 ``generate_step_logs``, ``step_logging``, ``epoch_logging``) keep working
-unchanged.
+unchanged. The validation pass lives in :mod:`library.training.validation`.
 
 State that used to be on ``self`` for cross-call signaling —
 ``_last_router_H_postfix``, ``_cudagraph_mark_step``, ``_hydra_warmup_step``,
@@ -36,6 +36,7 @@ from library.training.checkpoints import CheckpointSaver
 from library.training.contexts import TrainCtx, ValCtx
 from library.training.method_adapter import StepCtx
 from library.training.metrics import MetricContext, collect_metrics
+from library.training.validation import run_validation
 
 logger = logging.getLogger(__name__)
 
@@ -512,13 +513,14 @@ def _run_epoch_steps(
         device = accelerator.device
         step = 0
         batch = first_batch
-        exhausted = False
         while True:
             state.current_step.value = state.global_step
             _profiler_step_begin(state)
             loss = _run_step(trainer, state, batch)
             _profiler_step_end(state)
-            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(state)
+            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(
+                state
+            )
             if accelerator.sync_gradients:
                 state.progress_bar.update(1)
                 state.global_step += 1
@@ -550,7 +552,9 @@ def _run_epoch_steps(
                 indices = _pre_generate_shuffle_indices(
                     state.train_dataloader, gen, epoch + 1
                 )
-                next_prefetch = _EpochPrefetch(state.train_dataloader, indices, accelerator.device)
+                next_prefetch = _EpochPrefetch(
+                    state.train_dataloader, indices, accelerator.device
+                )
                 next_prefetch.start()
 
             step += 1
@@ -578,7 +582,9 @@ def _run_epoch_steps(
 
             _profiler_step_end(state)
 
-            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(state)
+            keys_scaled, mean_norm, maximum_norm, max_mean_logs = _maybe_scale_norm(
+                state
+            )
 
             if accelerator.sync_gradients:
                 state.progress_bar.update(1)
@@ -613,7 +619,9 @@ def _run_epoch_steps(
                 indices = _pre_generate_shuffle_indices(
                     state.train_dataloader, gen, epoch + 1
                 )
-                next_prefetch = _EpochPrefetch(state.train_dataloader, indices, accelerator.device)
+                next_prefetch = _EpochPrefetch(
+                    state.train_dataloader, indices, accelerator.device
+                )
                 next_prefetch.start()
 
     return next_prefetch
@@ -666,6 +674,11 @@ def _run_step(trainer, state: LoopState, batch) -> torch.Tensor:
         accelerator.backward(loss)
         if state.profile_started:
             torch.cuda.nvtx.range_pop()
+
+        # Post-backward adapter hook (before clip/step) — injects extra grad
+        # contributions that can't share the primary backward, e.g. soft-tokens
+        # gradient-cached contrastive negatives under active block swapping.
+        trainer.run_after_backward(state.train_ctx)
 
         if accelerator.sync_gradients:
             net_unwrapped = accelerator.unwrap_model(network)
@@ -741,6 +754,11 @@ def _profiler_step_end(state: LoopState) -> None:
 
 def _maybe_scale_norm(state: LoopState):
     args = state.args
+    if not args.scale_weight_norms:
+        network = state.accelerator.unwrap_model(state.network)
+        cfg = getattr(network, "cfg", None)
+        if cfg and getattr(cfg, "network_type", "lora") in ("loha", "lokr"):
+            args.scale_weight_norms = 1.0
     if args.scale_weight_norms:
         keys_scaled, mean_norm, maximum_norm = state.accelerator.unwrap_model(
             state.network
@@ -813,6 +831,15 @@ def _log_step(
         logs["router_H"] = f"{_router_H_cached:.3f}"
     state.progress_bar.set_postfix(refresh=False, **{**max_mean_logs, **logs})
 
+    # The Phase-0 progress sink (GUI / daemon progress bar tails progress.jsonl)
+    # needs `step` events even with no tracker configured. When tracking, the
+    # step_logging call below already feeds the sink via dispatch_logs; emit a
+    # lightweight event directly only when untracked, so the bar advances
+    # without paying for the full generate_step_logs + collect_metrics path.
+    progress_sink = getattr(trainer, "progress_sink", None)
+    if should_log_step and not state.is_tracking and progress_sink is not None:
+        progress_sink.log(logs, global_step=state.global_step, epoch=epoch + 1)
+
     if state.is_tracking and should_log_step:
         logs = trainer.generate_step_logs(
             args,
@@ -848,7 +875,8 @@ def _maybe_run_step_validation(trainer, state: LoopState, epoch: int) -> None:
         and state.validation_steps > 0
         and should_validate_step
     ):
-        trainer._run_validation(
+        run_validation(
+            trainer,
             state.train_ctx,
             state.val_ctx,
             val_loss_recorder=state.val_step_loss_recorder,
@@ -871,7 +899,8 @@ def _run_epoch_validation(trainer, state: LoopState, epoch: int) -> None:
         else True
     )
     if should_validate_epoch and len(state.val_ctx.dataloader) > 0:
-        trainer._run_validation(
+        run_validation(
+            trainer,
             state.train_ctx,
             state.val_ctx,
             val_loss_recorder=state.val_epoch_loss_recorder,

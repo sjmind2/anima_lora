@@ -20,6 +20,25 @@ network_train_unet_only = true
 source_image_dir = "image_dataset"
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir = "post_image_dataset/lora"
+# fnmatch glob applied to each image's path relative to its subset's image_dir.
+# `*` (or unset) trains on everything. Use `|` to OR-combine patterns:
+#   `char_a/*`           → one subfolder
+#   `char_a/*|char_b/*`  → two subfolders
+#   `*portrait*`         → any path containing "portrait"
+# Same blueprint applies to validation enumeration.
+path_pattern = "*"
+
+# Preprocess input filter. When true, scripts/tasks/preprocess.py forwards
+# `--min_pixels = min_pixels` to both preprocess/resize_images.py and
+# preprocess/cache_text_embeddings.py so under-sized source images never
+# enter the resize / VAE / TE caches. Default 500_000 = 0.5MP — matches the
+# scripts' own argparse defaults. Set drop_lowres_images = false to keep
+# every image regardless of size. Override per-run without editing this file:
+#   make preprocess ARGS="--min_pixels 0"        # explicit threshold (wins)
+#   make preprocess ARGS="--no_drop_lowres"      # keep every image
+#   make preprocess ARGS="--drop_lowres"         # force the configured threshold
+drop_lowres_images = true
+min_pixels = 500000
 
 optimizer_type = "AdamW"
 lr_scheduler = "constant"
@@ -27,10 +46,9 @@ lr_scheduler = "constant"
 timestep_sampling = "sigmoid"
 discrete_flow_shift = 1.0
 mixed_precision = "bf16"
-# fp8_base_unet=true
 
-# gradient_checkpointing = true
-# unsloth_offload_checkpointing = true
+gradient_checkpointing = false
+unsloth_offload_checkpointing = false
 cache_latents = true
 cache_latents_to_disk = true
 cache_text_encoder_outputs = true
@@ -39,9 +57,10 @@ skip_cache_check = true
 vae_chunk_size = 64
 vae_disable_cache = true
 masked_loss = true
-torch_compile = true
-static_token_count = 4096
-trim_crossattn_kv = false
+torch_compile = true               # native constant-token bucketing is the only mode; when
+                                   # torch_compile is on, compile_blocks() turns on native-shape
+                                   # flattening (one block graph per token-count family: 4032/4200)
+                                   # and compiles each block. No padding, no flash static-pad leak.
 attn_mode = "flash"
 save_precision= "bf16"
 use_custom_down_autograd = true
@@ -49,6 +68,7 @@ log_every_n_steps=2
 dataloader_pin_memory = true
 persistent_data_loader_workers= false
 use_cmmd = false
+max_data_loader_n_workers=0
 
 # ── Dataset config ───────────────────────────────────────────────────────
 # Formerly configs/dataset_config.toml. Consumed directly by the dataset
@@ -70,7 +90,7 @@ enable_bucket = true
 # val machinery. Set `validation_split_num` (integer) to pin an exact
 # count; when non-zero it wins over the fractional `validation_split`.
 # validation_split = 0.025
-validation_split_num = 16
+validation_split_num = 0
 validation_seed = 42
 
   [[datasets.subsets]]

@@ -1,7 +1,5 @@
-import pytest
-from pathlib import Path
 from PIL import Image
-from preprocess.resize_images import process_image
+from library.preprocess.images import process_image
 
 
 def _make_image(path, w=64, h=64):
@@ -27,7 +25,9 @@ class TestResizeTreeMode:
         sub_out.mkdir(parents=True)
 
         process_image(src / "root.png", root_out, BUCKET_ARGS, copy_captions=False)
-        process_image(src / "sub" / "child.png", sub_out, BUCKET_ARGS, copy_captions=False)
+        process_image(
+            src / "sub" / "child.png", sub_out, BUCKET_ARGS, copy_captions=False
+        )
 
         assert (root_out / "root.png").exists()
         assert (sub_out / "child.png").exists()

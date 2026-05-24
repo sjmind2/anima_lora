@@ -1,0 +1,6 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>LOHA</h2>
+<p>저랭크 하다마드 곱 적응.</p>
+<p><b>공식</b>: ΔW = (A@B) ⊙ (C@D) &times; scale</p>
+<p>두 저랭크 행렬의 하다마드(원소별) 곱은 <code>2&times;dim&times;(M+N)</code> 매개변수만으로 <code>dim²</code>의 유효 랭크를 제공합니다. 동일한 매개변수 예산에서 표준 LoRA보다 훨씬 더 표현력이 뛰어납니다.</p>
+<p><b>스케일</b>: <code>scale = alpha / dim</code>. 권장 범위 <b>0.1&ndash;0.5</b>. 과도한 스케일(예: 1.0)은 과도한 가중치 업데이트를 유발하여 출력 품질을 심각하게 저하시킵니다.</p>
+<p><b>팁</b>: <code>dim=32, alpha=16</code> (scale=0.5)이 좋은 시작점입니다. alpha를 낮추거나 dim을 늘려 스케일을 더 줄이세요.</p>

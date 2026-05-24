@@ -9,8 +9,10 @@ Examples:
     python tasks.py lora --network_dim 32 --max_train_epochs 64
     python tasks.py test
     python tasks.py test                     # add SPECTRUM=1 to enable Spectrum
+    python tasks.py test                     # add MOD=1 to enable modulation guidance
+    python tasks.py test                     # add NOLORA=1 to run against the bare DiT
     python tasks.py download-models
-    python tasks.py exp-postfix              # experimental method
+    python tasks.py exp-chimera              # experimental method
     python tasks.py exp-test-ip ref.png      # experimental inference
 
 Command implementations live under ``scripts/tasks/`` (shipped methods) and
@@ -23,6 +25,7 @@ import sys
 from scripts.experimental_tasks import inference as exp_inference
 from scripts.experimental_tasks import training as exp_training
 from scripts.tasks import (
+    daemon,
     dcw,
     downloads,
     gui,
@@ -43,16 +46,33 @@ COMMANDS = {
     "lora-gui": (
         training.cmd_lora_gui,
         "Train from a self-contained configs/gui-methods/<variant>.toml "
-        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft, postfix_exp).",
+        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft).",
+    ),
+    # ── Training daemon ───────────────────────────────────────────────
+    "daemon": (
+        daemon.cmd_daemon,
+        "Start the local training-job daemon (idempotent; detached, waits for /health).",
+    ),
+    "daemon-attach": (
+        daemon.cmd_daemon_attach,
+        "Follow the daemon (read-only). JOB=<id> tails that job's stdout; "
+        "ctrl-C detaches only — training keeps running.",
+    ),
+    "daemon-kill": (
+        daemon.cmd_daemon_kill,
+        "Abort the running job (or JOB=<id>) and free the GPU; daemon stays up "
+        "and starts the next queued job.",
+    ),
+    "daemon-terminate": (
+        daemon.cmd_daemon_terminate,
+        "Stop the daemon entirely (active job killed, GPU freed, queue discarded).",
     ),
     # ── Inference ─────────────────────────────────────────────────────
     "test": (
         inference.cmd_test,
-        "Inference with latest LoRA. SPECTRUM=1 enables Spectrum acceleration.",
-    ),
-    "test-mod": (
-        inference.cmd_test_mod,
-        "Inference with latest pooled_text_proj (modulation guidance)",
+        "Inference with latest LoRA. SPECTRUM=1 enables Spectrum acceleration; "
+        "MOD=1 adds the latest distilled pooled_text_proj (modulation guidance); "
+        "NOLORA=1 runs against the bare DiT (skips --lora_weight).",
     ),
     "test-hydra": (
         inference.cmd_test_hydra,
@@ -64,11 +84,18 @@ COMMANDS = {
     ),
     "test-dcw": (
         inference.cmd_test_dcw,
-        "Inference with latest LoRA + DCW post-step bias correction",
+        "Inference with latest LoRA + DCW post-step bias correction. "
+        "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
+    ),
+    "test-smc-cfg": (
+        inference.cmd_test_smc_cfg,
+        "Inference with latest LoRA + SMC-CFG (sliding-mode control CFG, arXiv:2603.03281). "
+        "Honors SPECTRUM=1 / MOD=1 / NOLORA=1.",
     ),
     "test-dcw-v4": (
         inference.cmd_test_dcw_v4,
-        "Inference with latest LoRA + DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors)",
+        "Inference with DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors). "
+        "No LoRA by default; SPECTRUM=1 / MOD=1 / NOLORA=0 (attach latest LoRA) all compose.",
     ),
     "dcw": (
         dcw.cmd_dcw,
@@ -92,6 +119,11 @@ COMMANDS = {
         preprocess.cmd_preprocess,
         "Full preprocessing (resize + VAE + text embeddings)",
     ),
+    "preprocess-config": (
+        preprocess.cmd_preprocess_config,
+        "Preprocess the dirs named in a --dataset_config TOML (resize --src "
+        "→ image_dir, then VAE + TE caches → cache_dir). Used by the trainer node.",
+    ),
     "preprocess-resize": (
         preprocess.cmd_preprocess_resize,
         "Resize images to bucket resolutions",
@@ -105,7 +137,12 @@ COMMANDS = {
     "preprocess-pe": (
         preprocess.cmd_preprocess_pe,
         "Cache PE-Core vision-encoder features into the LoRA cache dir. "
-        "Consumed by REPA (--use_repa) and IP-Adapter live-disk mode.",
+        "Consumed by IP-Adapter live-disk mode and the DCW v4 fusion head.",
+    ),
+    "caption-index": (
+        preprocess.cmd_caption_index,
+        "Build the typed-tag caption index (character/copyright/artist groups) "
+        "at post_image_dataset/captions/caption_index.json. Pure data, no GPU.",
     ),
     # ── Anima Tagger ──────────────────────────────────────────────────
     "preprocess-tagger": (
@@ -139,10 +176,14 @@ COMMANDS = {
         "Download PE-Spatial-B16-512 (Anima Tagger aux encoder)",
     ),
     # ── Masking ───────────────────────────────────────────────────────
-    "mask": (masking.cmd_mask, "Generate SAM3 + MIT masks, then merge"),
-    "mask-sam": (masking.cmd_mask_sam, "Generate SAM3 masks only"),
-    "mask-mit": (masking.cmd_mask_mit, "Generate MIT masks only"),
-    "mask-clean": (masking.cmd_mask_clean, "Remove all generated masks"),
+    "mask": (
+        masking.cmd_mask,
+        "Run SAM + MIT (via tempdir) and write merged masks under post_image_dataset/masks/",
+    ),
+    "mask-clean": (
+        masking.cmd_mask_clean,
+        "Remove post_image_dataset/masks/",
+    ),
     # ── GUI ───────────────────────────────────────────────────────────
     "gui": (gui.cmd_gui, "Launch PySide6 GUI"),
     "gui-shortcut": (
@@ -157,7 +198,7 @@ COMMANDS = {
     "comfy-batch": (utilities.cmd_comfy_batch, "Run ComfyUI batch workflow"),
     "distill-prep": (
         utilities.cmd_distill_prep,
-        "Pre-stage artifacts for distill-mod: T5(\"\") uncond sidecar + "
+        'Pre-stage artifacts for distill-mod: T5("") uncond sidecar + '
         "teacher-synthetic clean latents pool (--skip_synth / --skip_uncond to "
         "stage only one).",
     ),
@@ -186,20 +227,18 @@ COMMANDS = {
     # ── Experimental ──────────────────────────────────────────────────
     # Unstable methods kept under exp-* so they don't pollute the main command
     # surface. May produce broken output, change without notice, or be removed.
-    "exp-postfix": (
-        exp_training.cmd_postfix,
-        "[experimental] Postfix tuning (mode selected in configs/methods/postfix.toml)",
-    ),
     "exp-turbo": (
         exp_training.cmd_turbo,
         "[experimental] Decoupled DMD2 distillation — bakes CFG=4 / 28-step Anima "
         "into a 4-step LoRA student (configs/methods/turbo.toml). "
         "Single-GPU bespoke loop (bypasses train.py/accelerate, like distill-mod).",
     ),
-    "exp-fera": (
-        exp_training.cmd_fera,
-        "[experimental] Author-faithful FeRA (independent-A stacked experts + "
-        "global FEI router; configs/gui-methods/fera.toml)",
+    "exp-spd": (
+        exp_training.cmd_spd,
+        "[experimental] SPD fine-tuning LoRA — §4.3 trajectory adapter that teaches a "
+        "plain LoRA to follow the SPD multi-resolution trajectory (configs/methods/spd.toml). "
+        "Single-GPU bespoke loop (bypasses train.py/accelerate, like distill-mod). "
+        "Output is a normal LoRA — infer with the SPD sampler at the trained schedule.",
     ),
     "exp-soft-tokens": (
         exp_training.cmd_soft_tokens,
@@ -228,22 +267,21 @@ COMMANDS = {
         "[experimental] Full EasyControl preprocess: latents + text emb. "
         "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
     ),
-    "exp-test-postfix": (
-        exp_inference.cmd_test_postfix,
-        "[experimental] Inference with latest postfix weight",
+    "exp-test-soft": (
+        exp_inference.cmd_test_soft,
+        "[experimental] Inference with latest soft_tokens weight "
+        "(SoftREPA-style per-layer × per-t bank, spliced into cross-attn via "
+        "monkey-patched Block.forward). Composes freely with --spectrum.",
     ),
     "exp-test-turbo": (
         exp_inference.cmd_test_turbo,
         "[experimental] Inference with latest turbo student LoRA at 4 steps, cfg=1.0 "
         "(CFG is baked into the student).",
     ),
-    "exp-test-postfix-exp": (
-        exp_inference.cmd_test_postfix_exp,
-        "[experimental] Inference with latest postfix-exp weight",
-    ),
-    "exp-test-postfix-func": (
-        exp_inference.cmd_test_postfix_func,
-        "[experimental] Inference with latest postfix-func weight",
+    "exp-test-spd": (
+        exp_inference.cmd_test_spd,
+        "[experimental] Inference with latest SPD fine-tune LoRA on the SPD sampler "
+        "at its trained schedule (read from safetensors metadata). cfg=4.0, Euler.",
     ),
     "exp-test-ip": (
         exp_inference.cmd_test_ip,

@@ -1,4 +1,3 @@
-import os
 import logging
 import torch
 import folder_paths
@@ -10,7 +9,6 @@ from nodes import CLIPTextEncode
 
 from .adapter import apply_adapter
 from .fera import apply_fera
-from .postfix import apply_postfix
 from .grid import tensor_to_pil, create_grid
 from .xy_inputs import XY_INPUT_CLASS_MAPPINGS, XY_INPUT_DISPLAY_NAME_MAPPINGS
 
@@ -42,11 +40,6 @@ def _try_apply_adapter(model, lora_path, strength_lora, strength_reft):
         return True
     except Exception as e:
         logger.warning(f"apply_fera failed for {lora_path}: {e}")
-    try:
-        apply_postfix(model, lora_path, strength_lora)
-        return True
-    except Exception as e:
-        logger.warning(f"apply_postfix failed for {lora_path}: {e}")
     logger.error(f"All adapter types failed for: {lora_path}")
     return False
 
@@ -82,8 +75,24 @@ class AnimaEfficientLoader:
             }
         }
 
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "CLIP", "DEPENDENCIES")
-    RETURN_NAMES = ("MODEL", "CONDITIONING+", "CONDITIONING-", "LATENT", "VAE", "CLIP", "DEPENDENCIES")
+    RETURN_TYPES = (
+        "MODEL",
+        "CONDITIONING",
+        "CONDITIONING",
+        "LATENT",
+        "VAE",
+        "CLIP",
+        "DEPENDENCIES",
+    )
+    RETURN_NAMES = (
+        "MODEL",
+        "CONDITIONING+",
+        "CONDITIONING-",
+        "LATENT",
+        "VAE",
+        "CLIP",
+        "DEPENDENCIES",
+    )
     FUNCTION = "load"
     CATEGORY = "Anima XY Plot"
     DESCRIPTION = (
@@ -153,7 +162,15 @@ class AnimaEfficientLoader:
             batch_size,
         )
 
-        return (model, positive_encoded, negative_encoded, latent_dict, vae, clip, dependencies)
+        return (
+            model,
+            positive_encoded,
+            negative_encoded,
+            latent_dict,
+            vae,
+            clip,
+            dependencies,
+        )
 
 
 class AnimaXYPlot:
@@ -181,7 +198,15 @@ class AnimaXYPlot:
     CATEGORY = "Anima XY Plot"
     DESCRIPTION = "Anima XY Plot: collects X and Y axis inputs for parameter sweep."
 
-    def plot(self, x, grid_spacing, XY_flip, Y_label_orientation, ksampler_output_images, y=None):
+    def plot(
+        self,
+        x,
+        grid_spacing,
+        XY_flip,
+        Y_label_orientation,
+        ksampler_output_images,
+        y=None,
+    ):
         result = {
             "x_type": x["type"],
             "x_values": x["values"],
@@ -243,7 +268,11 @@ class AnimaEfficientKSampler:
                 "dependencies": ("DEPENDENCIES",),
                 "xyplot": ("ANIMA_XYPLOT",),
             },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "my_unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "my_unique_id": "UNIQUE_ID",
+            },
         }
 
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "VAE", "IMAGE")
@@ -287,7 +316,9 @@ class AnimaEfficientKSampler:
         end_at_step=10000,
         return_with_leftover_noise="disable",
     ):
-        latent_image = latent_image["samples"] if isinstance(latent_image, dict) else latent_image
+        latent_image = (
+            latent_image["samples"] if isinstance(latent_image, dict) else latent_image
+        )
         latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image)
         noise = comfy.sample.prepare_noise(latent_image, seed)
 
@@ -295,6 +326,7 @@ class AnimaEfficientKSampler:
             noise = torch.zeros_like(latent_image)
 
         import latent_preview
+
         callback = latent_preview.prepare_callback(model, steps)
 
         samples = comfy.sample.sample(
@@ -409,18 +441,6 @@ class AnimaEfficientKSampler:
                 cur["model"] = new_model
                 cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
                 cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
-        elif param_type == "anima_postfix":
-            postfix_name, strength = param_val
-            postfix_path = folder_paths.get_full_path("loras", postfix_name)
-            new_model = cur["model"].clone()
-            try:
-                apply_postfix(new_model, postfix_path, strength)
-            except Exception as e:
-                logger.error(f"apply_postfix failed for {postfix_path}: {e}")
-                raise RuntimeError(
-                    f"Failed to apply postfix '{postfix_name}': {e}"
-                ) from e
-            cur["model"] = new_model
         elif param_type == "checkpoint":
             ckpt_path = _get_folder_path("diffusion_models", param_val, "unet")
             cur["model"] = comfy.sd.load_diffusion_model(ckpt_path)
@@ -451,6 +471,7 @@ class AnimaEfficientKSampler:
             return f"ReFT: {param_val:.2f}"
         if param_type == "lora":
             import os
+
             return f"LoRA: {os.path.splitext(os.path.basename(param_val[0]))[0]}"[:25]
         if param_type == "anima_postfix":
             return param_val[0][:25]
@@ -488,6 +509,7 @@ class AnimaEfficientKSampler:
         vae = optional_vae
 
         from comfy.cli_args import args
+
         prev_pm = args.preview_method
         try:
             if preview_method not in ("none", "vae_decoded_only"):
@@ -512,6 +534,7 @@ class AnimaEfficientKSampler:
                     return_with_leftover_noise=return_with_leftover_noise,
                 )
                 from nodes import PreviewImage
+
                 preview_images = PreviewImage().save_images(
                     images, prompt=prompt, extra_pnginfo=extra_pnginfo
                 )["ui"]["images"]
@@ -590,7 +613,9 @@ class AnimaEfficientKSampler:
 
             y_label_orientation = xyplot.get("Y_label_orientation", "Horizontal")
             grid_tensor = create_grid(
-                images_2d, x_labels, y_labels,
+                images_2d,
+                x_labels,
+                y_labels,
                 grid_spacing=grid_spacing,
                 y_label_orientation=y_label_orientation,
             )
@@ -601,6 +626,7 @@ class AnimaEfficientKSampler:
                 output_images = grid_tensor
 
             from nodes import PreviewImage
+
             preview_images = PreviewImage().save_images(
                 output_images, prompt=prompt, extra_pnginfo=extra_pnginfo
             )["ui"]["images"]

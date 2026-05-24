@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,21 +42,23 @@ from PIL import Image
 from torchvision import transforms
 from typing import Optional
 
-# Make ``anima_lora/`` importable when this script is invoked as
-# ``python scripts/edit.py``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from library.anima import strategy as strategy_anima, text_strategies  # noqa: E402
+from library.anima import text_strategies  # noqa: E402
 from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS  # noqa: E402
-from library.inference import directedit, sampling as inference_utils  # noqa: E402
-from library.inference.directedit_splice import splice_crossattn_emb  # noqa: E402
-from library.inference.edit_dispatcher import (  # noqa: E402
+from library.inference import sampling as inference_utils  # noqa: E402
+from library.inference.editing import directedit  # noqa: E402
+from library.inference.editing.directedit_splice import splice_crossattn_emb  # noqa: E402
+from library.inference.corrections.smc_cfg import SMCCFGState  # noqa: E402
+from library.inference.editing.edit_dispatcher import (  # noqa: E402
     derive_target_caption,
     encode_last_pooled_via_anima_strategy,
 )
 from library.inference.models import load_dit_model, load_text_encoder  # noqa: E402
 from library.inference.output import save_images  # noqa: E402
-from library.inference.text import MAX_CROSSATTN_TOKENS, prepare_text_inputs  # noqa: E402
+from library.inference.text import (  # noqa: E402
+    MAX_CROSSATTN_TOKENS,
+    ensure_text_strategies,
+    prepare_text_inputs,
+)
 from library.log import setup_logging  # noqa: E402
 from library.models import qwen_vae as qwen_image_autoencoder_kl  # noqa: E402
 from library.runtime.device import clean_memory_on_device  # noqa: E402
@@ -180,6 +181,27 @@ def parse_args() -> argparse.Namespace:
         "you need the inverted noise to match a high-CFG generation seed.",
     )
     p.add_argument(
+        "--smc_cfg",
+        action="store_true",
+        help="α-adaptive Sliding-Mode Control on the edit pass's CFG combine "
+        "(library/inference/smc_cfg.py). Clamps small/noisy CFG-residual "
+        "voxels while preserving large semantic moves; composes with t_inj "
+        "V-injection (SMC operates on the post-injection v_cond_tar / v_neg "
+        "residual). No-op on the inversion pass.",
+    )
+    p.add_argument(
+        "--smc_cfg_lambda",
+        type=float,
+        default=5.0,
+        help="SMC sliding-manifold slope λ. Defaults match inference.py.",
+    )
+    p.add_argument(
+        "--smc_cfg_alpha",
+        type=float,
+        default=0.1,
+        help="SMC adaptive gain α ∈ (0, 1]. Defaults match inference.py.",
+    )
+    p.add_argument(
         "--t_inj",
         type=int,
         default=2,
@@ -233,7 +255,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = p.parse_args()
-    args.fp8 = False
     args.compile = False
     return args
 
@@ -440,32 +461,12 @@ def main() -> None:
     src_pil = src_pil.resize((w_pix, h_pix), Image.LANCZOS)
 
     # 2. Tokenize strategies (matches inference.py main()).
-    tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
-        qwen3_path=args.text_encoder,
-        t5_tokenizer_path=None,
-        qwen3_max_length=MAX_CROSSATTN_TOKENS,
-        t5_max_length=MAX_CROSSATTN_TOKENS,
-    )
-    text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
-    text_strategies.TextEncodingStrategy.set_strategy(
-        strategy_anima.AnimaTextEncodingStrategy()
-    )
+    ensure_text_strategies(args.text_encoder, MAX_CROSSATTN_TOKENS)
 
     # 3. Load DiT first (needed by prepare_text_inputs's _preprocess_text_embeds).
     logger.info("Loading DiT model...")
     anima = load_dit_model(args, device, dit_weight_dtype=torch.bfloat16)
     if args.compile_blocks:
-        # split_attn=True (the inference default) slices q/k/v per batch
-        # element with `attn_params.seqlens[i]` as the slice end — a 0-dim
-        # CUDA tensor whose use as a Python slice forces a `.item()` sync,
-        # which breaks the dynamo graph inside every block._forward.
-        # Batch=1 DirectEdit at a single bucket has no real per-element
-        # trimming to do, so we disable split_attn for the compile path.
-        # Self-attn now sees the ~0–1.6% image-token padding (zero keys
-        # /values) instead of trimming it; cross-attn is unchanged from the
-        # trained zero-padded-text invariant (see CLAUDE.md "Text encoder
-        # padding").
-        anima.split_attn = False
         anima.compile_blocks(mode=args.compile_inductor_mode)
 
     # 4. Encode source + target text — or, in --cached_embed mode, load
@@ -483,8 +484,7 @@ def main() -> None:
         neg_prompt = args.negative_prompt or ""
         if not args.negative_prompt:
             logger.info(
-                "DirectEdit dry: --negative_prompt empty; defaulting to "
-                "'' for CFG."
+                "DirectEdit dry: --negative_prompt empty; defaulting to '' for CFG."
             )
 
         # Reuse prepare_text_inputs: set prompt == negative_prompt so the
@@ -505,8 +505,7 @@ def main() -> None:
 
         embed_neg = ctx_neg["embed"][0].to(device, dtype=torch.bfloat16)
         logger.info(
-            "DirectEdit dry: loaded %d variant(s) from %s; CFG enabled "
-            "(neg=%r).",
+            "DirectEdit dry: loaded %d variant(s) from %s; CFG enabled (neg=%r).",
             len(cached_variants),
             args.cached_embed,
             neg_prompt,
@@ -531,7 +530,11 @@ def main() -> None:
             te_was_on = text_encoder.device
             text_encoder.to(device)
             encode_fn = lambda phrases: encode_last_pooled_via_anima_strategy(  # noqa: E731
-                phrases, text_encoder, tokenize_strategy, encoding_strategy, device,
+                phrases,
+                text_encoder,
+                tokenize_strategy,
+                encoding_strategy,
+                device,
             )
             plan = derive_target_caption(
                 args.prompt_src,
@@ -594,8 +597,13 @@ def main() -> None:
             logger.info(
                 "DirectEdit slot surgery: diff span src[%d:%d] -> tar[%d:%d] "
                 "(src_len=%d tar_len=%d suffix_len=%d)",
-                span.start, span.src_end, span.start, span.tar_end,
-                span.src_len, span.tar_len, span.suffix_len,
+                span.start,
+                span.src_end,
+                span.start,
+                span.tar_end,
+                span.src_len,
+                span.tar_len,
+                span.suffix_len,
             )
 
         # Drop TE; conds_cache hands us bare tensors and surgery is done.
@@ -611,7 +619,9 @@ def main() -> None:
             "DirectEdit embed diffs (abs mean): "
             "|src-tar|=%.6f  |src-neg|=%.6f  |tar-neg|=%.6f  "
             "(src.norm=%.3f tar.norm=%.3f shape=%s)",
-            d_st, d_sn, d_tn,
+            d_st,
+            d_sn,
+            d_tn,
             embed_src.float().norm().item(),
             embed_tar.float().norm().item(),
             tuple(embed_src.shape),
@@ -665,14 +675,26 @@ def main() -> None:
     z_edits: list[tuple[Optional[str], torch.Tensor]] = []
     for variant, e_src, e_tar in variant_passes:
         tag = f"variant={variant}, " if variant else ""
+        # Fresh SMC state per variant so e_prev resets cleanly between passes.
+        # SMC is no-op on the inversion path (single-forward, no residual).
+        smc_state = (
+            SMCCFGState(lam=args.smc_cfg_lambda, alpha=args.smc_cfg_alpha)
+            if args.smc_cfg
+            else None
+        )
         logger.info(
             "DirectEdit: %sinversion (T=%d, src_guidance=%.2f) -> edit "
-            "(tar_guidance=%.2f, t_inj=%d)",
+            "(tar_guidance=%.2f, t_inj=%d, smc_cfg=%s)",
             tag,
             args.infer_steps,
             args.invert_guidance,
             args.guidance_scale,
             args.t_inj,
+            (
+                f"λ={args.smc_cfg_lambda},α={args.smc_cfg_alpha}"
+                if args.smc_cfg
+                else "off"
+            ),
         )
         z_inv, delta_z = directedit.invert(
             anima=anima,
@@ -699,6 +721,7 @@ def main() -> None:
             t_inj=args.t_inj,
             t_inj_blocks=t_inj_blocks,
             z_inv=z_inv if args.t_inj > 0 else None,
+            smc_cfg_state=smc_state,
         )
         z_edits.append((variant, z_edit))
 

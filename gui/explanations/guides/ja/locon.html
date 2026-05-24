@@ -1,0 +1,5 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>LOCON</h2>
+<p>Tucker分解をサポートする拡張LoRA。</p>
+<p><b>線形レイヤー</b>: 標準LoRAと同じ &mdash; ΔW = up @ down &times; scale</p>
+<p><b>Conv2dレイヤー</b>: カーネルサイズが1より大きい場合、Tuckerコアテンソル<code>lora_mid</code>を追加し、畳み込みをより効率的に分解します。</p>
+<p>ComfyUIのLyCORISローダーと互換性があります。<code>use_tucker=true</code>でConvレイヤーのTucker分解を有効にできます。</p>

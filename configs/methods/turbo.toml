@@ -42,10 +42,10 @@ tau_ca_skip_above_t = 0.95      # if generator t > this, skip CA branch (DM-only
 
 # Optimization.
 [optim]
-student_lr = 2e-5
-fake_lr = 2e-5
-fake_steps_per_student_step = 1
-alpha_warmup_steps = 100       # linear ramp α_eff: 1.0 → teacher_cfg over these steps
+student_lr = 5e-6
+fake_lr = 5e-5
+fake_steps_per_student_step = 2
+alpha_warmup_steps = 500       # linear ramp α_eff: 1.0 → teacher_cfg over these steps
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 
@@ -57,5 +57,5 @@ sigmoid_scale = 1.0
 # Logging / checkpoints.
 [io]
 save_every = 250
-log_interval = 10
+log_interval = 5
 log_dir = "output/logs/turbo"

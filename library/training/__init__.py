@@ -67,9 +67,11 @@ from library.training.metrics import (
     collect_metrics,
 )
 from library.training.contexts import (
+    RuntimeState,
     TrainCtx,
     ValCtx,
 )
+from library.training.loss_recorder import LossRecorder
 from library.training.checkpoints import (
     EPOCH_STATE_NAME,
     EPOCH_FILE_NAME,
@@ -100,6 +102,7 @@ from library.training.checkpoints import (
 
 __all__ = [
     # contexts
+    "RuntimeState",
     "TrainCtx",
     "ValCtx",
     # samplers
@@ -159,6 +162,8 @@ __all__ = [
     # schedulers
     "get_scheduler_fix",
     "get_dummy_scheduler",
+    # loss recorder
+    "LossRecorder",
     # checkpoints
     "EPOCH_STATE_NAME",
     "EPOCH_FILE_NAME",

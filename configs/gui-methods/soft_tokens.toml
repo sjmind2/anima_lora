@@ -12,10 +12,7 @@ network_args = [
     "n_layers=10",
     "n_t_buckets=100",
     "init_std=0.02",
-    "splice_position=end_of_sequence",  # contrastive requires EOS
-    "contrastive_weight=0.05",          # paper InfoNCE on top of plain FM
-    "contrastive_k=1",                  # in-batch negatives per anchor
-    "contrastive_tau=1.0",
+    "splice_position=end_of_sequence",
 ]
 output_name = "anima_soft_tokens"
 

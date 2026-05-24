@@ -13,7 +13,10 @@ class AnimaXYInputSeeds:
         return {
             "required": {
                 "seed_count": ("INT", {"default": 5, "min": 1}),
-                "first_seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "first_seed": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+                ),
             }
         }
 
@@ -44,7 +47,9 @@ class AnimaXYInputSteps:
         }
 
     def xy_input(self, first_step, last_step, step_count):
-        values = list(np.linspace(first_step, last_step, step_count).astype(int).tolist())
+        values = list(
+            np.linspace(first_step, last_step, step_count).astype(int).tolist()
+        )
         return (
             {
                 "type": "steps",
@@ -63,14 +68,23 @@ class AnimaXYInputCFG:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "first_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.5}),
-                "last_cfg": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 100.0, "step": 0.5}),
+                "first_cfg": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
+                "last_cfg": (
+                    "FLOAT",
+                    {"default": 15.0, "min": 0.0, "max": 100.0, "step": 0.5},
+                ),
                 "cfg_count": ("INT", {"default": 5, "min": 2}),
             }
         }
 
     def xy_input(self, first_cfg, last_cfg, cfg_count):
-        values = [round(first_cfg + i * (last_cfg - first_cfg) / (cfg_count - 1), 2) for i in range(cfg_count)]
+        values = [
+            round(first_cfg + i * (last_cfg - first_cfg) / (cfg_count - 1), 2)
+            for i in range(cfg_count)
+        ]
         return (
             {
                 "type": "cfg",
@@ -89,14 +103,27 @@ class AnimaXYInputDenoise:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "first_denoise": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "last_denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "first_denoise": (
+                    "FLOAT",
+                    {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05},
+                ),
+                "last_denoise": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
+                ),
                 "denoise_count": ("INT", {"default": 5, "min": 2}),
             }
         }
 
     def xy_input(self, first_denoise, last_denoise, denoise_count):
-        values = [round(first_denoise + i * (last_denoise - first_denoise) / (denoise_count - 1), 2) for i in range(denoise_count)]
+        values = [
+            round(
+                first_denoise
+                + i * (last_denoise - first_denoise) / (denoise_count - 1),
+                2,
+            )
+            for i in range(denoise_count)
+        ]
         return (
             {
                 "type": "denoise",
@@ -115,7 +142,9 @@ class AnimaXYInputSamplerScheduler:
     def INPUT_TYPES(cls):
         samplers = comfy.samplers.KSampler.SAMPLERS
         schedulers = comfy.samplers.KSampler.SCHEDULERS
-        inputs = {"required": {"input_count": ("INT", {"default": 3, "min": 1, "max": 10})}}
+        inputs = {
+            "required": {"input_count": ("INT", {"default": 3, "min": 1, "max": 10})}
+        }
         for i in range(1, 11):
             inputs["required"][f"sampler_{i}"] = (samplers,)
             inputs["required"][f"scheduler_{i}"] = (schedulers,)
@@ -128,7 +157,13 @@ class AnimaXYInputSamplerScheduler:
             sampler = kwargs.get(f"sampler_{i}")
             scheduler = kwargs.get(f"scheduler_{i}")
             values.append((sampler, scheduler))
-        return ({"type": "sampler_scheduler", "label": "Sampler/Scheduler", "values": values},)
+        return (
+            {
+                "type": "sampler_scheduler",
+                "label": "Sampler/Scheduler",
+                "values": values,
+            },
+        )
 
 
 class AnimaXYInputPositivePromptSR:
@@ -138,20 +173,37 @@ class AnimaXYInputPositivePromptSR:
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs = {"required": {
-            "search": ("STRING", {"default": "", "multiline": False}),
-            "replace_count": ("INT", {"default": 2, "min": 1, "max": 10}),
-        }}
+        inputs = {
+            "required": {
+                "search": ("STRING", {"default": "", "multiline": False}),
+                "replace_count": ("INT", {"default": 2, "min": 1, "max": 10}),
+            }
+        }
         for i in range(1, 11):
-            inputs["required"][f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
+            inputs["required"][f"replace_{i}"] = (
+                "STRING",
+                {"default": "", "multiline": False},
+            )
         return inputs
 
     def xy_input(self, **kwargs):
         search = kwargs["search"]
         replace_count = kwargs["replace_count"]
         values = [(search, None)]
-        values.extend([(search, kwargs.get(f"replace_{i}", "")) for i in range(1, replace_count + 1)])
-        return ({"type": "positive_prompt_sr", "label": "Positive Prompt S/R", "values": values, "search": search},)
+        values.extend(
+            [
+                (search, kwargs.get(f"replace_{i}", ""))
+                for i in range(1, replace_count + 1)
+            ]
+        )
+        return (
+            {
+                "type": "positive_prompt_sr",
+                "label": "Positive Prompt S/R",
+                "values": values,
+                "search": search,
+            },
+        )
 
 
 class AnimaXYInputNegativePromptSR:
@@ -161,20 +213,37 @@ class AnimaXYInputNegativePromptSR:
 
     @classmethod
     def INPUT_TYPES(cls):
-        inputs = {"required": {
-            "search": ("STRING", {"default": "", "multiline": False}),
-            "replace_count": ("INT", {"default": 2, "min": 1, "max": 10}),
-        }}
+        inputs = {
+            "required": {
+                "search": ("STRING", {"default": "", "multiline": False}),
+                "replace_count": ("INT", {"default": 2, "min": 1, "max": 10}),
+            }
+        }
         for i in range(1, 11):
-            inputs["required"][f"replace_{i}"] = ("STRING", {"default": "", "multiline": False})
+            inputs["required"][f"replace_{i}"] = (
+                "STRING",
+                {"default": "", "multiline": False},
+            )
         return inputs
 
     def xy_input(self, **kwargs):
         search = kwargs["search"]
         replace_count = kwargs["replace_count"]
         values = [(search, None)]
-        values.extend([(search, kwargs.get(f"replace_{i}", "")) for i in range(1, replace_count + 1)])
-        return ({"type": "negative_prompt_sr", "label": "Negative Prompt S/R", "values": values, "search": search},)
+        values.extend(
+            [
+                (search, kwargs.get(f"replace_{i}", ""))
+                for i in range(1, replace_count + 1)
+            ]
+        )
+        return (
+            {
+                "type": "negative_prompt_sr",
+                "label": "Negative Prompt S/R",
+                "values": values,
+                "search": search,
+            },
+        )
 
 
 class AnimaXYInputAnimaAdapter:
@@ -185,11 +254,19 @@ class AnimaXYInputAnimaAdapter:
     @classmethod
     def INPUT_TYPES(cls):
         lora_list = folder_paths.get_filename_list("loras")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
+        inputs = {
+            "required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}
+        }
         for i in range(1, 11):
             inputs["required"][f"adapter_{i}"] = (lora_list,)
-            inputs["required"][f"strength_lora_{i}"] = ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05})
-            inputs["required"][f"strength_reft_{i}"] = ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05})
+            inputs["required"][f"strength_lora_{i}"] = (
+                "FLOAT",
+                {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05},
+            )
+            inputs["required"][f"strength_reft_{i}"] = (
+                "FLOAT",
+                {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05},
+            )
         return inputs
 
     def xy_input(self, **kwargs):
@@ -212,14 +289,27 @@ class AnimaXYInputAnimaAdapterStrength:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "first_strength": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05}),
-                "last_strength": ("FLOAT", {"default": 2.0, "min": -2.0, "max": 2.0, "step": 0.05}),
+                "first_strength": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                ),
+                "last_strength": (
+                    "FLOAT",
+                    {"default": 2.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                ),
                 "strength_count": ("INT", {"default": 5, "min": 2}),
             }
         }
 
     def xy_input(self, first_strength, last_strength, strength_count):
-        values = [round(first_strength + i * (last_strength - first_strength) / (strength_count - 1), 2) for i in range(strength_count)]
+        values = [
+            round(
+                first_strength
+                + i * (last_strength - first_strength) / (strength_count - 1),
+                2,
+            )
+            for i in range(strength_count)
+        ]
         return (
             {
                 "type": "anima_adapter_strength",
@@ -238,14 +328,27 @@ class AnimaXYInputAnimaReFTStrength:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "first_strength": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05}),
-                "last_strength": ("FLOAT", {"default": 2.0, "min": -2.0, "max": 2.0, "step": 0.05}),
+                "first_strength": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                ),
+                "last_strength": (
+                    "FLOAT",
+                    {"default": 2.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                ),
                 "strength_count": ("INT", {"default": 5, "min": 2}),
             }
         }
 
     def xy_input(self, first_strength, last_strength, strength_count):
-        values = [round(first_strength + i * (last_strength - first_strength) / (strength_count - 1), 2) for i in range(strength_count)]
+        values = [
+            round(
+                first_strength
+                + i * (last_strength - first_strength) / (strength_count - 1),
+                2,
+            )
+            for i in range(strength_count)
+        ]
         return (
             {
                 "type": "anima_reft_strength",
@@ -255,30 +358,6 @@ class AnimaXYInputAnimaReFTStrength:
         )
 
 
-class AnimaXYInputAnimaPostfix:
-    RETURN_TYPES = ("ANIMA_XY",)
-    FUNCTION = "xy_input"
-    CATEGORY = "Anima XY Plot/XY Input"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        lora_list = folder_paths.get_filename_list("loras")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
-        for i in range(1, 11):
-            inputs["required"][f"postfix_{i}"] = (lora_list,)
-            inputs["required"][f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
-        return inputs
-
-    def xy_input(self, **kwargs):
-        input_count = kwargs["input_count"]
-        values = []
-        for i in range(1, input_count + 1):
-            postfix = kwargs.get(f"postfix_{i}", "")
-            strength = kwargs.get(f"strength_{i}", 1.0)
-            values.append((postfix, strength))
-        return ({"type": "anima_postfix", "label": "Anima Postfix", "values": values},)
-
-
 class AnimaXYInputCheckpoint:
     RETURN_TYPES = ("ANIMA_XY",)
     FUNCTION = "xy_input"
@@ -286,8 +365,12 @@ class AnimaXYInputCheckpoint:
 
     @classmethod
     def INPUT_TYPES(cls):
-        unet_list = folder_paths.get_filename_list("diffusion_models") or folder_paths.get_filename_list("unet")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
+        unet_list = folder_paths.get_filename_list(
+            "diffusion_models"
+        ) or folder_paths.get_filename_list("unet")
+        inputs = {
+            "required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}
+        }
         for i in range(1, 11):
             inputs["required"][f"unet_name_{i}"] = (unet_list,)
         return inputs
@@ -306,7 +389,9 @@ class AnimaXYInputVAE:
     @classmethod
     def INPUT_TYPES(cls):
         vae_list = folder_paths.get_filename_list("vae")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
+        inputs = {
+            "required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}
+        }
         for i in range(1, 11):
             inputs["required"][f"vae_name_{i}"] = (vae_list,)
         return inputs
@@ -325,11 +410,19 @@ class AnimaXYInputLoRA:
     @classmethod
     def INPUT_TYPES(cls):
         lora_list = ["None"] + folder_paths.get_filename_list("loras")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
+        inputs = {
+            "required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}
+        }
         for i in range(1, 11):
             inputs["required"][f"lora_name_{i}"] = (lora_list,)
-            inputs["required"][f"model_strength_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
-            inputs["required"][f"clip_strength_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01})
+            inputs["required"][f"model_strength_{i}"] = (
+                "FLOAT",
+                {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
+            )
+            inputs["required"][f"clip_strength_{i}"] = (
+                "FLOAT",
+                {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
+            )
         return inputs
 
     def xy_input(self, **kwargs):
@@ -354,7 +447,6 @@ XY_INPUT_CLASS_MAPPINGS = {
     "XY Input (Anima): Anima Adapter": AnimaXYInputAnimaAdapter,
     "XY Input (Anima): Anima Adapter Strength": AnimaXYInputAnimaAdapterStrength,
     "XY Input (Anima): Anima ReFT Strength": AnimaXYInputAnimaReFTStrength,
-    "XY Input (Anima): Anima Postfix": AnimaXYInputAnimaPostfix,
     "XY Input (Anima): Checkpoint": AnimaXYInputCheckpoint,
     "XY Input (Anima): VAE": AnimaXYInputVAE,
     "XY Input (Anima): LoRA": AnimaXYInputLoRA,
@@ -371,7 +463,6 @@ XY_INPUT_DISPLAY_NAME_MAPPINGS = {
     "XY Input (Anima): Anima Adapter": "XY Input (Anima): Anima Adapter",
     "XY Input (Anima): Anima Adapter Strength": "XY Input (Anima): Anima Adapter Strength",
     "XY Input (Anima): Anima ReFT Strength": "XY Input (Anima): Anima ReFT Strength",
-    "XY Input (Anima): Anima Postfix": "XY Input (Anima): Anima Postfix",
     "XY Input (Anima): Checkpoint": "XY Input (Anima): Checkpoint",
     "XY Input (Anima): VAE": "XY Input (Anima): VAE",
     "XY Input (Anima): LoRA": "XY Input (Anima): LoRA",

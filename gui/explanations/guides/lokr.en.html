@@ -1,5 +1,0 @@
-<h2>LOKR</h2>
-<p>Low-Rank Kronecker Product adaptation.</p>
-<p><b>Formula</b>: ΔW = kron(W1, W2) × scale</p>
-<p>Factorizes the weight dimensions into smaller factor pairs, then uses the Kronecker product to reconstruct the full-rank structure. Self-adapts between full matrix and low-rank decomposition based on <code>network_dim</code> vs dimension size.</p>
-<p><b>Key options</b>: <code>decompose_both=true</code> (decompose both W1 and W2), <code>lokr_factor=-1</code> (auto factorization).</p>

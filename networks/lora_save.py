@@ -1,7 +1,7 @@
-"""Save-pipeline orchestrator for the LoRA / Ortho / Hydra / DoRA family.
+"""Save-pipeline orchestrator for the LoRA / Ortho / Hydra family.
 
 The per-variant save logic — Cayley distillation, MoE write layout,
-DoRA/qkv defuse — lives on the variant's module class in
+qkv defuse — lives on the variant's module class in
 ``networks/lora_modules/`` (``OrthoLoRAModule.distill_save_state_dict``,
 ``HydraLoRAModule.build_moe_state_dict``, etc). This file is the thin
 ordering layer that calls them and writes the resulting file(s).
@@ -44,7 +44,7 @@ from networks.lora_modules import (
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
 )
-from networks.lora_modules.lora import rename_dora_and_defuse_standard
+from networks.lora_modules.lora import defuse_and_bake_standard
 from networks.attn_fuse import match_fused_spec
 
 setup_logging()
@@ -232,6 +232,13 @@ def defuse_lokr_qkv(state_dict):
         else:
             split_dim = state_dict[f"{prefix}.lokr_w1_a"].shape[0]
         if split_dim < n or split_dim % n != 0:
+            logger.warning(
+                "defuse_lokr_qkv: %s lokr_w1 split_dim=%d not divisible by n=%d, "
+                "falling back to full delta split (may produce large checkpoint)",
+                prefix,
+                split_dim,
+                n,
+            )
             w1_key = f"{prefix}.lokr_w1" if use_w1 else f"{prefix}.lokr_w1_a"
             w1b_key = f"{prefix}.lokr_w1_b" if not use_w1 else None
             w2_key = f"{prefix}.lokr_w2" if use_w2 else None
@@ -261,12 +268,20 @@ def defuse_lokr_qkv(state_dict):
                 t2_val = state_dict.pop(t2_key, None) if has_t2 else None
                 if t2_val is not None:
                     from networks.lora_modules.lycoris_functional import rebuild_tucker
+
                     w2_val = rebuild_tucker(t2_val, w2a_val, w2b_val)
                 else:
                     w2_val = w2a_val @ w2b_val
 
             from networks.lora_modules.lycoris_functional import make_kron
-            scale = 1.0 if (use_w1 and use_w2) else (float(alpha_val.item()) / lora_dim if alpha_val is not None else 1.0)
+
+            scale = (
+                1.0
+                if (use_w1 and use_w2)
+                else (
+                    float(alpha_val.item()) / lora_dim if alpha_val is not None else 1.0
+                )
+            )
             delta = make_kron(w1_val.float(), w2_val.float(), scale)
             if delta.shape[0] % n != 0:
                 state_dict[w1_key] = w1_val
@@ -283,9 +298,20 @@ def defuse_lokr_qkv(state_dict):
                 new_prefix = base_prefix + spec.component_frag(letter)
                 chunk_i = delta_chunks[i].clone()
                 per_out = chunk_i.shape[0]
-                per_in = chunk_i.shape[1] if chunk_i.dim() == 2 else chunk_i.shape[1] * int(torch.tensor(chunk_i.shape[2:]).prod().item())
-                state_dict[f"{new_prefix}.lokr_w1"] = chunk_i.reshape(per_out, per_in) if chunk_i.dim() > 2 else chunk_i
-                state_dict[f"{new_prefix}.lokr_w2"] = torch.ones(1, 1, *chunk_i.shape[2:]) if chunk_i.dim() > 2 else torch.ones(1, 1)
+                per_in = (
+                    chunk_i.shape[1]
+                    if chunk_i.dim() == 2
+                    else chunk_i.shape[1]
+                    * int(torch.tensor(chunk_i.shape[2:]).prod().item())
+                )
+                state_dict[f"{new_prefix}.lokr_w1"] = (
+                    chunk_i.reshape(per_out, per_in) if chunk_i.dim() > 2 else chunk_i
+                )
+                state_dict[f"{new_prefix}.lokr_w2"] = (
+                    torch.ones(1, 1, *chunk_i.shape[2:])
+                    if chunk_i.dim() > 2
+                    else torch.ones(1, 1)
+                )
                 state_dict[f"{new_prefix}.alpha"] = torch.tensor(float(lora_dim))
                 if dora_chunks is not None:
                     state_dict[f"{new_prefix}.dora_scale"] = dora_chunks[i].clone()
@@ -296,7 +322,9 @@ def defuse_lokr_qkv(state_dict):
 
         alpha = state_dict.pop(f"{prefix}.alpha", None)
         dora_scale = state_dict.pop(f"{prefix}.dora_scale", None)
-        dora_scale_chunks = dora_scale.chunk(n, dim=0) if dora_scale is not None else None
+        dora_scale_chunks = (
+            dora_scale.chunk(n, dim=0) if dora_scale is not None else None
+        )
 
         if use_w1:
             w1 = state_dict.pop(f"{prefix}.lokr_w1")
@@ -367,7 +395,7 @@ def save_network_weights(
     #     ``freq_router.*`` → ``*_chimera.safetensors``.
     #   * ``hydra_moe`` / ``ortho_hydra_to_hydra``: shared-A Hydra
     #     ``(lora_down, lora_ups.{i})`` → ``*_moe.safetensors``.
-    #   * standard: rename DoRA + defuse qkv → ``*.safetensors``.
+    #   * standard: defuse qkv → ``*.safetensors``.
     #
     # Auto-fallback for hydra: any ``.lora_up_weight`` key surviving the
     # distill chain implies a Hydra payload. Kept for callers that don't
@@ -393,9 +421,7 @@ def save_network_weights(
 
     if is_chimera_variant:
         chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
-        chimera_sd = ChimeraHydraLoRAModule.build_moe_state_dict(
-            state_dict, dtype
-        )
+        chimera_sd = ChimeraHydraLoRAModule.build_moe_state_dict(state_dict, dtype)
         from safetensors.torch import save_file as sf_save
 
         sf_save(chimera_sd, chimera_file, metadata or {})
@@ -416,7 +442,7 @@ def save_network_weights(
     # Standard (lora / ortho / dora) write path.
     defuse_loha_qkv(state_dict)
     defuse_lokr_qkv(state_dict)
-    rename_dora_and_defuse_standard(state_dict)
+    defuse_and_bake_standard(state_dict)
 
     if dtype is not None:
         for key in list(state_dict.keys()):
@@ -429,9 +455,7 @@ def save_network_weights(
 
         if metadata is None:
             metadata = {}
-        model_hash, legacy_hash = precalculate_safetensors_hashes(
-            state_dict, metadata
-        )
+        model_hash, legacy_hash = precalculate_safetensors_hashes(state_dict, metadata)
         metadata["sshs_model_hash"] = model_hash
         metadata["sshs_legacy_hash"] = legacy_hash
 

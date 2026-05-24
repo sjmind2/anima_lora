@@ -9,6 +9,8 @@ import glob
 import logging
 import os
 import random
+import re
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -26,23 +28,44 @@ def resolve_cache_path(
     image_abs_path: str | os.PathLike,
     suffix: str,
     cache_dir: str | os.PathLike | None = None,
+    image_dir: str | os.PathLike | None = None,
 ) -> str:
     """Build a cache file path from a source image path + suffix.
 
     Sidecar default (``cache_dir=None``) preserves the legacy behavior of
     writing the cache next to the image. With ``cache_dir`` set, the cache
-    is redirected into that directory using a stem-mirrored filename — the
-    pattern IP-Adapter / EasyControl use to keep ``ip-adapter-dataset/`` and
-    ``easycontrol-dataset/`` purely user-facing source dirs while caches
-    live under ``post_image_dataset/``.
+    is redirected into that directory.
+
+    When ``image_dir`` is also provided, the relative subpath from
+    ``image_dir`` to ``image_abs_path`` is mirrored under ``cache_dir`` so
+    nested source layouts (``image_dataset/charA/img1.png``) produce nested
+    caches (``cache_dir/charA/img1{suffix}``). Without ``image_dir`` the
+    legacy flat layout is preserved — used by callers that don't know the
+    source root.
     """
     src = str(image_abs_path)
     stem = os.path.splitext(os.path.basename(src))[0]
     if cache_dir is None:
         return os.path.splitext(src)[0] + suffix
-    cache_dir_str = str(cache_dir)
-    os.makedirs(cache_dir_str, exist_ok=True)
-    return os.path.join(cache_dir_str, stem + suffix)
+    cache_dir_path = os.fspath(cache_dir)
+    rel_dir = ""
+    if image_dir is not None:
+        try:
+            rel = os.path.relpath(os.path.dirname(src), os.fspath(image_dir))
+        except ValueError:
+            rel = ""
+        # relpath returns "." when the image is directly under image_dir;
+        # treat that as "no subdir" so the flat layout is preserved. Bail to
+        # flat when the image escapes the supplied root (rel starts with
+        # ".."), since persisting cache files outside cache_dir would be
+        # surprising and the lookup-side scanners wouldn't see them anyway.
+        if rel and rel != "." and not rel.startswith(".."):
+            rel_dir = rel
+    target_dir = (
+        os.path.join(cache_dir_path, rel_dir) if rel_dir else cache_dir_path
+    )
+    os.makedirs(target_dir, exist_ok=True)
+    return os.path.join(target_dir, stem + suffix)
 
 
 class CachedImage(NamedTuple):
@@ -80,17 +103,21 @@ def discover_cached_images(data_dir: str) -> list[CachedImage]:
 
 
 def discover_cached_pairs(cache_dir: str) -> list[CachedImage]:
-    """Find latent+TE cache pairs in a directory without requiring source PNGs.
+    """Find latent+TE cache pairs anywhere under a cache directory.
 
-    Use this when the cache directory is decoupled from the source images
-    (e.g. ``post_image_dataset/lora/`` holds caches written from
-    ``post_image_dataset/resized/`` via the subset-level ``cache_dir`` knob).
+    Walks ``cache_dir`` recursively so nested layouts (caches mirrored from
+    a subfoldered ``image_dataset/`` source tree) are discovered. Each
+    latent NPZ is looked up next to the TE sidecar (same subdir + same
+    stem), which is where the writers place them.
     """
     images = []
-    te_paths = sorted(glob.glob(os.path.join(cache_dir, f"*{TE_CACHE_SUFFIX}")))
+    te_paths = sorted(
+        glob.glob(os.path.join(cache_dir, "**", f"*{TE_CACHE_SUFFIX}"), recursive=True)
+    )
     for te_path in te_paths:
         stem = os.path.basename(te_path).removesuffix(TE_CACHE_SUFFIX)
-        npz_files = glob.glob(os.path.join(cache_dir, f"{stem}_*{LATENT_CACHE_SUFFIX}"))
+        parent = os.path.dirname(te_path)
+        npz_files = glob.glob(os.path.join(parent, f"{stem}_*{LATENT_CACHE_SUFFIX}"))
         if not npz_files:
             continue
         images.append(
@@ -171,7 +198,7 @@ def load_cached_text_features(
 
     The pooled tensor is sourced from a ``{stem}_anima_pooled.safetensors``
     sidecar next to ``te_path`` when present (written by
-    ``preprocess/cache_pooled_text.py``). When the sidecar is missing — old
+    ``scripts/preprocess/cache_pooled_text.py``). When the sidecar is missing — old
     caches that predate the pooled-sidecar pass — pooled is computed at
     load time via ``crossattn_emb.amax(dim=0)`` (cheaper than
     ``.max(dim=0).values``, which also computes argmax). The same variant
@@ -231,3 +258,95 @@ def stem_from_cache_path(path: str | os.PathLike) -> str | None:
         parts = without_suffix.rsplit("_", 1)
         return parts[0] if len(parts) >= 2 else without_suffix
     return None
+
+
+# ---------------------------------------------------------------------------
+# Bucketed sample discovery (promoted from bench/_anima.py).
+# ---------------------------------------------------------------------------
+
+_RES_RE = re.compile(r"_(\d{3,5})x(\d{3,5})_anima\.npz$")
+
+
+def discover_bucketed_samples(
+    data_dir: Path,
+    bucket: str | None,
+    num_samples: int,
+    seed: int,
+    *,
+    allow_replace: bool = False,
+) -> tuple[str, list[tuple[str, str, str, str]]]:
+    """Scan ``data_dir`` for (latent npz, TE sidecar) pairs grouped by bucket.
+
+    Filename convention: ``{stem}_{Wpix}x{Hpix}_anima.npz`` paired with
+    ``{stem}_anima_te.safetensors``. Items without a matching TE sidecar
+    are skipped. ``latents_{WxH}`` keys inside the npz define the bucket
+    string.
+
+    Sits next to :func:`discover_cached_images` / :func:`discover_cached_pairs`
+    but answers a different question: pick a *bucket* and draw ``num_samples``
+    random members of it. Used by the bench/probe harnesses that need a fixed
+    same-shape batch for σ-schedule and rollout experiments.
+
+    Args:
+        data_dir: e.g. ``Path("post_image_dataset/lora")``.
+        bucket: Bucket string like ``"128x192"`` (latent dims, not pixel
+            dims). If None, the most populous bucket is chosen.
+        num_samples: How many samples to return.
+        seed: For the np.random.choice.
+        allow_replace: If True and the pool is smaller than
+            ``num_samples``, resample with replacement (logs a warning).
+            If False (default), raises.
+
+    Returns:
+        ``(chosen_bucket, [(stem, latent_key, npz_path, te_path), ...])``.
+
+    Raises:
+        SystemExit: if no pairs are found, the requested bucket is empty,
+            or the pool is too small and ``allow_replace=False``.
+    """
+    npz_paths = sorted(glob.glob(str(data_dir / "*_anima.npz")))
+    if not npz_paths:
+        raise SystemExit(f"no `*_anima.npz` in {data_dir}")
+
+    by_bucket: dict[str, list[tuple[str, str, str, str]]] = {}
+    for p in npz_paths:
+        name = Path(p).name
+        m = _RES_RE.search(name)
+        if not m:
+            continue
+        stem = name[: m.start()]
+        te = data_dir / f"{stem}_anima_te.safetensors"
+        if not te.exists():
+            continue
+        with np.load(p) as z:
+            for k in z.keys():
+                if k.startswith("latents_"):
+                    bk = k.removeprefix("latents_")
+                    by_bucket.setdefault(bk, []).append((stem, k, p, str(te)))
+                    break
+
+    if not by_bucket:
+        raise SystemExit("no paired (latent, TE) samples found")
+
+    chosen = bucket or max(by_bucket, key=lambda k: len(by_bucket[k]))
+    if chosen not in by_bucket:
+        top = sorted(((k, len(v)) for k, v in by_bucket.items()), key=lambda x: -x[1])[
+            :5
+        ]
+        raise SystemExit(f"bucket {chosen!r} not found. Top buckets: {top}")
+
+    pool = by_bucket[chosen]
+    if len(pool) < num_samples:
+        if not allow_replace:
+            raise SystemExit(
+                f"bucket {chosen!r} has {len(pool)} samples; need {num_samples}. "
+                f"Pass allow_replace=True to resample with replacement."
+            )
+        logger.warning(
+            f"bucket {chosen!r} has {len(pool)} samples; resampling with "
+            f"replacement to reach {num_samples}."
+        )
+
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(pool), size=num_samples, replace=(len(pool) < num_samples))
+    return chosen, [pool[i] for i in idx]

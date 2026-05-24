@@ -75,7 +75,7 @@ class ForwardArtifacts:
       - ``timesteps``:         ``[B]`` in ``[0, 1]``
       - ``crossattn_emb``:     ``[B, S, D]`` after any prefix/postfix injection
       - ``forward_kwargs``:    extra kwargs the trainer passed to ``anima(...)``
-                                (``crossattn_seqlens``, ``max_crossattn_seqlen``)
+                                (e.g. ``crossattn_seqlens``)
 
     ``noise`` and ``latents`` are 4D ``[B, C, H, W]`` (post-shift-scale, post-squeeze).
     ``anima_call`` invokes the DiT with the same patched-network state the primary
@@ -119,9 +119,7 @@ class MethodAdapter:
         post-squeeze). Adapters that don't need latents (e.g. IP-Adapter,
         which works off ``batch['images']``) can ignore the argument."""
 
-    def extra_forwards(
-        self, ctx: StepCtx, primary: ForwardArtifacts
-    ) -> Optional[dict]:
+    def extra_forwards(self, ctx: StepCtx, primary: ForwardArtifacts) -> Optional[dict]:
         """Run additional DiT forwards and return aux loss tensors.
 
         Called once per step, AFTER the primary forward, INSIDE the same
@@ -130,6 +128,16 @@ class MethodAdapter:
         ``{"func_loss": tensor}``). Return ``None`` (or omit the override)
         when inactive for this step."""
         return None
+
+    def after_backward(self, ctx: StepCtx) -> None:
+        """Called once per train micro-step, AFTER ``accelerator.backward`` and
+        BEFORE gradient clipping / the optimizer step.
+
+        Lets an adapter inject extra gradient contributions that can't share the
+        primary forward/backward (e.g. soft-tokens gradient-cached contrastive
+        negatives, which can't reuse the anchor's block-swap cycle). Manual
+        backwards here accumulate into the trainable params' ``.grad`` alongside
+        the primary loss and are clipped/stepped with it. No-op by default."""
 
     def validation_baselines(self) -> list[ValidationBaseline]:
         """Return baselines to evaluate alongside the primary validation
@@ -169,14 +177,10 @@ def resolve_adapters(args, network) -> list[MethodAdapter]:
         from networks.methods.easycontrol import EasyControlMethodAdapter
 
         adapters.append(EasyControlMethodAdapter())
-    if getattr(args, "use_repa", False):
-        from networks.methods.repa import REPAMethodAdapter
-
-        adapters.append(REPAMethodAdapter())
-    method = getattr(args, "method", None) or ""
-    if method == "soft_tokens" and float(
-        getattr(network, "contrastive_weight", 0.0) or 0.0
-    ) > 0.0:
+    # Soft-tokens contrastive: opt-in via a positive contrastive weight on the
+    # built network (the objective leaves no learned params, so it's detected
+    # off the network's target weight rather than an args flag).
+    if float(getattr(network, "_contrastive_target_weight", 0.0) or 0.0) > 0.0:
         from networks.methods.soft_tokens import SoftTokensMethodAdapter
 
         adapters.append(SoftTokensMethodAdapter())

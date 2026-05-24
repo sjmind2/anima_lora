@@ -1,0 +1,5 @@
+<h2>LOCON</h2>
+<p>Enhanced LoRA with Tucker decomposition support.</p>
+<p><b>Linear layers</b>: Identical to standard LoRA — ΔW = up @ down × scale</p>
+<p><b>Conv2d layers</b>: Adds a Tucker core tensor <code>lora_mid</code> for kernel sizes > 1, decomposing the convolution more efficiently.</p>
+<p>Compatible with ComfyUI's LyCORIS loader. Use <code>use_tucker=true</code> to enable Tucker decomposition on conv layers.</p>

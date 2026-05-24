@@ -5,7 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from networks.lora_modules.base import BaseLoRAModule
-from networks.lora_modules.lycoris_functional import make_kron, factorization, rebuild_tucker
+from networks.lora_modules.lycoris_functional import (
+    make_kron,
+    factorization,
+    rebuild_tucker,
+)
 
 
 class KronLinearFn(torch.autograd.Function):
@@ -30,7 +34,6 @@ class KronLinearFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         x, w1, w2, scalar = ctx.saved_tensors
-        leading = ctx._leading
         out_l, in_m = w1.shape
         out_k, in_n = w2.shape
         x_f = x.float().reshape(-1, in_m * in_n)
@@ -49,7 +52,12 @@ class KronLinearFn(torch.autograd.Function):
         grad_X = grad_temp @ w2_f
         grad_w2 = torch.einsum("brk,brs->ks", grad_temp, X)
         grad_x = grad_X.reshape(x.shape)
-        return grad_x.to(x.dtype), grad_w1.to(w1.dtype), grad_w2.to(w2.dtype), grad_scalar.to(scalar.dtype)
+        return (
+            grad_x.to(x.dtype),
+            grad_w1.to(w1.dtype),
+            grad_w2.to(w2.dtype),
+            grad_scalar.to(scalar.dtype),
+        )
 
 
 class KronLinearTwoStageFn(torch.autograd.Function):
@@ -84,7 +92,6 @@ class KronLinearTwoStageFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         x, w1_a, w1_b, w2_a, w2_b, scalar = ctx.saved_tensors
-        leading = ctx._leading
         r1 = w1_b.shape[0]
         r2 = w2_b.shape[0]
         in_m = w1_b.shape[1]
@@ -180,6 +187,14 @@ class LokrModule(BaseLoRAModule):
             out_l, out_k = factorization(out_dim, factor)
             if out_l < min_out_l and out_k >= min_out_l:
                 out_l, out_k = out_k, out_l
+            if min_out_l > 1 and out_l % min_out_l != 0:
+                candidate = out_l - (out_l % min_out_l)
+                while candidate >= min_out_l:
+                    if out_dim % candidate == 0:
+                        out_l = candidate
+                        out_k = out_dim // candidate
+                        break
+                    candidate -= min_out_l
             shape = ((out_l, out_k), (in_m, in_n), *k_size)
             self.tucker = use_tucker and any(k != 1 for k in k_size)
 
@@ -196,7 +211,9 @@ class LokrModule(BaseLoRAModule):
 
             if lora_dim >= max(shape[0][1], shape[1][1]) / 2 or self.full_matrix:
                 self.use_w2 = True
-                self.lokr_w2 = nn.Parameter(torch.empty(shape[0][1], shape[1][1], *k_size))
+                self.lokr_w2 = nn.Parameter(
+                    torch.empty(shape[0][1], shape[1][1], *k_size)
+                )
             elif self.tucker:
                 self.lokr_t2 = nn.Parameter(torch.empty(lora_dim, lora_dim, *shape[2:]))
                 self.lokr_w2_a = nn.Parameter(torch.empty(lora_dim, shape[0][1]))
@@ -204,7 +221,10 @@ class LokrModule(BaseLoRAModule):
             else:
                 self.lokr_w2_a = nn.Parameter(torch.empty(shape[0][1], lora_dim))
                 self.lokr_w2_b = nn.Parameter(
-                    torch.empty(lora_dim, shape[1][1] * int(torch.tensor(shape[2:]).prod().item()))
+                    torch.empty(
+                        lora_dim,
+                        shape[1][1] * int(torch.tensor(shape[2:]).prod().item()),
+                    )
                 )
         else:
             in_dim = org_module.in_features
@@ -215,6 +235,14 @@ class LokrModule(BaseLoRAModule):
             out_l, out_k = factorization(out_dim, factor)
             if out_l < min_out_l and out_k >= min_out_l:
                 out_l, out_k = out_k, out_l
+            if min_out_l > 1 and out_l % min_out_l != 0:
+                candidate = out_l - (out_l % min_out_l)
+                while candidate >= min_out_l:
+                    if out_dim % candidate == 0:
+                        out_l = candidate
+                        out_k = out_dim // candidate
+                        break
+                    candidate -= min_out_l
             shape = ((out_l, out_k), (in_m, in_n))
 
             if (
@@ -274,8 +302,9 @@ class LokrModule(BaseLoRAModule):
             if org_module.__class__.__name__ == "Conv2d":
                 self.dora_norm_dims = 2
                 self.dora_scale = nn.Parameter(
-                    torch.norm(org_weight.reshape(out_dim, -1), dim=1, keepdim=True)
-                    .reshape(out_dim, *[1] * (org_weight.dim() - 1))
+                    torch.norm(
+                        org_weight.reshape(out_dim, -1), dim=1, keepdim=True
+                    ).reshape(out_dim, *[1] * (org_weight.dim() - 1))
                 )
             else:
                 self.dora_norm_dims = 0
@@ -286,7 +315,9 @@ class LokrModule(BaseLoRAModule):
             self.dora_norm_dims = 0
 
     def make_weight(self, device=None):
-        w1 = (self.lokr_w1 if self.use_w1 else self.lokr_w1_a @ self.lokr_w1_b).to(device)
+        w1 = (self.lokr_w1 if self.use_w1 else self.lokr_w1_a @ self.lokr_w1_b).to(
+            device
+        )
 
         if self.use_w2:
             w2 = self.lokr_w2.to(device)
@@ -323,7 +354,9 @@ class LokrModule(BaseLoRAModule):
             if self.use_w1:
                 w1_n = self.lokr_w1.to(device).norm()
             else:
-                w1_n = self.lokr_w1_a.to(device).norm() * self.lokr_w1_b.to(device).norm()
+                w1_n = (
+                    self.lokr_w1_a.to(device).norm() * self.lokr_w1_b.to(device).norm()
+                )
             if self.use_w2:
                 w2_n = self.lokr_w2.to(device).norm()
             elif self.tucker:
@@ -332,7 +365,9 @@ class LokrModule(BaseLoRAModule):
                 w2b = self.lokr_w2_b.to(device)
                 w2_n = t2.norm() * w2a.norm() * w2b.norm()
             else:
-                w2_n = self.lokr_w2_a.to(device).norm() * self.lokr_w2_b.to(device).norm()
+                w2_n = (
+                    self.lokr_w2_a.to(device).norm() * self.lokr_w2_b.to(device).norm()
+                )
             upper_bound = w1_n * w2_n * abs(self.scale) * self.scalar.to(device).abs()
             if upper_bound.item() <= max_norm:
                 return False, upper_bound.item()
@@ -342,7 +377,9 @@ class LokrModule(BaseLoRAModule):
             ratio = desired.cpu() / norm.cpu()
             scaled = norm != desired
             if scaled:
-                modules = 4 - self.use_w1 - self.use_w2 + (not self.use_w2 and self.tucker)
+                modules = (
+                    4 - self.use_w1 - self.use_w2 + (not self.use_w2 and self.tucker)
+                )
                 r = ratio ** (1 / modules)
                 if self.use_w1:
                     self.lokr_w1 *= r
@@ -363,11 +400,14 @@ class LokrModule(BaseLoRAModule):
             multiplier = self.multiplier
         if self.dora_norm_dims == 2:
             weight_norm = (
-                torch.norm(weight.reshape(weight.shape[0], -1), dim=1, keepdim=True)
-                .reshape(weight.shape[0], *[1] * (weight.dim() - 1))
+                torch.norm(
+                    weight.reshape(weight.shape[0], -1), dim=1, keepdim=True
+                ).reshape(weight.shape[0], *[1] * (weight.dim() - 1))
             ) + torch.finfo(weight.dtype).eps
         else:
-            weight_norm = torch.norm(weight, dim=1, keepdim=True) + torch.finfo(weight.dtype).eps
+            weight_norm = (
+                torch.norm(weight, dim=1, keepdim=True) + torch.finfo(weight.dtype).eps
+            )
         scale = self.dora_scale / weight_norm
         if multiplier != 1:
             scale = multiplier * (scale - 1) + 1
@@ -380,11 +420,15 @@ class LokrModule(BaseLoRAModule):
         org_forwarded = self.org_forward(x)
 
         if not self.training:
-            diff_weight = self.make_weight(x.device).to(org_forwarded.dtype) * self.scalar
+            diff_weight = (
+                self.make_weight(x.device).to(org_forwarded.dtype) * self.scalar
+            )
             diff_weight = diff_weight.view(self.shape)
             if self.wd:
                 base_weight = self.org_module_ref[0].weight.data.to(x.device).float()
-                new_weight = self.apply_weight_decompose(base_weight + diff_weight.float())
+                new_weight = self.apply_weight_decompose(
+                    base_weight + diff_weight.float()
+                )
                 delta_weight = new_weight - base_weight
                 delta_weight = delta_weight.to(org_forwarded.dtype)
                 if self.org_module_ref[0].__class__.__name__ == "Conv2d":
@@ -452,8 +496,12 @@ class LokrModule(BaseLoRAModule):
         else:
             if not self.use_w1 and not self.use_w2:
                 delta = KronLinearTwoStageFn.apply(
-                    x, self.lokr_w1_a, self.lokr_w1_b,
-                    self.lokr_w2_a, self.lokr_w2_b, self.scalar * self.scale,
+                    x,
+                    self.lokr_w1_a,
+                    self.lokr_w1_b,
+                    self.lokr_w2_a,
+                    self.lokr_w2_b,
+                    self.scalar * self.scale,
                 )
             else:
                 if self.use_w1:
@@ -466,9 +514,9 @@ class LokrModule(BaseLoRAModule):
                     w2 = self.lokr_w2_a @ self.lokr_w2_b
                 delta = KronLinearFn.apply(x, w1, w2, self.scalar * self.scale)
             if self.rank_dropout is not None and self.training:
-                drop = (torch.rand(delta.shape[-1], device=x.device) > self.rank_dropout).to(
-                    delta.dtype
-                )
+                drop = (
+                    torch.rand(delta.shape[-1], device=x.device) > self.rank_dropout
+                ).to(delta.dtype)
                 delta = delta * drop
 
         return org_forwarded + (delta * self.multiplier).to(org_forwarded.dtype)
@@ -493,7 +541,9 @@ class LokrModule(BaseLoRAModule):
             if "lokr_w1" in sd:
                 w1 = sd["lokr_w1"].to(torch.float).to(device)
             else:
-                w1 = sd["lokr_w1_a"].to(torch.float).to(device) @ sd["lokr_w1_b"].to(torch.float).to(device)
+                w1 = sd["lokr_w1_a"].to(torch.float).to(device) @ sd["lokr_w1_b"].to(
+                    torch.float
+                ).to(device)
 
             if "lokr_w2" in sd:
                 w2 = sd["lokr_w2"].to(torch.float).to(device)

@@ -114,7 +114,6 @@ def load_anima_model(
     device: Union[str, torch.device],
     dit_path: str,
     attn_mode: str,
-    split_attn: bool,
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]] = None,
@@ -124,11 +123,15 @@ def load_anima_model(
     """
     Load Anima model from the specified checkpoint.
 
+    This is the explicit-argument primitive. For the inference CLI path, see
+    ``library.inference.models.load_dit_model`` — a thin Namespace adapter that
+    reads these arguments off an argparse ``args`` and additionally handles
+    LoRA attach / merge, P-GRAFT hooks, and torch.compile.
+
     Args:
         device (Union[str, torch.device]): Device for optimization or merging
         dit_path (str): Path to the DiT model checkpoint.
         attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
-        split_attn (bool): Whether to use split attention.
         loading_device (Union[str, torch.device]): Device to load the model weights on.
         dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
             If None, weights are loaded as-is from the state_dict; otherwise they are cast to this dtype.
@@ -151,7 +154,6 @@ def load_anima_model(
         "patch_spatial": 2,
         "patch_temporal": 1,
         "attn_mode": attn_mode,
-        "split_attn": split_attn,
         "attn_softmax_scale": attn_softmax_scale,
     }
     with init_empty_weights():
@@ -238,6 +240,8 @@ def load_pooled_text_proj(
 
     state = load_file(path, device=str(device))
     model.pooled_text_proj.load_state_dict(state, assign=True)
+    # Trained weights are now live — arm the per-forward modulation path.
+    model.enable_pooled_text_modulation = True
     logger.info(f"Loaded pooled_text_proj from {path}")
 
 

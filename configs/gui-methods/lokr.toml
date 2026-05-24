@@ -15,12 +15,12 @@ blocks_to_swap = 0
 use_cmmd = false
 decompose_both = true
 use_tucker = true
-lokr_factor = 6
+lokr_factor = 16
 scale_weight_norms = 1.0
 output_dir = "output/ckpt_hanechan_lokr_2"
 source_image_dir = "O:/LoRATraining/hanechan"
 lr_scheduler = "cosine"
-optimizer_args = ""
+optimizer_args = "[\"weight_decay=0.1\", \"betas=0.9,0.99\"]"
 [[datasets]]
 validation_split_num = 0
 validation_split = 0.0
