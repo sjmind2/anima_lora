@@ -10,7 +10,6 @@ from nodes import CLIPTextEncode
 
 from .adapter import apply_adapter
 from .fera import apply_fera
-from .postfix import apply_postfix
 from .grid import tensor_to_pil, create_grid
 from .xy_inputs import XY_INPUT_CLASS_MAPPINGS, XY_INPUT_DISPLAY_NAME_MAPPINGS
 
@@ -42,11 +41,6 @@ def _try_apply_adapter(model, lora_path, strength_lora, strength_reft):
         return True
     except Exception as e:
         logger.warning(f"apply_fera failed for {lora_path}: {e}")
-    try:
-        apply_postfix(model, lora_path, strength_lora)
-        return True
-    except Exception as e:
-        logger.warning(f"apply_postfix failed for {lora_path}: {e}")
     logger.error(f"All adapter types failed for: {lora_path}")
     return False
 

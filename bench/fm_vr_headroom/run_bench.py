@@ -17,15 +17,12 @@ import gc
 import glob
 import json
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
 
 from bench._common import make_run_dir, write_result  # noqa: E402
 from library.anima import weights as anima_utils  # noqa: E402
@@ -183,7 +180,11 @@ def load_pair(npz_path: str, latent_key: str, te_path: str, device, dtype):
 
 @torch.inference_mode()
 def predict_x0_batch(
-    anima, x_t_batch: torch.Tensor, t_scalar: float, crossattn_B: torch.Tensor, sigma_t: float
+    anima,
+    x_t_batch: torch.Tensor,
+    t_scalar: float,
+    crossattn_B: torch.Tensor,
+    sigma_t: float,
 ) -> torch.Tensor:
     """Run model on `(B, C, H, W)` x_t, return x_0 prediction `(B, C, H, W)`.
 
@@ -223,7 +224,9 @@ def variance_metrics(Y: torch.Tensor, Z: torch.Tensor) -> dict:
     var_z_elem = (Z_c * Z_c).mean(dim=0)
 
     # Per-element rho^2 (cap any numerical >1 from finite N to 1.0).
-    rho_sq_elem = (cov_elem.pow(2) / (var_y_elem * var_z_elem).clamp_min(1e-30)).clamp(0.0, 1.0)
+    rho_sq_elem = (cov_elem.pow(2) / (var_y_elem * var_z_elem).clamp_min(1e-30)).clamp(
+        0.0, 1.0
+    )
 
     # Global lambda* minimizing Var(Y_total + lambda * Z_total) where total = sum over elements.
     sum_cov = cov_elem.sum()
@@ -269,7 +272,9 @@ def _resolve_dit_paths(args) -> tuple[str, str]:
     return trainable, frozen
 
 
-def _project_bands(x: torch.Tensor, sigma_low: float) -> tuple[torch.Tensor, torch.Tensor]:
+def _project_bands(
+    x: torch.Tensor, sigma_low: float
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(low-pass, high-pass complement)`` of ``x`` with the FEI kernel."""
     low = gaussian_blur_2d(x, sigma_low)
     high = x - low
@@ -314,7 +319,9 @@ def _banded_metrics(Y: torch.Tensor, Z: torch.Tensor, sigma_low: float) -> dict:
     var_after_pb = (residual * residual).mean(dim=0).sum()
     reduction_pb = (1.0 - var_after_pb / var_y_total.clamp_min(1e-30)).item()
     out["perband__reduction_combined"] = float(reduction_pb)
-    out["perband__delta_vs_global"] = float(reduction_pb - out["global__reduction_global_lambda"])
+    out["perband__delta_vs_global"] = float(
+        reduction_pb - out["global__reduction_global_lambda"]
+    )
     out["perband__lambda_low"] = float(lam_low)
     out["perband__lambda_high"] = float(lam_high)
     return out
@@ -327,7 +334,9 @@ def main():
     log.info(f"output → {run_dir}")
 
     data_dir = Path(args.data_dir)
-    bucket, samples = discover_samples(data_dir, args.bucket, args.num_samples, args.seed)
+    bucket, samples = discover_samples(
+        data_dir, args.bucket, args.num_samples, args.seed
+    )
     log.info(f"bucket={bucket} num_samples={len(samples)}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -347,7 +356,6 @@ def main():
         device=device,
         dit_path=trainable_path,
         attn_mode=args.attn_mode,
-        split_attn=False,
         loading_device=device,
         dit_weight_dtype=dtype,
     )
@@ -365,7 +373,6 @@ def main():
             device=device,
             dit_path=frozen_path,
             attn_mode=args.attn_mode,
-            split_attn=False,
             loading_device=device,
             dit_weight_dtype=dtype,
         )
@@ -406,9 +413,7 @@ def main():
                 (N, *x0.shape), generator=rng, device=device, dtype=dtype
             )
             eps_null = (
-                torch.randn(
-                    (N, *x0.shape), generator=rng, device=device, dtype=dtype
-                )
+                torch.randn((N, *x0.shape), generator=rng, device=device, dtype=dtype)
                 if args.null_runs
                 else None
             )
@@ -469,7 +474,9 @@ def main():
                 "Δpb": f"{metrics['perband__delta_vs_global']:+.4f}",
             }
             if Zn_chunks:
-                postfix["ρ²_null_hi"] = f"{metrics['null__high_band__rho_sq_global']:.3f}"
+                postfix["ρ²_null_hi"] = (
+                    f"{metrics['null__high_band__rho_sq_global']:.3f}"
+                )
             pbar.set_postfix(postfix)
             pbar.update(1)
 

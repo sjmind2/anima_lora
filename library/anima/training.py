@@ -35,19 +35,66 @@ import logging  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+# Sentinel users can drop into captions that lack a real artist tag, so the
+# shuffle/drop boundary keeps working. Stripped from caption variants before
+# they reach the tokenizer (see _generate_caption_variants in
+# scripts/preprocess/cache_text_embeddings.py). Callers of anima_smart_shuffle_caption
+# that feed the result to a tokenizer must strip it themselves — kept inside
+# the shuffle so the boundary index stays consistent with the input.
+NO_ARTIST_SENTINEL = "@no-artist"
+
+
+def _is_artist_tag(tag: str) -> bool:
+    """True for @-prefixed artist handles; False for booru emoticons like ``@ @``.
+
+    Matches the predicate the Anima Tagger uses (see
+    ``scripts/anima_tagger/vocab.py``): a single ``@`` followed by non-space
+    characters. ``@ @`` (``@_@`` after the corpus-wide ``_``→`` `` normalization)
+    is a general-category eye-shape tag and must not trigger the shuffle
+    boundary.
+    """
+    return len(tag) >= 2 and tag[0] == "@" and not tag[1].isspace()
+
+
+def find_anima_prefix_end(tags: List[str]) -> int:
+    """Index one past the trailing artist-handle in the leading run.
+
+    Walks ``tags`` accepting any non-artist tags up front, then any consecutive
+    artist tags, and stops at the first non-artist tag that follows an artist.
+    Returns 0 if no artist tag is present anywhere (the no-artist case the
+    ``@no-artist`` sentinel exists to fix). Multi-artist captions
+    (e.g. ``@artist1, @artist2, …``) protect the full handle run, not just the
+    first handle.
+    """
+    split_idx = 0
+    saw_artist = False
+    for idx, tag in enumerate(tags):
+        if _is_artist_tag(tag):
+            split_idx = idx + 1
+            saw_artist = True
+        elif saw_artist:
+            break
+    return split_idx
+
+
+def strip_no_artist_sentinel(tags: List[str]) -> List[str]:
+    """Drop every occurrence of :data:`NO_ARTIST_SENTINEL` from ``tags``."""
+    return [t for t in tags if t != NO_ARTIST_SENTINEL]
+
+
 def anima_smart_shuffle_caption(flex_tokens: List[str]) -> List[str]:
     """Shuffle caption tags with awareness of @artist prefix and 'on the ...' sections.
 
-    - Tags up to and including the first @-prefixed tag are kept in order.
-    - Remaining tags are split into sections by 'on the ...' delimiters.
-    - Tags within each section are shuffled independently.
+    - Tags up to and including the trailing artist tag of the leading run are
+      kept in order (see :func:`find_anima_prefix_end`). Multi-artist captions
+      and the ``@no-artist`` sentinel both preserve the full handle run.
+    - Remaining tags are split into sections by 'on the ...' / 'in the ...'
+      delimiters; tags within each section are shuffled independently.
+    - The ``@no-artist`` sentinel is preserved in the output so the boundary
+      index stays usable; callers that feed the result to a tokenizer must
+      call :func:`strip_no_artist_sentinel` before joining.
     """
-    # Find the @artist boundary within flex_tokens
-    split_idx = 0
-    for idx, tag in enumerate(flex_tokens):
-        if tag.startswith("@"):
-            split_idx = idx + 1
-            break
+    split_idx = find_anima_prefix_end(flex_tokens)
 
     prefix = flex_tokens[:split_idx]
     suffix = flex_tokens[split_idx:]
@@ -186,27 +233,45 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "Set to 0 to skip even the warm-up logs, or a large number to keep them on.",
     )
     parser.add_argument(
-        "--use_repa",
-        action="store_true",
-        help="Enable REPA-style auxiliary alignment loss (Yu et al., arXiv:2410.06940). "
-        "Adds a cosine-similarity loss between a mid-block DiT hidden state (mean-pooled) "
-        "and a cached PE-Core image feature. Forces --ip_features_cache_to_disk=true; "
-        "requires `make preprocess-pe` to have been run. Composes with the LoRA family.",
+        "--ip_pair_mode",
+        type=str,
+        default="self",
+        choices=["self", "identity", "identity_cross_artist"],
+        help="IP-Adapter distinct-pair (identity) training mode. 'self' (default) "
+        "= reference == VAE target (legacy, bit-identical). 'identity' draws the "
+        "IP-path reference from a DIFFERENT image of the target's identity "
+        "(character → franchise → artist back-off via the caption index), "
+        "removing the self-pair copy shortcut. 'identity_cross_artist' additionally "
+        "requires character/franchise matches from a different artist (drops the "
+        "source style). Requires --ip_features_cache_to_disk. "
+        "See docs/proposal/ip-adapter-identity-pairs.md.",
     )
     parser.add_argument(
-        "--repa_weight",
+        "--ip_pair_prob",
         type=float,
-        default=0.5,
-        help="REPA loss weight, broadcast onto the per-sample flow-matching loss. "
-        "Default 0.5 follows the REPA paper's lambda=0.5 starting point.",
+        default=0.8,
+        help="Fraction of steps that draw a distinct reference under "
+        "--ip_pair_mode!=self; the rest self-pair (keeps some self-pairs in the "
+        "mix — reference recipes warm up better that way). Default 0.8.",
     )
     parser.add_argument(
-        "--repa_layer",
-        type=int,
-        default=8,
-        help="DiT block index whose output is hooked for REPA alignment. Default 8 of 28 "
-        "mirrors the paper's SiT-XL block-8 choice. Earlier layers learn cleaner "
-        "discriminative features; later layers carry more denoising-specific signal.",
+        "--ip_pair_min_level",
+        type=str,
+        default="artist",
+        choices=["character", "copyright", "artist"],
+        help="Loosest tier the identity-pair sampler will back off to before "
+        "self-pairing. 'character' = same-character only; 'artist' (default) = "
+        "full character → franchise → artist back-off.",
+    )
+    parser.add_argument(
+        "--ip_pair_caption_strip_p",
+        type=float,
+        default=0.0,
+        help="Probability of dropping the target's character/copyright tokens "
+        "from the caption on distinct-pair steps, forcing identity through the IP "
+        "image path rather than the text. INERT while cache_text_encoder_outputs=true "
+        "(the cached embedding still carries identity) — set it false to enable. "
+        "Default 0.0 (off).",
     )
     parser.add_argument(
         "--use_easycontrol",
@@ -291,27 +356,8 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
             "sdpa",
         ],  # "sdpa" is for backward compatibility
         default=None,
-        help="Attention implementation to use. Default is None (torch). xformers requires --split_attn. sageattn does not support training (inference only). This option overrides --xformers or --sdpa."
+        help="Attention implementation to use. Default is None (torch). sageattn does not support training (inference only). This option overrides --xformers or --sdpa."
         "",
-    )
-    parser.add_argument(
-        "--trim_crossattn_kv",
-        action="store_true",
-        help="Trim zero-padded KV positions in cross-attention (flash4 only). "
-        "Uses bucketed lengths + LSE sigmoid correction for exact equivalence. "
-        "Typical 4x KV reduction for short captions → ~10-15%% faster training.",
-    )
-    parser.add_argument(
-        "--static_token_count",
-        type=int,
-        default=None,
-        help="Pad all forward passes to this many visual tokens (e.g. 4096). "
-        "Enables constant-shape buckets and eliminates torch.compile recompilation.",
-    )
-    parser.add_argument(
-        "--split_attn",
-        action="store_true",
-        help="split attention computation to reduce memory usage",
     )
     parser.add_argument(
         "--attn_softmax_scale",

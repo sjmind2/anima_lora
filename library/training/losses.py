@@ -11,7 +11,7 @@ Reduction order (must match train.py pre-refactor):
   2. Per-sample += scalar broadcast stage (was `post_process_loss`):
        ortho_reg     — OrthoLoRA orthogonality regularizer
        hydra_balance — MoE load-balance loss
-       functional    — postfix-func inversion MSE
+       functional    — functional inversion MSE (weight-gated)
   3. Scalar stage (after `.mean()` reduction):
        multiscale    — avg_pool2d MSE on pred/target
 
@@ -187,6 +187,7 @@ class LossContext:
     loss_weights: torch.Tensor
     network: object
     aux: dict = field(default_factory=dict)
+    is_train: bool = True
 
 
 LossFn = Callable[[LossContext], torch.Tensor]
@@ -291,6 +292,13 @@ def _ortho_reg_loss(ctx: LossContext) -> torch.Tensor:
 
 
 def _hydra_balance_loss(ctx: LossContext) -> torch.Tensor:
+    # Chimera bakes the warmup gate into its own per-pool sum (content
+    # rides the outer warmup, freq fires from step 0). Consume the
+    # scalar directly without re-multiplying; the early-exit on
+    # ``_balance_loss_weight <= 0`` would otherwise zero out the freq
+    # term during the warmup window.
+    if getattr(ctx.network, "_use_chimera_hydra", False):
+        return ctx.network.get_balance_loss()
     weight = float(getattr(ctx.network, "_balance_loss_weight", 0.0) or 0.0)
     if weight <= 0.0:
         return ctx.model_pred.new_zeros(())
@@ -305,6 +313,31 @@ def _functional_loss(ctx: LossContext) -> torch.Tensor:
     # Per-sample running loss is float32 (flow_match casts inputs via .float()).
     # Match the pre-refactor cast: `func_weight * func_loss.to(loss.dtype)`.
     return weight * func_loss.float()
+
+
+def _soft_tokens_contrastive_loss(ctx: LossContext) -> torch.Tensor:
+    """SoftREPA-style contrastive term on the soft-tokens bank.
+
+    The InfoNCE scalar itself is computed by ``SoftTokensMethodAdapter``
+    (it needs ``k`` extra DiT forwards) and stashed under
+    ``aux["soft_tokens_contrastive"]``; this handler just applies the
+    warmup-gated weight ``network._contrastive_weight`` (updated each step by
+    ``SoftTokensNetwork.step_contrastive_warmup``).
+
+    Training-only: gated on ``ctx.is_train`` so validation FM-MSE stays a clean
+    per-token regression metric (the contrastive term is a separate objective
+    that doesn't track held-out denoise quality on Anima —
+    ``project_fm_val_loss_uninformative``).
+    """
+    if not ctx.is_train:
+        return ctx.model_pred.new_zeros(())
+    weight = float(getattr(ctx.network, "_contrastive_weight", 0.0) or 0.0)
+    if weight <= 0.0:
+        return ctx.model_pred.new_zeros(())
+    con_loss = ctx.aux.get("soft_tokens_contrastive")
+    if con_loss is None:
+        return ctx.model_pred.new_zeros(())
+    return weight * con_loss.float()
 
 
 def _fera_fecl_bands(
@@ -363,8 +396,7 @@ def _fera_fecl_loss(ctx: LossContext) -> torch.Tensor:
 
     cfg = getattr(ctx.network, "cfg", None)
     num_bands = int(
-        getattr(cfg, "fera_num_bands", None)
-        or fera_aux.get("num_bands", 3)
+        getattr(cfg, "fera_num_bands", None) or fera_aux.get("num_bands", 3)
     )
     fei_sigma_low_div = float(
         getattr(cfg, "fei_sigma_low_div", None)
@@ -386,9 +418,7 @@ def _fera_fecl_loss(ctx: LossContext) -> torch.Tensor:
     eps = 1e-8
     d_total = delta.flatten(1).pow(2).sum(-1).sqrt().clamp_min(eps)
     r_total = resid.flatten(1).pow(2).sum(-1).sqrt().clamp_min(eps)
-    r_band_e = torch.stack(
-        [b.flatten(1).pow(2).sum(-1) for b in resid_bands], dim=-1
-    )
+    r_band_e = torch.stack([b.flatten(1).pow(2).sum(-1) for b in resid_bands], dim=-1)
     r_share = r_band_e / r_band_e.sum(-1, keepdim=True).clamp_min(eps)
 
     loss = z_target.new_zeros(z_target.shape[0])
@@ -399,41 +429,6 @@ def _fera_fecl_loss(ctx: LossContext) -> torch.Tensor:
         loss = loss + r_share[:, k] * term
 
     return weight * loss.mean()
-
-
-def _soft_tokens_contrastive_loss(ctx: LossContext) -> torch.Tensor:
-    """SoftREPA-style InfoNCE on diffusion-loss logits (paper §3.1).
-
-    The adapter (`networks/methods/soft_tokens.py::SoftTokensMethodAdapter`)
-    runs the k extra DiT forwards with rolled text and produces a scalar
-    contrastive loss that we just multiply by the user-set weight here. This
-    is a regularizer added to plain FM, not a replacement — the paper's pure
-    contrastive objective regressed FID on SD3 even while improving
-    ImageReward, so we keep matched FM intact and add the contrastive term
-    on top with a small weight.
-    """
-    weight = float(getattr(ctx.network, "contrastive_weight", 0.0) or 0.0)
-    aux = ctx.aux.get("soft_tokens") or {}
-    loss = aux.get("contrastive_loss")
-    if weight <= 0.0 or loss is None:
-        return ctx.model_pred.new_zeros(())
-    return weight * loss.float()
-
-
-def _repa_loss(ctx: LossContext) -> torch.Tensor:
-    """REPA-style alignment loss (cosine, scalar-broadcast).
-
-    The adapter (networks/methods/repa.py) does the projection + cosine in
-    ``extra_forwards`` and stashes the precomputed scalar in
-    ``ctx.aux['repa']['loss']``. This handler just multiplies by the
-    user-set weight so the loss-side blend logic stays in one place.
-    """
-    weight = float(getattr(ctx.args, "repa_weight", 0.0) or 0.0)
-    repa_aux = ctx.aux.get("repa") or {}
-    loss = repa_aux.get("loss")
-    if weight <= 0.0 or loss is None:
-        return ctx.model_pred.new_zeros(())
-    return weight * loss.float()
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +465,8 @@ LOSS_REGISTRY: dict[str, LossFn] = {
     "hydra_balance": _hydra_balance_loss,
     "functional": _functional_loss,
     "multiscale": _multiscale_loss,
-    "soft_tokens_contrastive": _soft_tokens_contrastive_loss,
-    "repa": _repa_loss,
     "fera_fecl": _fera_fecl_loss,
+    "soft_tokens_contrastive": _soft_tokens_contrastive_loss,
 }
 
 
@@ -484,9 +478,8 @@ _STAGE_SCALAR_BROADCAST = (
     "ortho_reg",
     "hydra_balance",
     "functional",
-    "soft_tokens_contrastive",
-    "repa",
     "fera_fecl",
+    "soft_tokens_contrastive",
 )
 _STAGE_SCALAR_POST = ("multiscale",)
 # _STAGE_SCALAR_POST is consulted by LossComposer.compose via the hard-coded
@@ -565,6 +558,7 @@ class LossComposer:
 
         return scalar
 
+
 def build_loss_composer(args: argparse.Namespace, network: object) -> LossComposer:
     """Inspect args + network and return the active LossComposer.
 
@@ -576,6 +570,9 @@ def build_loss_composer(args: argparse.Namespace, network: object) -> LossCompos
       - hydra_balance active iff network._balance_loss_weight > 0.
       - functional active iff args.functional_loss_weight > 0.
       - multiscale active iff args.multiscale_loss_weight > 0.
+      - soft_tokens_contrastive active iff
+        network._contrastive_target_weight > 0 (gated on the target,
+        not the live warmup-held value).
     """
     fm_name = (
         "flow_matching_vr"
@@ -584,25 +581,19 @@ def build_loss_composer(args: argparse.Namespace, network: object) -> LossCompos
     )
     active: list[str] = [fm_name]
 
-    method = getattr(args, "method", None) or ""
-
     if float(getattr(network, "_ortho_reg_weight", 0.0) or 0.0) > 0.0:
         active.append("ortho_reg")
-    if float(getattr(network, "_balance_loss_weight", 0.0) or 0.0) > 0.0:
+    # Chimera always activates hydra_balance — the freq pool's term fires
+    # from step 0 (bypasses warmup), so we can't gate composer activation
+    # on the warmup-held ``_balance_loss_weight``.
+    if float(getattr(network, "_balance_loss_weight", 0.0) or 0.0) > 0.0 or bool(
+        getattr(network, "_use_chimera_hydra", False)
+    ):
         active.append("hydra_balance")
     if float(getattr(args, "functional_loss_weight", 0.0) or 0.0) > 0.0:
         active.append("functional")
     if float(getattr(args, "multiscale_loss_weight", 0.0) or 0.0) > 0.0:
         active.append("multiscale")
-    if method == "soft_tokens" and float(
-        getattr(network, "contrastive_weight", 0.0) or 0.0
-    ) > 0.0:
-        active.append("soft_tokens_contrastive")
-    if (
-        bool(getattr(args, "use_repa", False))
-        and float(getattr(args, "repa_weight", 0.0) or 0.0) > 0.0
-    ):
-        active.append("repa")
     # FeRA FECL: active iff a ``LoRANetwork`` carrying the
     # stacked_experts_global_fei spec has a positive ``fecl_weight``. The
     # trainer's base-pass forward gate (in
@@ -615,5 +606,10 @@ def build_loss_composer(args: argparse.Namespace, network: object) -> LossCompos
         == "independent_A"
     ):
         active.append("fera_fecl")
+    # soft_tokens contrastive: gate on the *target* weight (warmup may hold the
+    # live ``_contrastive_weight`` at 0 for the first ratio*steps). The
+    # SoftTokensMethodAdapter supplies the InfoNCE scalar via aux.
+    if float(getattr(network, "_contrastive_target_weight", 0.0) or 0.0) > 0.0:
+        active.append("soft_tokens_contrastive")
 
     return LossComposer(active_losses=active)

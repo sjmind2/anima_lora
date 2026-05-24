@@ -17,7 +17,6 @@ use_cmmd = false
 discrete_flow_shift = 3.0
 lr_scheduler = "cosine"
 optimizer_type = "Adopt_Adv"
-compiled_optimize = false
 attn_mode = "flash"
 dataloader_pin_memory = false
 optimizer_args = [ "use_atan2=True", "grams_moment=True", "beta3_ema=0.9999", "alpha=5", "cautious_wd=True",]

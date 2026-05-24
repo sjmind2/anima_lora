@@ -29,16 +29,17 @@ from library.datasets.image_utils import (
     is_disk_cached_latents_is_expected,
     ImageLoadingDataset,
 )
-from library.datasets.base import (
-    BaseDataset,
-    DreamBoothDataset,
-    DatasetGroup,
+from library.datasets.base import BaseDataset
+from library.datasets.dreambooth import DreamBoothDataset
+from library.datasets.group import DatasetGroup
+from library.datasets.minimal import (
     MinimalDataset,
     load_arbitrary_dataset,
     debug_dataset,
-    collator_class,
-    LossRecorder,
 )
+from library.datasets.collator import collator_class
+from library.datasets.cache import BucketBatchSampler, CachedDataset
+from library.training.loss_recorder import LossRecorder
 
 __all__ = [
     # buckets
@@ -74,5 +75,8 @@ __all__ = [
     "load_arbitrary_dataset",
     "debug_dataset",
     "collator_class",
+    # cache (general train-cache reader)
+    "BucketBatchSampler",
+    "CachedDataset",
     "LossRecorder",
 ]

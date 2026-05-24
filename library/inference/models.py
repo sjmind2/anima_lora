@@ -37,6 +37,23 @@ def _is_hydra_moe(path: str) -> bool:
         return False
 
 
+def _has_te_keys(path: str) -> bool:
+    """Cheap header peek: does this safetensors LoRA carry any ``lora_te_*`` keys?
+
+    Lets ``load_text_encoder`` skip a redundant ``load_file`` + empty-dict merge
+    when the LoRA is DiT-only (the common case — turbo, plain LoRA, postfix, …).
+    Returns False on any read error so the caller falls back to the no-LoRA TE
+    load path (a truly broken file would have already tripped the DiT loader).
+    """
+    from safetensors import safe_open
+
+    try:
+        with safe_open(path, framework="pt") as f:
+            return any(k.startswith("lora_te_") for k in f.keys())
+    except Exception:
+        return False
+
+
 def _is_chimera_moe(path: str) -> bool:
     """Peek at safetensors metadata for ``ss_use_chimera_hydra="true"``.
 
@@ -56,12 +73,147 @@ def _is_chimera_moe(path: str) -> bool:
         return False
 
 
+def attach_adapters(
+    model: anima_models.Anima,
+    args: argparse.Namespace,
+    device: torch.device,
+    *,
+    pgraft_mode: bool,
+    hydra_mode: bool,
+) -> None:
+    """Attach LoRA-family adapters that ride as dynamic forward hooks.
+
+    Covers the two routes that can't go through ``load_anima_model``'s static
+    merge: **P-GRAFT** (toggleable mid-denoising) and **HydraLoRA moe / chimera**
+    (router-live, runs per-sample). Both rehydrate a network, ``apply_to`` the
+    already-loaded ``model`` in place, and stash it on ``model`` for the sampler
+    toggle sites to find. No-op when neither mode is set. Mutates ``model``;
+    returns nothing. The static-merge path and ``torch.compile`` stay in
+    :func:`load_dit_model` — this does only the dynamic-hook attach.
+
+    ``pgraft_mode`` / ``hydra_mode`` are passed in (not recomputed) because the
+    caller already derives them to decide whether to skip the static merge.
+    """
+    # P-GRAFT: attach LoRA as dynamic hooks (can be toggled mid-denoising)
+    if pgraft_mode and not hydra_mode:
+        from networks import lora_anima
+
+        logger.info("P-GRAFT: Loading LoRA as dynamic hooks (not static merge)")
+        for lora_weight_path in args.lora_weight:
+            lora_sd = load_file(lora_weight_path)
+            lora_sd = {k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")}
+
+            multiplier = (
+                args.lora_multiplier
+                if isinstance(args.lora_multiplier, (int, float))
+                else args.lora_multiplier[0]
+            )
+            network, weights_sd = lora_anima.create_network_from_weights(
+                multiplier=multiplier,
+                file=None,
+                ae=None,
+                text_encoders=[],
+                unet=model,
+                weights_sd=lora_sd,
+                for_inference=True,
+            )
+            network.apply_to([], model, apply_text_encoder=False, apply_unet=True)
+            info = network.load_state_dict(weights_sd, strict=False)
+            if info.unexpected_keys:
+                logger.debug(
+                    f"P-GRAFT: unexpected keys in LoRA state dict: {info.unexpected_keys[:5]}..."
+                )
+            network.to(device, dtype=torch.bfloat16)
+            network.eval()
+            model._pgraft_network = network
+            logger.info(
+                f"P-GRAFT: LoRA attached with cutoff_step={getattr(args, 'lora_cutoff_step', None)}"
+            )
+
+    # HydraLoRA moe: rehydrate the trained router-live network and attach it
+    # as dynamic forward hooks, identical shape to the P-GRAFT path above.
+    # The router runs per-sample on each adapted module, so the net stays in
+    # eval mode with requires_grad_(False).
+    if hydra_mode:
+        from networks import lora_anima
+
+        logger.info("HydraLoRA: loading moe file as router-live dynamic hooks")
+        from safetensors import safe_open
+
+        for lora_weight_path in args.lora_weight:
+            # Read the three-axis routing stamps (and chimera stamps) from
+            # on-disk __metadata__ — load_file() drops it. Chimera files
+            # (dual-pool) carry top-level ``freq_router.*`` keys outside the
+            # ``lora_unet_*`` namespace, so they must NOT be filtered; plain
+            # Hydra moe keeps the lora_unet_* filter. Passing ``metadata=``
+            # alongside ``weights_sd=`` lets both layouts go through one code
+            # path — no more file=path vs weights_sd= fork.
+            with safe_open(lora_weight_path, framework="pt") as f:
+                lora_metadata = dict(f.metadata() or {})
+            is_chimera = _is_chimera_moe(lora_weight_path)
+            lora_sd = load_file(lora_weight_path)
+            if is_chimera:
+                logger.info("HydraLoRA: chimera file — dual-pool routing wired")
+            else:
+                lora_sd = {
+                    k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")
+                }
+
+            multiplier = (
+                args.lora_multiplier
+                if isinstance(args.lora_multiplier, (int, float))
+                else args.lora_multiplier[0]
+            )
+            network, weights_sd = lora_anima.create_network_from_weights(
+                multiplier=multiplier,
+                file=None,
+                ae=None,
+                text_encoders=[],
+                unet=model,
+                weights_sd=lora_sd,
+                metadata=lora_metadata,
+                for_inference=True,
+            )
+            network.apply_to([], model, apply_text_encoder=False, apply_unet=True)
+            info = network.load_state_dict(weights_sd, strict=False)
+            if info.unexpected_keys:
+                logger.warning(
+                    f"HydraLoRA: unexpected keys in state dict: {info.unexpected_keys[:5]}..."
+                )
+            if info.missing_keys:
+                logger.warning(
+                    f"HydraLoRA: missing keys in state dict: {info.missing_keys[:5]}..."
+                )
+            network.to(device, dtype=torch.bfloat16)
+            network.eval().requires_grad_(False)
+            hydra_networks = list(getattr(model, "_hydra_networks", []))
+            hydra_networks.append(network)
+            model._hydra_networks = hydra_networks
+            model._hydra_network = network
+            # Reuse the P-GRAFT cutoff slot so existing toggle sites
+            # (inference_pipeline loops + spectrum_denoise) honor
+            # --lora_cutoff_step without further plumbing.
+            model._pgraft_network = network
+            logger.info(
+                f"HydraLoRA: router-live attached "
+                f"({len(network.unet_loras)} modules, "
+                f"cutoff_step={getattr(args, 'lora_cutoff_step', None)})"
+            )
+
+
 def load_dit_model(
     args: argparse.Namespace,
     device: torch.device,
     dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> anima_models.Anima:
-    """Load DiT model with optional LoRA merge, P-GRAFT hooks, and torch.compile."""
+    """Load DiT model with optional LoRA merge, P-GRAFT hooks, and torch.compile.
+
+    Namespace-driven adapter over the explicit-argument primitive
+    ``library.anima.weights.load_anima_model``: it pulls ``dit``/``attn_mode``/
+    ``lora_weight``/etc. off ``args``, then hands the dynamic-hook adapter attach
+    to :func:`attach_adapters` and applies ``torch.compile``. Reach for
+    ``load_anima_model`` directly when you want just the weights and no Namespace.
+    """
 
     loading_device = device
 
@@ -113,7 +265,6 @@ def load_dit_model(
         device,
         args.dit,
         args.attn_mode,
-        True,  # enable split_attn to trim masked tokens
         loading_device,
         dit_weight_dtype,
         lora_weights_list=lora_weights_list,
@@ -137,111 +288,15 @@ def load_dit_model(
 
     model.eval().requires_grad_(False)
 
-    # P-GRAFT: attach LoRA as dynamic hooks (can be toggled mid-denoising)
-    if pgraft_mode and not hydra_mode:
-        from networks import lora_anima
-
-        logger.info("P-GRAFT: Loading LoRA as dynamic hooks (not static merge)")
-        for lora_weight_path in args.lora_weight:
-            lora_sd = load_file(lora_weight_path)
-            lora_sd = {k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")}
-
-            multiplier = (
-                args.lora_multiplier
-                if isinstance(args.lora_multiplier, (int, float))
-                else args.lora_multiplier[0]
-            )
-            network, weights_sd = lora_anima.create_network_from_weights(
-                multiplier=multiplier,
-                file=None,
-                ae=None,
-                text_encoders=[],
-                unet=model,
-                weights_sd=lora_sd,
-                for_inference=True,
-            )
-            network.apply_to([], model, apply_text_encoder=False, apply_unet=True)
-            info = network.load_state_dict(weights_sd, strict=False)
-            if info.unexpected_keys:
-                logger.debug(
-                    f"P-GRAFT: unexpected keys in LoRA state dict: {info.unexpected_keys[:5]}..."
-                )
-            network.to(device, dtype=torch.bfloat16)
-            network.eval()
-            model._pgraft_network = network
-            logger.info(
-                f"P-GRAFT: LoRA attached with cutoff_step={getattr(args, 'lora_cutoff_step', None)}"
-            )
-
-    # HydraLoRA moe: rehydrate the trained router-live network and attach it
-    # as dynamic forward hooks, identical shape to the P-GRAFT path above.
-    # The router runs per-sample on each adapted module, so the net stays in
-    # eval mode with requires_grad_(False).
-    if hydra_mode:
-        from networks import lora_anima
-
-        logger.info("HydraLoRA: loading moe file as router-live dynamic hooks")
-        for lora_weight_path in args.lora_weight:
-            # Chimera files (dual-pool) carry top-level ``freq_router.*``
-            # keys outside the ``lora_unet_*`` namespace and require the
-            # factory to read ``ss_use_chimera_hydra`` from on-disk metadata.
-            # Pass file=path and skip the lora_unet_* filter so both bits
-            # survive into create_network_from_weights.
-            is_chimera = _is_chimera_moe(lora_weight_path)
-            if is_chimera:
-                lora_sd = None
-                factory_file = lora_weight_path
-                logger.info("HydraLoRA: chimera file — dual-pool routing wired")
-            else:
-                lora_sd = load_file(lora_weight_path)
-                lora_sd = {
-                    k: v for k, v in lora_sd.items() if k.startswith("lora_unet_")
-                }
-                factory_file = None
-
-            multiplier = (
-                args.lora_multiplier
-                if isinstance(args.lora_multiplier, (int, float))
-                else args.lora_multiplier[0]
-            )
-            network, weights_sd = lora_anima.create_network_from_weights(
-                multiplier=multiplier,
-                file=factory_file,
-                ae=None,
-                text_encoders=[],
-                unet=model,
-                weights_sd=lora_sd,
-                for_inference=True,
-            )
-            network.apply_to([], model, apply_text_encoder=False, apply_unet=True)
-            info = network.load_state_dict(weights_sd, strict=False)
-            if info.unexpected_keys:
-                logger.warning(
-                    f"HydraLoRA: unexpected keys in state dict: {info.unexpected_keys[:5]}..."
-                )
-            if info.missing_keys:
-                logger.warning(
-                    f"HydraLoRA: missing keys in state dict: {info.missing_keys[:5]}..."
-                )
-            network.to(device, dtype=torch.bfloat16)
-            network.eval().requires_grad_(False)
-            hydra_networks = list(getattr(model, "_hydra_networks", []))
-            hydra_networks.append(network)
-            model._hydra_networks = hydra_networks
-            model._hydra_network = network
-            # Reuse the P-GRAFT cutoff slot so existing toggle sites
-            # (inference_pipeline loops + spectrum_denoise) honor
-            # --lora_cutoff_step without further plumbing.
-            model._pgraft_network = network
-            logger.info(
-                f"HydraLoRA: router-live attached "
-                f"({len(network.unet_loras)} modules, "
-                f"cutoff_step={getattr(args, 'lora_cutoff_step', None)})"
-            )
+    # Dynamic-hook adapters (P-GRAFT toggle / HydraLoRA router-live) that can't
+    # ride the static merge above.
+    attach_adapters(model, args, device, pgraft_mode=pgraft_mode, hydra_mode=hydra_mode)
 
     if getattr(args, "compile", False):
         logger.info("Compiling DiT model with torch.compile...")
         model = torch.compile(model)
+    elif getattr(args, "compile_blocks", False):
+        model.compile_blocks(mode=getattr(args, "compile_inductor_mode", None))
 
     clean_memory_on_device(device)
 
@@ -254,7 +309,11 @@ def load_text_encoder(
     device: torch.device = torch.device("cpu"),
 ) -> torch.nn.Module:
     lora_weights_list = None
-    if args.lora_weight is not None and len(args.lora_weight) > 0:
+    if (
+        args.lora_weight is not None
+        and len(args.lora_weight) > 0
+        and any(_has_te_keys(p) for p in args.lora_weight)
+    ):
         lora_weights_list = []
         for lora_weight in args.lora_weight:
             logger.info(f"Loading LoRA weight from: {lora_weight}")

@@ -27,15 +27,12 @@ import glob
 import json
 import logging
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
 
 from bench._common import make_run_dir, write_result  # noqa: E402
 from library.anima import weights as anima_utils  # noqa: E402
@@ -211,7 +208,6 @@ def build_anima_and_network(args, device, dtype):
         device=device,
         dit_path=args.dit,
         attn_mode=args.attn_mode,
-        split_attn=False,
         loading_device=device,
         dit_weight_dtype=dtype,
     )

@@ -1,0 +1,6 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>LOHA</h2>
+<p>低ランクハダマール積適応。</p>
+<p><b>数式</b>: ΔW = (A@B) ⊙ (C@D) &times; scale</p>
+<p>2つの低ランク行列のハダマール（要素ごとの）積により、<code>2&times;dim&times;(M+N)</code>パラメータで<code>dim²</code>の有効ランクを実現します。同じパラメータ予算で標準LoRAより大幅に高い表現力を持ちます。</p>
+<p><b>スケール</b>: <code>scale = alpha / dim</code>。推奨範囲<b>0.1&ndash;0.5</b>。過度なスケール（例：1.0）は過大な重み更新を引き起こし、出力品質を著しく低下させます。</p>
+<p><b>ヒント</b>: <code>dim=32, alpha=16</code>（scale=0.5）が良い出発点です。alphaを下げるかdimを増やしてスケールをさらに下げてください。</p>

@@ -11,8 +11,9 @@ Distillation setup (Starodubcev et al., ICLR 2026, Section 5):
     but pooled_text_proj receives the real pooled text vector.
   - Loss: MSE(student_pred, teacher_pred).
 
-The unconditional sidecar is staged by ``make distill-prep`` (writes
-``<data_dir>/_anima_uncond_te.safetensors``).
+The unconditional sidecar is normally produced by ``make preprocess-te`` (and
+also re-stageable via ``make distill-prep``) at
+``post_image_dataset/_anima_uncond_te.safetensors``.
 
 This forces pooled_text_proj to encode text information through modulation,
 complementing the cross-attention path.
@@ -28,11 +29,7 @@ import logging
 import math
 import os
 import random
-import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
@@ -43,15 +40,15 @@ from tqdm import tqdm  # noqa: E402
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
+from library.inference.uncond import (  # noqa: E402
+    default_uncond_path,
+    load_uncond_crossattn,
+    uncond_for_batch,
+)
 from scripts.distill_mod.teacher_cache import (  # noqa: E402
     TeacherCache,
     ValTeacherCache,
     prefill_teacher_cache,
-)
-from scripts.distill_mod.uncond import (  # noqa: E402
-    UNCOND_TE_FILENAME,
-    load_uncond_crossattn,
-    uncond_for_batch,
 )
 from scripts.distill_mod.validation import run_validation  # noqa: E402
 
@@ -74,9 +71,9 @@ def main():
         type=str,
         default=None,
         help=(
-            "Path to the T5(\"\") sidecar used as the student's unconditional "
+            'Path to the T5("") sidecar used as the student\'s unconditional '
             "cross-attention input. Defaults to "
-            "``<data_dir>/_anima_uncond_te.safetensors`` (staged by "
+            "``post_image_dataset/_anima_uncond_te.safetensors`` (staged by "
             "``make distill-prep``)."
         ),
     )
@@ -103,8 +100,8 @@ def main():
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=1000)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--iterations", type=int, default=7500)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
         "--blocks_to_swap",
@@ -113,7 +110,7 @@ def main():
         help="Number of transformer blocks to offload to CPU",
     )
     parser.add_argument(
-        "--save_every", type=int, default=250, help="Save checkpoint every N iterations"
+        "--save_every", type=int, default=750, help="Save checkpoint every N iterations"
     )
     parser.add_argument(
         "--attn_mode",
@@ -150,15 +147,6 @@ def main():
         help="Disable torch.compile",
     )
     parser.add_argument(
-        "--compile_mode",
-        type=str,
-        choices=["blocks", "full"],
-        default="blocks",
-        help="'blocks': compile each block._forward (default). "
-        "'full': compile the constant-shape _run_blocks stack (one CUDAGraph "
-        "across buckets — requires --no_grad_ckpt and --blocks_to_swap 0).",
-    )
-    parser.add_argument(
         "--compile_inductor_mode",
         type=str,
         default="",
@@ -181,6 +169,15 @@ def main():
         type=float,
         default=0.02,
         help="Warmup steps: int >= 1 for absolute steps, float < 1 for ratio of iterations",
+    )
+    parser.add_argument(
+        "--no_shuffle",
+        dest="shuffle",
+        action="store_false",
+        default=True,
+        help="Disable per-epoch shuffling of the (bucket-grouped) batch order. "
+        "Default shuffles batch order each epoch while keeping every batch "
+        "single-resolution and pinning the largest-token bucket to step 0.",
     )
     parser.add_argument(
         "--dry_run",
@@ -215,7 +212,7 @@ def main():
     parser.add_argument(
         "--validation_split",
         type=float,
-        default=0.05,
+        default=0.01,
         help="Fraction of dataset held out for validation (e.g. 0.05 for 5 percent)",
     )
     parser.add_argument(
@@ -227,7 +224,7 @@ def main():
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
-        default=250,
+        default=750,
         help="Run validation every N optimizer steps (only if validation_split>0)",
     )
     parser.add_argument(
@@ -322,9 +319,7 @@ def main():
     dtype = torch.bfloat16
 
     # --- Load unconditional T5("") sidecar (staged by `make distill-prep`) ---
-    uncond_te_path = args.uncond_te_path or os.path.join(
-        args.data_dir, UNCOND_TE_FILENAME
-    )
+    uncond_te_path = args.uncond_te_path or str(default_uncond_path())
     uncond_te_1 = load_uncond_crossattn(uncond_te_path, device, dtype)
     logger.info(
         f"Loaded uncond crossattn from {uncond_te_path} "
@@ -337,7 +332,6 @@ def main():
         device,
         args.dit_path,
         attn_mode=args.attn_mode,
-        split_attn=False,
         loading_device="cpu" if args.blocks_to_swap > 0 else device,
         dit_weight_dtype=dtype,
     )
@@ -367,28 +361,19 @@ def main():
     else:
         model.to(device)
 
-    # Static token count: pad all spatial sequences to 4096 tokens so
-    # torch.compile sees a single shape across all bucket resolutions.
-    model.set_static_token_count(4096)
-
-    # Compile individual block._forward for speedup.
-    # unsloth_checkpoint wraps Block.forward with @torch._disable_dynamo,
-    # so we compile _forward (the inner computation) not forward.
-    # compile_mode='full' instead compiles the constant-shape _run_blocks stack
-    # — single trace across all buckets, but incompatible with grad ckpt / block swap.
+    # Compile individual block._forward for speedup. compile_blocks turns on
+    # native-shape flattening (every aspect bucket runs at its real token count,
+    # no padding → no flash pad-leak into the distillation target) and compiles
+    # _forward (the inner computation) not forward — unsloth_checkpoint wraps
+    # Block.forward with @torch._disable_dynamo. This pool's latents span more
+    # than the 2 CONSTANT_TOKEN_BUCKETS families, so pre-raise the dynamo cache
+    # (compile_blocks' max() won't lower it) to trace every distinct token count
+    # instead of falling back to eager mid-warmup.
     if args.torch_compile:
-        if args.compile_mode == "full":
-            assert not args.grad_ckpt, (
-                "compile_mode='full' is incompatible with gradient checkpointing — "
-                "pass --no_grad_ckpt"
-            )
-            assert args.blocks_to_swap == 0, (
-                "compile_mode='full' is incompatible with block swap — "
-                "pass --blocks_to_swap 0"
-            )
-            model.compile_core(mode=args.compile_inductor_mode)
-        else:
-            model.compile_blocks(mode=args.compile_inductor_mode)
+        import torch._dynamo as _dynamo
+
+        _dynamo.config.cache_size_limit = max(_dynamo.config.cache_size_limit, 64)
+        model.compile_blocks(mode=args.compile_inductor_mode)
 
     # Gradient checkpointing with CPU offload: recompute block activations
     # during backward, offloading saved tensors to CPU between forward/backward.
@@ -409,6 +394,11 @@ def main():
         param.requires_grad_(False)
     for param in model.pooled_text_proj.parameters():
         param.requires_grad_(True)
+
+    # Arm the student forward's pooled_text_proj path. The output layer starts
+    # zero-init, so without this the gate would skip the proj and starve its
+    # gradient — the teacher forward still passes skip_pooled_text_proj=True.
+    model.enable_pooled_text_modulation = True
 
     # Train pooled_text_proj in float32 for precision
     model.pooled_text_proj.to(dtype=torch.float32)
@@ -482,13 +472,14 @@ def main():
             torch.stack([b[3] for b in batch]),
         )
 
+    # Bucket-grouped batch sampler: every batch is one resolution (so the
+    # stacking _collate works at batch_size>1) and, when shuffling, batch order
+    # is reshuffled per epoch with the largest-token bucket pinned first.
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batch_size,
-        shuffle=False,  # dataset is pre-bucketed; shuffling would mix resolutions
+        batch_sampler=dataset.make_batch_sampler(shuffle=args.shuffle, seed=args.seed),
         num_workers=2,
         pin_memory=True,
-        drop_last=True,
         collate_fn=_collate,
     )
 
@@ -542,7 +533,9 @@ def main():
         run_log_dir = os.path.join(args.log_dir, run_name)
         os.makedirs(run_log_dir, exist_ok=True)
         writer = SummaryWriter(log_dir=run_log_dir)
-        writer.add_text("config", "  \n".join(f"{k}: {v}" for k, v in vars(args).items()))
+        writer.add_text(
+            "config", "  \n".join(f"{k}: {v}" for k, v in vars(args).items())
+        )
         logger.info(f"TensorBoard logs -> {run_log_dir}")
 
     # --- Training loop ---
@@ -631,8 +624,7 @@ def main():
             cached_list = None
             if teacher_cache is not None:
                 cached_list = [
-                    teacher_cache.get(idx_list[i], sigma_idx_list[i])
-                    for i in range(B)
+                    teacher_cache.get(idx_list[i], sigma_idx_list[i]) for i in range(B)
                 ]
                 all_hit = all(c is not None for c in cached_list)
             else:
@@ -750,18 +742,14 @@ def main():
             sigma_str = ", ".join(
                 f"σ={s:.2f}:{v:.4e}" for s, v in per_sigma_mean.items()
             )
-            logger.info(
-                f"[val @ step {step + 1}] mean={overall_mean:.6f}  {sigma_str}"
-            )
+            logger.info(f"[val @ step {step + 1}] mean={overall_mean:.6f}  {sigma_str}")
             if writer is not None:
                 writer.add_scalar("val/loss", overall_mean, step + 1)
                 for s, v in per_sigma_mean.items():
                     writer.add_scalar(f"val/loss_sigma_{s:.2f}", v, step + 1)
                 if val_teacher_cache is not None:
                     vc_total = val_teacher_cache.hits + val_teacher_cache.misses
-                    vc_hit_rate = (
-                        val_teacher_cache.hits / vc_total if vc_total else 0.0
-                    )
+                    vc_hit_rate = val_teacher_cache.hits / vc_total if vc_total else 0.0
                     writer.add_scalar(
                         "val_teacher_cache/hit_rate", vc_hit_rate, step + 1
                     )
@@ -777,9 +765,9 @@ def main():
         if val_enabled:
             should_save = improved
         else:
-            should_save = (
-                (step + 1) % args.save_every == 0 or (step + 1) == args.iterations
-            )
+            should_save = (step + 1) % args.save_every == 0 or (
+                step + 1
+            ) == args.iterations
         if should_save:
             save_path = args.output_path
             state = {

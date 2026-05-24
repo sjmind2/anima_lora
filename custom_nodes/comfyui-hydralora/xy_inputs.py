@@ -255,30 +255,6 @@ class AnimaXYInputAnimaReFTStrength:
         )
 
 
-class AnimaXYInputAnimaPostfix:
-    RETURN_TYPES = ("ANIMA_XY",)
-    FUNCTION = "xy_input"
-    CATEGORY = "Anima XY Plot/XY Input"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        lora_list = folder_paths.get_filename_list("loras")
-        inputs = {"required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}}
-        for i in range(1, 11):
-            inputs["required"][f"postfix_{i}"] = (lora_list,)
-            inputs["required"][f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
-        return inputs
-
-    def xy_input(self, **kwargs):
-        input_count = kwargs["input_count"]
-        values = []
-        for i in range(1, input_count + 1):
-            postfix = kwargs.get(f"postfix_{i}", "")
-            strength = kwargs.get(f"strength_{i}", 1.0)
-            values.append((postfix, strength))
-        return ({"type": "anima_postfix", "label": "Anima Postfix", "values": values},)
-
-
 class AnimaXYInputCheckpoint:
     RETURN_TYPES = ("ANIMA_XY",)
     FUNCTION = "xy_input"
@@ -354,7 +330,6 @@ XY_INPUT_CLASS_MAPPINGS = {
     "XY Input (Anima): Anima Adapter": AnimaXYInputAnimaAdapter,
     "XY Input (Anima): Anima Adapter Strength": AnimaXYInputAnimaAdapterStrength,
     "XY Input (Anima): Anima ReFT Strength": AnimaXYInputAnimaReFTStrength,
-    "XY Input (Anima): Anima Postfix": AnimaXYInputAnimaPostfix,
     "XY Input (Anima): Checkpoint": AnimaXYInputCheckpoint,
     "XY Input (Anima): VAE": AnimaXYInputVAE,
     "XY Input (Anima): LoRA": AnimaXYInputLoRA,
@@ -371,7 +346,6 @@ XY_INPUT_DISPLAY_NAME_MAPPINGS = {
     "XY Input (Anima): Anima Adapter": "XY Input (Anima): Anima Adapter",
     "XY Input (Anima): Anima Adapter Strength": "XY Input (Anima): Anima Adapter Strength",
     "XY Input (Anima): Anima ReFT Strength": "XY Input (Anima): Anima ReFT Strength",
-    "XY Input (Anima): Anima Postfix": "XY Input (Anima): Anima Postfix",
     "XY Input (Anima): Checkpoint": "XY Input (Anima): Checkpoint",
     "XY Input (Anima): VAE": "XY Input (Anima): VAE",
     "XY Input (Anima): LoRA": "XY Input (Anima): LoRA",

@@ -1,0 +1,5 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>LOKR</h2>
+<p>低ランククロネッカー積適応。</p>
+<p><b>数式</b>: ΔW = kron(W1, W2) &times; scale</p>
+<p>重みの次元をより小さな因子ペアに分解し、クロネッカー積を使用してフルランク構造を再構築します。<code>network_dim</code>と次元サイズに基づいて、フル行列と低ランク分解の間で自動的に切り替わります。</p>
+<p><b>主なオプション</b>: <code>decompose_both=true</code>（W1とW2の両方を分解）、<code>lokr_factor=-1</code>（自動因子分解）。</p>

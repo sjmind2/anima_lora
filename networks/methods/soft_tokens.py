@@ -1,31 +1,21 @@
-# Per-layer time-indexed soft tokens — SoftREPA-style parameterization (without
-# the contrastive loss). DiT is frozen; trains a small bank of K continuous
-# vectors per (layer, t-bucket) pair, prepended (via end-of-sequence overwrite)
-# to crossattn_emb at each block independently.
+# Per-layer time-indexed soft tokens — SoftREPA-style parameterization
+# (Lee et al., NeurIPS 2025, arXiv:2503.08250). DiT is frozen; trains a bank of
+# K continuous vectors per (layer, t-bucket), spliced into crossattn_emb at each
+# block independently. Anima's DiT is cross-attention (not MM-DiT), so
+# crossattn_emb doesn't evolve through blocks — no strip/re-prepend needed.
 #
-# Reference: Lee et al., "Aligning Text to Image in Diffusion Models is Easier
-# Than You Think" (NeurIPS 2025) — arXiv:2503.08250. We adopt only their
-# parameterization (per-layer × per-t soft tokens), trained under plain flow-
-# matching loss; the contrastive InfoNCE objective is intentionally skipped.
-# In Anima the DiT is cross-attention (not joint-stream MM-DiT like SD3), so
-# crossattn_emb does not evolve through blocks — each block independently
-# receives crossattn_emb extended with its own layer tokens. No strip/re-prepend
-# dance is needed.
+# Splice: end-of-sequence overwrite of the K zero-padding tail slots, keeping
+# crossattn_emb shape static for torch.compile. Zero-padded positions are
+# cross-attention sinks (Anima text-encoder padding invariant), so writing into
+# them gives the tokens attention mass without changing seqlen.
 #
-# Splice strategy: end-of-sequence overwrite of zero-padding (K tail slots),
-# preserving static crossattn_emb shape so `_run_blocks` torch.compile stays
-# happy. Zero-padded positions act as cross-attention sinks (see Anima's text-
-# encoder padding invariant), so writing tokens into them gives them attention
-# mass without changing seqlen.
+# vs postfix.py: postfix splices once at the cached adapter output; soft tokens
+# splice per-block via monkey-patched Block.forward (ReFT-pattern).
 #
-# Why a separate module from postfix.py: postfix splices once at the cached
-# adapter output (training-time and inference-time). Soft tokens splice per-
-# block via monkey-patched Block.forward (ReFT-pattern), a fundamentally
-# different surface.
-#
-# v1: training only. Inference would require the per-step splice to be re-run
-# inside the denoising loop; until that's wired up, save_weights still emits a
-# usable file but inference.py will refuse to load it.
+# Inference: library/inference/generation.py + networks/spectrum.py call
+# append_postfix(..., timesteps=t) per CFG branch before each forward. Spectrum
+# cached steps skip the blocks, so soft tokens no-op there (composes with
+# --spectrum).
 
 import os
 from typing import Optional
@@ -34,6 +24,11 @@ import torch
 import torch.nn as nn
 
 from library.log import setup_logging
+from library.training.method_adapter import (
+    ForwardArtifacts,
+    MethodAdapter,
+    StepCtx,
+)
 from networks.methods.base import AdapterNetworkBase
 
 import logging
@@ -43,6 +38,19 @@ logger = logging.getLogger(__name__)
 
 # Anima cached crossattn_emb dimension (Qwen3 hidden size, post LLM-adapter).
 DEFAULT_EMBED_DIM = 1024
+
+# Contrastive negative-sourcing modes (docs/proposal/soft_tokens_contrastive.md):
+# ``shuffled`` = unrelated cached-TE negative; ``jaccard`` = shuffled but logit
+# down-weighted by caption tag-overlap; ``hard`` = same-artist/different-character
+# sibling (falls back to shuffled for orphan artists).
+CONTRASTIVE_MODES = ("shuffled", "jaccard", "hard")
+
+# Contrastive objective, sharing the extra-forward plumbing:
+#   ``infonce`` — SoftREPA InfoNCE over cached-TE negatives (default).
+#   ``agsm``    — Alignment-Guided Score Matching: bounded target-shift
+#                 ``v_target ± γ·Ã(t)·Δ``, Δ off an EMA of the bank's own preds
+#                 (docs/proposal/soft_tokens_agsm.md, Phase 2).
+CONTRASTIVE_OBJECTIVES = ("infonce", "agsm")
 
 
 def create_network(
@@ -63,7 +71,14 @@ def create_network(
     splice_position = kwargs.get("splice_position", "end_of_sequence")
     contrastive_weight = float(kwargs.get("contrastive_weight", 0.0))
     contrastive_k = int(kwargs.get("contrastive_k", 1))
-    contrastive_tau = float(kwargs.get("contrastive_tau", 1.0))
+    contrastive_negative_mode = str(kwargs.get("contrastive_negative_mode", "shuffled"))
+    contrastive_tau = float(kwargs.get("contrastive_tau", 0.5))
+    contrastive_warmup_ratio = float(kwargs.get("contrastive_warmup_ratio", 0.1))
+    contrastive_jaccard_alpha = float(kwargs.get("contrastive_jaccard_alpha", 1.0))
+    contrastive_every_n = int(kwargs.get("contrastive_every_n", 1))
+    contrastive_objective = str(kwargs.get("contrastive_objective", "infonce"))
+    agsm_gamma = float(kwargs.get("agsm_gamma", 0.5))
+    agsm_ema_decay = float(kwargs.get("agsm_ema_decay", 0.99))
     network = SoftTokensNetwork(
         num_tokens=num_tokens,
         embed_dim=embed_dim,
@@ -73,7 +88,14 @@ def create_network(
         splice_position=splice_position,
         contrastive_weight=contrastive_weight,
         contrastive_k=contrastive_k,
+        contrastive_negative_mode=contrastive_negative_mode,
         contrastive_tau=contrastive_tau,
+        contrastive_warmup_ratio=contrastive_warmup_ratio,
+        contrastive_jaccard_alpha=contrastive_jaccard_alpha,
+        contrastive_every_n=contrastive_every_n,
+        contrastive_objective=contrastive_objective,
+        agsm_gamma=agsm_gamma,
+        agsm_ema_decay=agsm_ema_decay,
         multiplier=multiplier,
     )
     return network
@@ -89,11 +111,6 @@ def create_network_from_weights(
     for_inference=False,
     **kwargs,
 ):
-    if for_inference:
-        raise NotImplementedError(
-            "soft_tokens v1 is training-only. Inference plumbing (per-step "
-            "block hooks inside the denoising loop) is not wired up yet."
-        )
     if weights_sd is None:
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
@@ -111,8 +128,8 @@ def create_network_from_weights(
         )
     n_layers, num_tokens, embed_dim = tokens.shape
     n_t_buckets = t_offsets.shape[0]
-    # Splice position is a runtime knob, not learned — read from metadata if
-    # present, otherwise default. CLI kwargs win for post-hoc overrides.
+    # Splice position is a runtime knob, not learned — read from metadata, CLI
+    # kwargs win for post-hoc overrides.
     metadata_splice = None
     if file is not None and os.path.splitext(file)[1] == ".safetensors":
         from safetensors import safe_open
@@ -123,9 +140,6 @@ def create_network_from_weights(
     splice_position = kwargs.get(
         "splice_position", metadata_splice or "end_of_sequence"
     )
-    contrastive_weight = float(kwargs.get("contrastive_weight", 0.0))
-    contrastive_k = int(kwargs.get("contrastive_k", 1))
-    contrastive_tau = float(kwargs.get("contrastive_tau", 1.0))
     network = SoftTokensNetwork(
         num_tokens=num_tokens,
         embed_dim=embed_dim,
@@ -133,9 +147,9 @@ def create_network_from_weights(
         n_t_buckets=n_t_buckets,
         init_std=0.0,  # weights are loaded; init_std doesn't matter
         splice_position=splice_position,
-        contrastive_weight=contrastive_weight,
-        contrastive_k=contrastive_k,
-        contrastive_tau=contrastive_tau,
+        # Contrastive is training-only (extra forwards, no learned params) — off
+        # on the inference path.
+        contrastive_weight=0.0,
         multiplier=multiplier,
     )
     return network, weights_sd
@@ -167,7 +181,14 @@ class SoftTokensNetwork(AdapterNetworkBase):
         splice_position: str = "end_of_sequence",
         contrastive_weight: float = 0.0,
         contrastive_k: int = 1,
-        contrastive_tau: float = 1.0,
+        contrastive_negative_mode: str = "shuffled",
+        contrastive_tau: float = 0.5,
+        contrastive_warmup_ratio: float = 0.1,
+        contrastive_jaccard_alpha: float = 1.0,
+        contrastive_every_n: int = 1,
+        contrastive_objective: str = "infonce",
+        agsm_gamma: float = 0.5,
+        agsm_ema_decay: float = 0.99,
         multiplier: float = 1.0,
     ):
         super().__init__()
@@ -183,67 +204,103 @@ class SoftTokensNetwork(AdapterNetworkBase):
                 f"splice_position must be 'front_of_padding' or 'end_of_sequence', "
                 f"got {splice_position!r}"
             )
+        if contrastive_negative_mode not in CONTRASTIVE_MODES:
+            raise ValueError(
+                f"contrastive_negative_mode must be one of {CONTRASTIVE_MODES}, "
+                f"got {contrastive_negative_mode!r}"
+            )
+        if contrastive_objective not in CONTRASTIVE_OBJECTIVES:
+            raise ValueError(
+                f"contrastive_objective must be one of {CONTRASTIVE_OBJECTIVES}, "
+                f"got {contrastive_objective!r}"
+            )
+        if contrastive_weight > 0.0:
+            if contrastive_k < 1:
+                raise ValueError(f"contrastive_k must be >= 1, got {contrastive_k}")
+            if contrastive_objective == "infonce" and contrastive_tau <= 0.0:
+                raise ValueError(
+                    f"contrastive_tau must be positive, got {contrastive_tau}"
+                )
+            if contrastive_objective == "agsm" and not (0.0 < agsm_ema_decay < 1.0):
+                raise ValueError(
+                    f"agsm_ema_decay must be in (0, 1), got {agsm_ema_decay}"
+                )
 
         self.num_tokens = num_tokens
         self.embed_dim = embed_dim
         self.n_layers = n_layers
         self.n_t_buckets = n_t_buckets
         self.splice_position = splice_position
-        # Paper's InfoNCE objective. ``contrastive_k`` is the number of
-        # in-batch negatives per anchor (paper had N-1 = full batch; we use a
-        # tunable subset since each negative costs one extra DiT forward).
-        # ``contrastive_tau`` constrains the unbounded MSE-as-similarity per
-        # paper §3.1 ("exponential function to constrain the logit values").
-        self.contrastive_weight = contrastive_weight
-        self.contrastive_k = max(int(contrastive_k), 0)
-        self.contrastive_tau = float(contrastive_tau)
-        # Latest contrastive value cached by SoftTokensMethodAdapter for
-        # logging via metrics(); ``_last_*`` mirrors the postfix pattern.
-        self._last_contrastive_value: Optional[float] = None
         self.multiplier = multiplier
+
+        # Contrastive objective (training-only; extra forwards live in
+        # ``SoftTokensMethodAdapter``). ``_contrastive_target_weight`` gates
+        # composer activation; ``_contrastive_weight`` is the live warmup-held
+        # value the loss handler multiplies by.
+        self._contrastive_target_weight = float(contrastive_weight)
+        self._contrastive_warmup_ratio = float(contrastive_warmup_ratio)
+        self._contrastive_tau = float(contrastive_tau)
+        self.contrastive_k = int(contrastive_k)
+        self.contrastive_negative_mode = str(contrastive_negative_mode)
+        self.contrastive_jaccard_alpha = float(contrastive_jaccard_alpha)
+        self._contrastive_weight = (
+            0.0
+            if self._contrastive_warmup_ratio > 0.0
+            else self._contrastive_target_weight
+        )
+        # Cadence: run the contrastive negative forwards only every Nth optimizer
+        # step. NOT auto-scaled — effective strength is (weight × 1/N); co-tune
+        # ``contrastive_weight`` to hold it constant. 1 = every step (default).
+        # ``_contrastive_fire_this_step`` is recomputed each step by
+        # ``step_contrastive_warmup`` on the optimizer-step index.
+        self._contrastive_every_n = max(1, int(contrastive_every_n))
+        self._contrastive_fire_this_step = True
+
+        # AGSM target-shift objective (docs/proposal/soft_tokens_agsm.md, Phase 2).
+        # ``contrastive_objective`` selects the loss math in the adapter. Phase 2
+        # is single-bank (ψ⁺=ψ⁻=this bank, only crossattn_emb differs), Ã(t)=1;
+        # Δ is read off an EMA shadow of the bank's own preds (self-distillation).
+        self.contrastive_objective = str(contrastive_objective)
+        self._agsm_gamma = float(agsm_gamma)
+        self._agsm_ema_decay = float(agsm_ema_decay)
+        # EMA shadow of the bank, lazily cloned from the live params and refreshed
+        # per optimizer step. Plain attributes (not buffers/params) so they stay
+        # out of state_dict and carry no gradient.
+        self._tokens_ema: Optional[torch.Tensor] = None
+        self._t_offsets_ema: Optional[torch.Tensor] = None
 
         self.tokens = nn.Parameter(
             torch.randn(n_layers, num_tokens, embed_dim) * init_std
         )
-        # Per-(bucket, layer) D-vector offset. Broadcast across the K-token axis
-        # at lookup so the bucket only has to learn one D-vector per layer per
-        # bucket (not K). Zero-init = identity perturbation at step 0.
+        # Per-(bucket, layer) D-vector offset, broadcast across the K-token axis
+        # at lookup (one D-vector per layer per bucket, not K). Zero-init =
+        # identity perturbation at step 0.
         self.t_offsets = nn.Embedding(n_t_buckets, n_layers * embed_dim)
         nn.init.zeros_(self.t_offsets.weight)
 
-        # Step-scoped state set by append_postfix() once per forward pass and
-        # consumed by the per-block hooks installed in apply_to(). Kept as a
-        # plain attribute (not a buffer) — recreated each step, no need to
-        # persist or move with .to(). _step_seqlens is only populated for
-        # front_of_padding splice; end_of_sequence ignores it.
+        # Step-scoped state set by append_postfix() per forward and consumed by
+        # the per-block hooks. Plain attributes (recreated each step).
+        # _step_seqlens only used for front_of_padding splice.
         self._step_layer_tokens: Optional[torch.Tensor] = None  # (n_layers, B, K, D)
         self._step_seqlens: Optional[torch.Tensor] = None  # (B,) int
 
-        # Reverse-bookkeeping for apply_to(): keep references so we could
-        # un-monkey-patch later (currently unused but cheap to track).
+        # Kept so apply_to() could un-monkey-patch later (unused but cheap).
         self._block_refs: list[nn.Module] = []
         self._original_forwards: list = []
 
         n_token_params = self.tokens.numel()
         n_offset_params = self.t_offsets.weight.numel()
-        cs_note = (
-            f", contrastive(λ={contrastive_weight}, k={contrastive_k}, "
-            f"τ={contrastive_tau})"
-            if contrastive_weight > 0.0
-            else ""
-        )
         logger.info(
             f"SoftTokensNetwork: {n_layers} layers × {num_tokens} tokens × dim {embed_dim}, "
-            f"{n_t_buckets} t-buckets, splice={splice_position}{cs_note} → "
+            f"{n_t_buckets} t-buckets, splice={splice_position} → "
             f"{n_token_params + n_offset_params} params "
             f"({n_token_params} base + {n_offset_params} t-offset)"
         )
 
-    # Sentinel attribute so train.py's ``hasattr(network, "append_postfix")``
-    # branch picks us up: train.py will then call append_postfix(..., timesteps=...)
-    # at the right point in the forward loop, which we use only to compute the
-    # step-scoped per-layer tokens. The crossattn_emb passes through unchanged
-    # — splicing happens inside the per-block hooks below.
+    # Sentinel for train.py's ``hasattr(network, "append_postfix")`` branch —
+    # makes it call append_postfix(..., timesteps=...) per step, which we use
+    # only to compute the step-scoped tokens (crossattn_emb passes through; the
+    # splice happens in the per-block hooks below).
     @property
     def num_postfix_tokens(self) -> int:
         return self.num_tokens
@@ -271,20 +328,53 @@ class SoftTokensNetwork(AdapterNetworkBase):
         """
         if timesteps is None:
             raise ValueError(
-                "soft_tokens requires timesteps (per-step) — train.py passes "
-                "this automatically; inference path is not yet wired up"
+                "soft_tokens requires timesteps (per-step) — train.py and the "
+                "inference loop (library/inference/generation.py, "
+                "networks/spectrum.py) both pass this per CFG branch each step"
             )
-        B = crossattn_emb.shape[0]
+        self._set_step_tokens(timesteps, crossattn_seqlens, use_ema=False)
+        return crossattn_emb
+
+    def _layer_tokens_from(
+        self,
+        tokens: torch.Tensor,
+        t_offsets_weight: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-step (n_layers, B, K, D) tokens for a given (tokens, t_offsets)
+        pair. Factored out of ``append_postfix`` so the same math runs against
+        either the live bank or its EMA shadow (AGSM Δ forwards)."""
+        B = int(timesteps.detach().flatten().shape[0])
         bucket_idx = self._bucketize(timesteps)  # (B,)
         # (B, n_layers * D) → (B, n_layers, D) → (B, n_layers, 1, D)
-        offsets = self.t_offsets(bucket_idx).view(B, self.n_layers, self.embed_dim)
-        # (n_layers, K, D) → (1, n_layers, K, D), broadcast over batch.
-        base = self.tokens.unsqueeze(0)
-        # (B, n_layers, K, D); offset broadcasts across K.
-        per_step = base + offsets.unsqueeze(2)
+        offsets = nn.functional.embedding(bucket_idx, t_offsets_weight).view(
+            B, self.n_layers, self.embed_dim
+        )
+        # (n_layers, K, D) → (1, n_layers, K, D), broadcast over batch + over K.
+        per_step = tokens.unsqueeze(0) + offsets.unsqueeze(2)  # (B, n_layers, K, D)
         # Transpose to (n_layers, B, K, D) for cheap per-layer indexing in the
         # block hook closure.
-        self._step_layer_tokens = per_step.transpose(0, 1).contiguous()
+        return per_step.transpose(0, 1).contiguous()
+
+    def _set_step_tokens(
+        self,
+        timesteps: torch.Tensor,
+        crossattn_seqlens: Optional[torch.Tensor],
+        use_ema: bool = False,
+    ) -> None:
+        """Compute + cache the per-step layer tokens read by the block hooks.
+
+        ``use_ema=True`` primes the splice from the EMA shadow bank instead of
+        the live params (no grad — the AGSM guidance direction Δ is detached).
+        """
+        if use_ema:
+            self._ensure_bank_ema()
+            tokens, t_offsets_weight = self._tokens_ema, self._t_offsets_ema
+        else:
+            tokens, t_offsets_weight = self.tokens, self.t_offsets.weight
+        self._step_layer_tokens = self._layer_tokens_from(
+            tokens, t_offsets_weight, timesteps
+        )
         # front_of_padding needs per-sample seqlens at hook time; end_of_sequence
         # ignores them. Cache regardless so the hook doesn't have to know which
         # mode is active (the splice branch reads or skips).
@@ -293,7 +383,6 @@ class SoftTokensNetwork(AdapterNetworkBase):
             if crossattn_seqlens is not None
             else None
         )
-        return crossattn_emb
 
     def _make_block_hook(self, layer_idx: int, org_forward):
         """Closure that splices layer_idx's tokens into crossattn_emb tail.
@@ -413,9 +502,17 @@ class SoftTokensNetwork(AdapterNetworkBase):
             "ss_n_layers": str(self.n_layers),
             "ss_n_t_buckets": str(self.n_t_buckets),
             "ss_splice_position": self.splice_position,
-            "ss_contrastive_weight": str(self.contrastive_weight),
+            # Contrastive objective is training-only (no learned params), but
+            # stamp the config for run provenance.
+            "ss_contrastive_weight": str(self._contrastive_target_weight),
             "ss_contrastive_k": str(self.contrastive_k),
-            "ss_contrastive_tau": str(self.contrastive_tau),
+            "ss_contrastive_negative_mode": self.contrastive_negative_mode,
+            "ss_contrastive_tau": str(self._contrastive_tau),
+            "ss_contrastive_warmup_ratio": str(self._contrastive_warmup_ratio),
+            "ss_contrastive_every_n": str(self._contrastive_every_n),
+            "ss_contrastive_objective": self.contrastive_objective,
+            "ss_agsm_gamma": str(self._agsm_gamma),
+            "ss_agsm_ema_decay": str(self._agsm_ema_decay),
         }
 
     def load_weights(self, file):
@@ -438,182 +535,578 @@ class SoftTokensNetwork(AdapterNetworkBase):
         )
 
     def metrics(self, ctx) -> dict[str, float]:
+        """TensorBoard bank-state collapse/divergence diagnostics.
+
+        ``tokens_mean_cos`` ~0 = orthogonal (good), ~1 = slot collapse;
+        ``tokens_mean_norm`` blowing up = magnitude diverging;
+        ``offset_mean_norm`` ~0 = t-offset buckets not training (check LR).
+        """
+        del ctx
         out: dict[str, float] = {}
-        if self.contrastive_weight > 0.0 and self._last_contrastive_value is not None:
-            v = float(self._last_contrastive_value)
-            out["reg/soft_tokens_contrastive"] = v
-            out["reg/soft_tokens_contrastive_weighted"] = self.contrastive_weight * v
+
+        # Batched over the layer axis → 3 host syncs for the whole bank.
+        if self.num_tokens >= 2 and self.n_layers > 0:
+            tokens = self.tokens.detach()  # (L, K, D)
+            K = tokens.shape[1]
+            iu = torch.triu_indices(K, K, offset=1, device=tokens.device)
+            # Mean pairwise cos over all (layer, pair) — equal pair count per
+            # layer so this equals the mean of per-layer means.
+            zn = torch.nn.functional.normalize(tokens, dim=-1, eps=1e-8)
+            gram = zn @ zn.transpose(1, 2)  # (L, K, K)
+            out["soft_tokens/tokens_mean_cos"] = float(
+                gram[:, iu[0], iu[1]].mean().item()
+            )
+            # Squared pairwise distances ‖a‖²+‖b‖²−2a·b; clamp subtraction round-off.
+            sq = tokens.pow(2).sum(-1)  # (L, K)
+            d_sq = (
+                sq.unsqueeze(2) + sq.unsqueeze(1) - 2.0 * (tokens @ tokens.transpose(1, 2))
+            ).clamp_min(0.0)  # (L, K, K)
+            out["soft_tokens/tokens_min_d_sq"] = float(
+                d_sq[:, iu[0], iu[1]].min().item()
+            )
+            out["soft_tokens/tokens_mean_norm"] = float(
+                tokens.flatten(1).norm(dim=-1).mean().item()
+            )
+        out["soft_tokens/offset_mean_norm"] = float(
+            self.t_offsets.weight.detach()
+            .view(self.n_t_buckets, self.n_layers, self.embed_dim)
+            .permute(1, 0, 2)
+            .flatten(1)
+            .norm(dim=-1)
+            .mean()
+            .item()
+        )
         return out
 
+    def step_contrastive_warmup(
+        self, global_step: int, max_train_steps: int, accum: int = 1
+    ) -> None:
+        """Activate the contrastive objective past its warmup window and decide
+        whether the negatives fire this step.
 
-# ───────────────────────────────────────────────── trainer integration
+        Warmup: ``_contrastive_weight`` holds at 0 for the first
+        ``_contrastive_warmup_ratio`` of steps, then flips to the target (no-op
+        when target is 0) — lets plain FM shape a non-degenerate bank before the
+        contrast pulls on it.
+
+        Cadence: ``global_step`` is the micro-batch counter; the firing decision
+        is taken on the optimizer-step index (``global_step // accum``) so every
+        micro-batch in an accumulation window agrees (else partial, accum-coupled
+        contrastive grads).
+        """
+        every_n = int(self._contrastive_every_n)
+        accum = max(1, int(accum))
+        optimizer_step = int(global_step) // accum
+        self._contrastive_fire_this_step = (
+            every_n <= 1 or optimizer_step % every_n == 0
+        )
+
+        target = float(self._contrastive_target_weight)
+        ratio = float(self._contrastive_warmup_ratio)
+        if target <= 0.0:
+            return
+        if ratio <= 0.0 or max_train_steps <= 0:
+            self._contrastive_weight = target
+            return
+        warmup_steps = int(max_train_steps * ratio)
+        self._contrastive_weight = 0.0 if global_step < warmup_steps else target
+
+    def contrastive_loss(
+        self,
+        v_pos: torch.Tensor,
+        v_neg: torch.Tensor,
+        v_target: torch.Tensor,
+        neg_penalty: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """SoftREPA-style InfoNCE over cached-TE negatives (B=1-adapted).
+
+        Each forward shares the same ``(x_t, ε, t)`` and spliced soft tokens;
+        only ``crossattn_emb`` differs (matched vs. mismatched text). The logit
+        for a forward is the negative flow-matching error against the shared
+        velocity target, scaled by τ::
+
+            ℓ_* = -‖v_* − v_target‖² / τ            (mean over C·H·W per sample)
+            L   = -log( exp(ℓ_pos) / Σ_{pos,neg} exp(ℓ_*) )
+
+        Gradient flows to the soft tokens (via every ``v_*``) to make the
+        matched text explain the anchor's latent better than mismatched text —
+        i.e. to sharpen the cross-attention's text discrimination.
+
+        ``neg_penalty`` (the ``jaccard`` mode's ``α·s``, shape ``(B, k)``) is
+        subtracted from each negative logit before the softmax — a negative that
+        shares tags with the anchor becomes a less-surprising mismatch and pulls
+        less gradient. ``None`` ⇒ plain InfoNCE (``shuffled`` / ``hard``).
+
+        Shapes
+        ------
+        v_pos, v_target : ``(B, C, H, W)``
+        v_neg           : ``(B, k, C, H, W)``
+        neg_penalty     : ``(B, k)`` or None
+
+        Returns
+        -------
+        (loss_scalar, diagnostics) where diagnostics carries the contrastive
+        accuracy (pos beats every negative) and the mean pos−neg logit gap for
+        TensorBoard.
+        """
+        logit_pos, logits_neg = self._velocities_to_logits(
+            v_pos, v_neg, v_target, neg_penalty
+        )
+        loss = self._infonce_from_logits(logit_pos, logits_neg)
+        return loss, self._contrastive_diagnostics(logit_pos, logits_neg)
+
+    def _velocities_to_logits(
+        self,
+        v_pos: torch.Tensor,
+        v_neg: torch.Tensor,
+        v_target: torch.Tensor,
+        neg_penalty: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-sample FM-error logits for the InfoNCE softmax.
+
+        Differentiable in every velocity arg, so the caller can ``.detach()``
+        whichever branch it drops from the graph — this is how the grad-cache
+        path splits ∂L/∂v_pos and ∂L/∂v_neg without duplicating the τ/penalty
+        math. Returns ``(logit_pos (B,), logits_neg (B, k))``.
+        """
+        tau = float(self._contrastive_tau)
+        vp = v_pos.float()
+        vt = v_target.float()
+        vn = v_neg.float()
+        B = vp.shape[0]
+        k = vn.shape[1]
+        # Per-sample mean-squared FM error → logit. Reduce over all non-batch
+        # dims so τ has a stable scale across resolutions.
+        pos_err = (vp - vt).pow(2).reshape(B, -1).mean(dim=1)  # (B,)
+        logit_pos = -pos_err / tau  # (B,)
+        vt_exp = vt.unsqueeze(1)  # (B, 1, C, H, W)
+        neg_err = (vn - vt_exp).pow(2).reshape(B, k, -1).mean(dim=2)  # (B, k)
+        logits_neg = -neg_err / tau  # (B, k)
+        if neg_penalty is not None:
+            # jaccard mode: down-weight tag-overlapping negatives.
+            logits_neg = logits_neg - neg_penalty.to(logits_neg.dtype)
+        return logit_pos, logits_neg
+
+    @staticmethod
+    def _infonce_from_logits(
+        logit_pos: torch.Tensor, logits_neg: torch.Tensor
+    ) -> torch.Tensor:
+        # InfoNCE: -log softmax of the positive over {pos, neg_1..k}.
+        all_logits = torch.cat([logit_pos.unsqueeze(1), logits_neg], dim=1)  # (B, 1+k)
+        return (-logit_pos + torch.logsumexp(all_logits, dim=1)).mean()
+
+    @staticmethod
+    def _contrastive_diagnostics(
+        logit_pos: torch.Tensor, logits_neg: torch.Tensor
+    ) -> dict[str, float]:
+        with torch.no_grad():
+            acc = (logit_pos.unsqueeze(1) > logits_neg).all(dim=1).float().mean()
+            gap = (logit_pos - logits_neg.mean(dim=1)).mean()
+        return {
+            "contrastive_acc": float(acc.item()),
+            "contrastive_logit_gap": float(gap.item()),
+        }
+
+    # ── AGSM target-shift objective (docs/proposal/soft_tokens_agsm.md) ──────
+
+    def _ensure_bank_ema(self) -> None:
+        """Lazily clone the EMA shadow off the live bank (device/dtype-matched)."""
+        if self._tokens_ema is None:
+            self._tokens_ema = self.tokens.detach().clone()
+            self._t_offsets_ema = self.t_offsets.weight.detach().clone()
+
+    def update_bank_ema(self) -> None:
+        """``ema ← decay·ema + (1−decay)·live`` for both bank tensors.
+
+        Called once per optimizer step (adapter gates on ``sync_gradients``);
+        no-op unless AGSM is active. The shadow lags the live bank by one step,
+        which keeps Δ off the bank's instantaneous output — the decoupling that
+        makes the target a bounded fixed point.
+        """
+        if self.contrastive_objective != "agsm":
+            return
+        self._ensure_bank_ema()
+        d = float(self._agsm_ema_decay)
+        self._tokens_ema.mul_(d).add_(self.tokens.detach(), alpha=1.0 - d)
+        self._t_offsets_ema.mul_(d).add_(
+            self.t_offsets.weight.detach(), alpha=1.0 - d
+        )
+
+    @staticmethod
+    def agsm_delta(v_pos_ema: torch.Tensor, v_neg_ema: torch.Tensor) -> torch.Tensor:
+        """Guidance direction Δ = v̂⁺_ema − mean_j v̂⁻_ema_j  (detached).
+
+        Read off the EMA shadow's own predictions: the matched-text minus
+        (mean) mismatched-text velocity. Detached so the per-step targets
+        ``v_target ± γ·Δ`` are bounded fixed points, not a moving objective.
+
+        Shapes: v_pos_ema ``(B, C, H, W)``, v_neg_ema ``(B, k, C, H, W)``.
+        """
+        return (v_pos_ema.float() - v_neg_ema.float().mean(dim=1)).detach()
+
+    def agsm_losses(
+        self,
+        v_pos: torch.Tensor,
+        v_neg: torch.Tensor,
+        v_target: torch.Tensor,
+        delta: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Bounded target-shift losses (Ã(t)=1, single bank).
+
+            L⁺ = ‖ v_pos − (v_target + γ·Δ) ‖²        (regress matched toward +Δ)
+            L⁻ = mean_j ‖ v_neg_j − (v_target − γ·Δ) ‖²  (mismatched toward −Δ)
+
+        Both targets are constants (``v_target`` and ``Δ`` detached), so each
+        term has a fixed point — the AGSM fix for InfoNCE's unbounded negative
+        divergence. ``v = ε − x₀`` flow-matching means a shift of the ε-target
+        by δ is exactly a shift of the v-target by δ (the proposal's load-bearing
+        ε→v mapping), so no reparameterization is needed.
+
+        Returns ``(l_pos, l_neg)`` as scalars; the caller sums them. Gradient
+        flows through whichever of ``v_pos`` / ``v_neg`` the caller leaves live.
+
+        Shapes: v_pos, v_target ``(B, C, H, W)``; v_neg ``(B, k, C, H, W)``.
+        """
+        g = float(self._agsm_gamma)
+        vt = v_target.float()
+        d = delta.float()
+        tgt_pos = (vt + g * d).detach()  # (B, C, H, W)
+        tgt_neg = (vt - g * d).detach().unsqueeze(1)  # (B, 1, C, H, W)
+        B = v_pos.shape[0]
+        k = v_neg.shape[1]
+        l_pos = (v_pos.float() - tgt_pos).pow(2).reshape(B, -1).mean(dim=1).mean()
+        l_neg = (
+            (v_neg.float() - tgt_neg).pow(2).reshape(B, k, -1).mean(dim=2).mean()
+        )
+        return l_pos, l_neg
 
 
-class SoftTokensMethodAdapter:
-    """Trainer adapter: paper §3.1 InfoNCE forwards on top of plain FM.
+class SoftTokensMethodAdapter(MethodAdapter):
+    """Runs the contrastive negative forwards for soft tokens.
 
-    For each anchor i, run k extra DiT forwards with the *same* (x_t, ε, t)
-    but with text features rolled by j ∈ {1, …, k} along the batch axis —
-    giving k mismatched (x_i, y_{(i+j) mod B}) pairs. Build the (1+k)-way
-    InfoNCE softmax over the negative diffusion-loss logits (paper eq. 13–14)
-    with a constant temperature τ. The matched FM loss is unchanged — this
-    adds a contrastive *regularizer* to the existing per-sample FM, not a
-    replacement (the paper had FID regress under the contrastive weight on
-    SD3 and Anima's narrower caption distribution likely needs a softer
-    blend).
+    Each negative is one extra DiT forward sharing the anchor's ``(x_t, ε, t)``
+    and spliced tokens, swapping only ``crossattn_emb`` — the ``extra_forwards``
+    contract. Two objectives share the plumbing, selected by the network's
+    ``contrastive_objective``:
 
-    The soft tokens themselves don't depend on text content, so the cached
-    ``_step_layer_tokens`` from the matched forward is reused across negative
-    forwards (the per-block hook re-splices into the *rolled* crossattn).
-    Per-sample seqlens, however, do roll with the text — for FOP splice we
-    refresh ``_step_seqlens`` before each negative forward.
+      - ``infonce`` — SoftREPA InfoNCE over the negatives (k forwards).
+      - ``agsm`` — bounded target-shift ``v_target ± γ·Δ``, Δ off the bank's EMA
+        shadow. Adds EMA value passes (matched + each mismatched) → ~(2k+1)
+        forwards. Same grad-cache split; only the loss math differs.
 
-    No-op when ``network.contrastive_weight <= 0``, in validation, when
-    ``crossattn_emb`` is None (uncached path), or when batch size < 2 (no
-    in-batch negatives possible).
+    Wiring: ``prime_for_forward`` stashes ``batch["neg_crossattn_emb"]`` (train
+    only); ``extra_forwards`` returns the scalar under ``"soft_tokens_contrastive"``
+    (composer applies warmup-gated weight); ``after_backward`` replays the
+    deferred ∂L/∂v_neg + refreshes the AGSM EMA. Negatives absent outside training
+    → forwards skipped, so val FM-MSE stays clean.
     """
 
-    name = "soft_tokens"
+    name = "soft_tokens_contrastive"
 
     def __init__(self) -> None:
-        self._last_contrastive_value: Optional[float] = None
+        self._neg_crossattn: Optional[torch.Tensor] = None
+        self._neg_jaccard: Optional[torch.Tensor] = None
+        self._last_metrics: dict[str, float] = {}
+        # Block-swap grad-cache state: when block swapping is active the
+        # negative backward can't share the anchor's forward/backward cycle, so
+        # it's deferred to ``after_backward``. ``None`` when no replay is queued.
+        self._pending_gradcache: Optional[dict] = None
 
-    def on_network_built(self, ctx) -> None:
-        # Surface the adapter back to the network so its ``metrics()`` can
-        # mirror our last contrastive value (mirroring postfix's pattern).
-        if ctx.network is not None and not hasattr(ctx.network, "_soft_tokens_adapter"):
-            ctx.network._soft_tokens_adapter = self
+    def prime_for_forward(
+        self, ctx: StepCtx, batch, latents: torch.Tensor, *, is_train: bool
+    ) -> None:
+        del ctx, latents
+        if not is_train or not isinstance(batch, dict):
+            self._neg_crossattn = None
+            self._neg_jaccard = None
+            return
+        self._neg_crossattn = batch.get("neg_crossattn_emb")
+        # Per-negative tag-overlap Jaccard (B, k), present only in jaccard mode.
+        self._neg_jaccard = batch.get("neg_jaccard")
 
-    def on_step_start(self, ctx, batch, *, is_train: bool) -> None:
-        pass
-
-    def prime_for_forward(self, ctx, batch, latents, *, is_train: bool) -> None:
-        pass
-
-    def validation_baselines(self):
-        return []
-
-    def on_epoch_end(self, ctx) -> None:
-        pass
-
-    def metrics(self, ctx) -> dict:
-        return {}
-
-    def extra_forwards(self, ctx, primary) -> Optional[dict]:
+    def extra_forwards(self, ctx: StepCtx, primary: ForwardArtifacts) -> Optional[dict]:
         if not primary.is_train:
             return None
-        network = ctx.network
-        weight = float(getattr(network, "contrastive_weight", 0.0) or 0.0)
-        k = int(getattr(network, "contrastive_k", 0) or 0)
-        if weight <= 0.0 or k <= 0:
+        neg = self._neg_crossattn
+        if neg is None:
             return None
-        if primary.crossattn_emb is None:
-            # Uncached text path — the rolled-text trick needs the (B, S, D)
-            # tensor pre-splice. Fail loudly so users notice the gate.
-            raise RuntimeError(
-                "soft_tokens contrastive requires cached crossattn (set "
-                "cache_llm_adapter_outputs=true in the method config)"
-            )
+        net = ctx.accelerator.unwrap_model(ctx.network)
+        if float(getattr(net, "_contrastive_target_weight", 0.0) or 0.0) <= 0.0:
+            return None
+        # Cadence gate: skip the whole contrastive block (no_grad value pass +
+        # after_backward replay) on non-firing steps. The flag is set per step
+        # by ``step_contrastive_warmup`` on the optimizer-step clock.
+        if not getattr(net, "_contrastive_fire_this_step", True):
+            self._pending_gradcache = None
+            return None
 
-        anima = primary.anima_call
-        noisy = primary.noisy_model_input  # 5D
+        device = primary.noisy_model_input.device
+        ce_dtype = primary.crossattn_emb.dtype
+        neg = neg.to(device)  # (B, k, S, D)
+        k = neg.shape[1]
+
+        v_pos = primary.model_pred.squeeze(2)  # (B, C, H, W) — live anchor graph
+        # Rectified-flow velocity target — same as train.py's primary target.
+        v_target = primary.noise - primary.latents  # (B, C, H, W)
         timesteps = primary.timesteps
-        target = primary.noise - primary.latents  # [B, C, H, W]
-        padding_mask = primary.padding_mask
-        kw = primary.forward_kwargs
+        base_kw = dict(primary.forward_kwargs)
+        neg_penalty = self._neg_penalty(net, device)
 
-        # The block hook inside Block.forward consumes whatever the most
-        # recent ``append_postfix`` call cached on the network. The hook
-        # re-runs in this scope when we call anima(...) with rolled text, so
-        # the same per-(layer, t) tokens splice into the rolled crossattn —
-        # exactly the paper's "shared (x_t, t, ε), varying y" setup. The
-        # primary forward already wrote crossattn_emb that has the spliced
-        # tokens at the splice position; we need the PRE-splice tensor to
-        # roll. Recover it by undoing the splice on the cached tokens, then
-        # roll, then let the block hook re-splice.
-        spliced = primary.crossattn_emb  # post-splice from primary call
-        B = spliced.shape[0]
-        if B < 2:
-            return None  # batchsize 1: no in-batch negatives
+        # Snapshot the anchor's splice state; the negative value passes mutate the
+        # per-step buffers, so restore afterwards. (The anchor's autograd graph
+        # holds tensor references, so these attribute writes don't affect it.)
+        anchor_tokens = net._step_layer_tokens
+        anchor_seqlens = net._step_seqlens
 
-        K = network.num_tokens
-        S = spliced.shape[1]
-        # Reverse the EOS splice so we have the original (zero-padded) text;
-        # for FOP we just trust the original cached path holds (the splice
-        # writes K tokens at variable per-sample offsets, scatter is not
-        # trivially invertible — gate FOP+contrastive off for now).
-        if network.splice_position != "end_of_sequence":
-            raise RuntimeError(
-                "soft_tokens contrastive currently requires "
-                "splice_position='end_of_sequence' (FOP scatter is not "
-                "trivially invertible). Switch the config or set "
-                "contrastive_weight=0."
-            )
-        # The K tail slots were originally zero-padding; restore that for
-        # rolling so the rolled negative isn't contaminated by the matched
-        # anchor's spliced tokens.
-        zero_tail = torch.zeros(
-            B, K, spliced.shape[2], dtype=spliced.dtype, device=spliced.device
-        )
-        original_text = torch.cat([spliced[:, : S - K, :], zero_tail], dim=1)
+        dit = ctx.accelerator.unwrap_model(primary.anima_call)
 
-        # Per-sample MSE for matched (already computed by the trainer): same
-        # functional form as paper eq. 13's logit numerator. We recompute on
-        # the primary model_pred to avoid re-running the matched forward.
-        # primary.model_pred is 5D; squeeze to 4D for per-sample MSE.
-        v_match = primary.model_pred.squeeze(2)  # [B, C, H, W]
-        per_sample_mse_list = [((v_match - target) ** 2).mean(dim=(1, 2, 3))]
+        # ── Gradient caching, split so the negative DiT forward NEVER overlaps the
+        # anchor backward. Naive checkpoint-and-recompute OOMs (recompute fires
+        # during ``accelerator.backward`` with the anchor graph still live → two
+        # forwards resident) and crashes under block swap (recompute re-enters
+        # ``_run_blocks`` against the offloader's end-of-forward layout). Instead
+        # split ∂L_con/∂θ into two partials, each its own clean forward/backward:
+        #   • ∂L/∂v_pos — rides the anchor's FM backward: the returned loss uses
+        #     ``logit_pos`` (live graph) + *detached* negative logits.
+        #   • ∂L/∂v_neg — deferred to ``after_backward`` (anchor freed, offloader
+        #     head-resident). Negatives forwarded once here under no_grad for their
+        #     values + cached ``g_neg``, then replayed there.
+        # ``prepare_block_swap_before_forward`` is a no-op at blocks_to_swap=0, so
+        # one path serves swap and no-swap (no-swap still peaks at one graph).
 
-        # k extra forwards with rolled text. Cyclic shifts ensure each anchor
-        # sees k distinct negatives (provided B > k). When B <= k we run only
-        # B-1 shifts (still informative).
-        k_eff = min(k, B - 1)
-        for j in range(1, k_eff + 1):
-            rolled_text = torch.roll(original_text, shifts=j, dims=0)
-            # Re-call append_postfix to refresh cached state (timesteps and
-            # — for FOP — seqlens). The cached tokens are the same since
-            # timesteps haven't changed, but this is the contract.
-            seqlens_kwarg = (
-                kw.get("crossattn_seqlens") if isinstance(kw, dict) else None
-            )
-            if seqlens_kwarg is None:
-                seqlens_kwarg = torch.full(
-                    (B,), S - K, dtype=torch.int32, device=rolled_text.device
+        agsm = getattr(net, "contrastive_objective", "infonce") == "agsm"
+
+        # Negative velocity values under no_grad (no graph retained). Each forward
+        # is bracketed by a block-swap reset (no-op when not swapping) so the
+        # offloader stays in the anchor's end-of-forward state. AGSM also forwards
+        # the EMA shadow bank (matched + each mismatched) for the detached Δ.
+        v_neg_vals = []
+        v_pos_ema = None
+        v_neg_ema_vals = []
+        with torch.no_grad():
+            if agsm:
+                dit.prepare_block_swap_before_forward(free_cache=False)
+                v_pos_ema = self._bank_forward(
+                    net, primary.anima_call,
+                    primary.noisy_model_input, primary.padding_mask,
+                    base_kw, timesteps, ce_dtype, primary.crossattn_emb,
+                    use_ema=True,
                 )
-            rolled_seqlens = torch.roll(seqlens_kwarg, shifts=j, dims=0)
-            network.append_postfix(rolled_text, rolled_seqlens, timesteps=timesteps)
-            v_neg = anima(
-                noisy,
-                timesteps,
-                rolled_text,
-                padding_mask=padding_mask,
-                **kw,
-            ).squeeze(2)  # [B, C, H, W]
-            per_sample_mse_list.append(((v_neg - target) ** 2).mean(dim=(1, 2, 3)))
+            for j in range(k):
+                dit.prepare_block_swap_before_forward(free_cache=False)
+                v_neg_vals.append(
+                    self._bank_forward(
+                        net, primary.anima_call,
+                        primary.noisy_model_input, primary.padding_mask,
+                        base_kw, timesteps, ce_dtype, neg[:, j],
+                    )
+                )
+                if agsm:
+                    dit.prepare_block_swap_before_forward(free_cache=False)
+                    v_neg_ema_vals.append(
+                        self._bank_forward(
+                            net, primary.anima_call,
+                            primary.noisy_model_input, primary.padding_mask,
+                            base_kw, timesteps, ce_dtype, neg[:, j],
+                            use_ema=True,
+                        )
+                    )
+        net._step_layer_tokens = anchor_tokens
+        net._step_seqlens = anchor_seqlens
+        v_neg = torch.stack(v_neg_vals, dim=1)  # (B, k, C, H, W), detached values
 
-        # Restore the primary's cached state so any downstream code that
-        # peeks at network._step_layer_tokens / _step_seqlens sees the
-        # matched-anchor view (the loss-side reads target=ε−x and won't
-        # trigger another splice, but be defensive).
-        primary_seqlens = (
-            kw.get("crossattn_seqlens") if isinstance(kw, dict) else None
+        live = float(getattr(net, "_contrastive_weight", 0.0) or 0.0)
+
+        if agsm:
+            # Δ from the EMA shadow's own preds (detached). L⁺ rides the anchor's
+            # FM backward (grad via live v_pos); L⁻'s grad is deferred.
+            delta = net.agsm_delta(v_pos_ema, torch.stack(v_neg_ema_vals, dim=1))
+            l_pos, l_neg_val = net.agsm_losses(v_pos, v_neg, v_target, delta)
+            loss = l_pos + l_neg_val
+            self._record_agsm_metrics(net, loss, l_pos, l_neg_val, delta)
+            if live > 0.0:
+                v_neg_leaf = v_neg.detach().requires_grad_(True)
+                _, l_neg_leaf = net.agsm_losses(
+                    v_pos.detach(), v_neg_leaf, v_target, delta
+                )
+                (g_neg,) = torch.autograd.grad(l_neg_leaf, v_neg_leaf)
+                self._pending_gradcache = self._build_gradcache(
+                    net, dit, primary, base_kw, timesteps, neg, ce_dtype,
+                    g_neg.detach(), live, anchor_tokens, anchor_seqlens,
+                )
+            else:
+                self._pending_gradcache = None
+            return {"soft_tokens_contrastive": loss}
+
+        # Composer-side loss: grad only via v_pos (negatives are constants).
+        logit_pos, logits_neg = net._velocities_to_logits(
+            v_pos, v_neg, v_target, neg_penalty
         )
-        if primary_seqlens is None:
-            primary_seqlens = torch.full(
-                (B,), S - K, dtype=torch.int32, device=spliced.device
+        loss = net._infonce_from_logits(logit_pos, logits_neg)
+        diag = net._contrastive_diagnostics(logit_pos.detach(), logits_neg.detach())
+        self._record_metrics(net, loss, diag)
+
+        if live > 0.0:
+            # Cache ∂L/∂v_neg with v_pos held constant (no DiT forward — tiny head).
+            v_neg_leaf = v_neg.detach().requires_grad_(True)
+            lp_d, ln_leaf = net._velocities_to_logits(
+                v_pos.detach(), v_neg_leaf, v_target, neg_penalty
             )
-        network.append_postfix(original_text, primary_seqlens, timesteps=timesteps)
+            g_loss = net._infonce_from_logits(lp_d, ln_leaf)
+            (g_neg,) = torch.autograd.grad(g_loss, v_neg_leaf)
+            self._pending_gradcache = self._build_gradcache(
+                net, dit, primary, base_kw, timesteps, neg, ce_dtype,
+                g_neg.detach(), live, anchor_tokens, anchor_seqlens,
+            )
+        else:
+            self._pending_gradcache = None
+        return {"soft_tokens_contrastive": loss}
 
-        # InfoNCE: -log( exp(-mse_match/τ) / Σ_j exp(-mse_j/τ) )
-        # Equivalent to log_softmax over (1+k_eff) candidates at index 0.
-        mse_stack = torch.stack(per_sample_mse_list, dim=0)  # [(1+k_eff), B]
-        logits = -mse_stack / max(network.contrastive_tau, 1e-6)
-        log_probs = torch.nn.functional.log_softmax(logits, dim=0)
-        contrastive_per_sample = -log_probs[0]  # [B]
-        contrastive_loss = contrastive_per_sample.mean()
+    @staticmethod
+    def _build_gradcache(
+        net, dit, primary, base_kw, timesteps, neg, ce_dtype,
+        g_neg, weight, anchor_tokens, anchor_seqlens,
+    ) -> dict:
+        """Pack the deferred ∂L/∂v_neg replay state. Objective-agnostic — the
+        replay in ``after_backward`` just pushes the cached ``g_neg`` back through
+        each negative's (live-bank) forward, so InfoNCE and AGSM share it."""
+        return {
+            "net": net,
+            "dit": dit,
+            "anima_call": primary.anima_call,
+            "noisy_model_input": primary.noisy_model_input,
+            "padding_mask": primary.padding_mask,
+            "timesteps": timesteps,
+            "base_kw": base_kw,
+            "neg": neg,
+            "ce_dtype": ce_dtype,
+            "g_neg": g_neg,
+            "weight": weight,
+            "anchor_tokens": anchor_tokens,
+            "anchor_seqlens": anchor_seqlens,
+        }
 
-        # Cache scalar value for metrics().
-        network._last_contrastive_value = float(contrastive_loss.detach().item())
-        self._last_contrastive_value = network._last_contrastive_value
+    def after_backward(self, ctx: StepCtx) -> None:
+        """Replay the cached contrastive negatives after the FM backward.
 
-        return {"soft_tokens": {"contrastive_loss": contrastive_loss}}
+        The anchor graph is freed (and under swap the offloader head-resident),
+        so each negative re-forward + backward peaks at a single graph. The cached
+        ``weight·g_neg`` accumulates onto the FM grads on the same params (no
+        ``zero_grad`` between here and the optimizer step). Single-process only —
+        a manual backward inside ``accelerator.accumulate`` would need DDP no-sync
+        handling under multi-GPU.
+
+        Also refreshes the AGSM bank-EMA shadow once per optimizer step (gated on
+        ``sync_gradients``), regardless of the cadence gate — the bank moves under
+        FM every step, so its slow shadow must track it.
+        """
+        net_for_ema = ctx.accelerator.unwrap_model(ctx.network)
+        if (
+            getattr(net_for_ema, "contrastive_objective", "infonce") == "agsm"
+            and getattr(ctx.accelerator, "sync_gradients", True)
+        ):
+            net_for_ema.update_bank_ema()
+
+        pend = self._pending_gradcache
+        if pend is None:
+            return
+        self._pending_gradcache = None
+
+        net = pend["net"]
+        dit = pend["dit"]
+        accel = ctx.accelerator
+        # Match accelerate's 1/N loss scaling so contrastive grads land on the
+        # same scale as the FM grads it accumulates alongside.
+        accum = max(1, int(getattr(accel, "gradient_accumulation_steps", 1) or 1))
+        scale = pend["weight"] / accum
+        neg = pend["neg"]
+        k = neg.shape[1]
+        ts = pend["timesteps"]
+        ce_dtype = pend["ce_dtype"]
+        g_neg = pend["g_neg"]
+
+        with accel.autocast(), torch.enable_grad():
+            for j in range(k):
+                dit.prepare_block_swap_before_forward(free_cache=False)
+                v_neg_j = self._bank_forward(
+                    net, pend["anima_call"],
+                    pend["noisy_model_input"], pend["padding_mask"],
+                    pend["base_kw"], ts, ce_dtype, neg[:, j],
+                )
+                grad_j = (scale * g_neg[:, j]).to(v_neg_j.dtype)
+                torch.autograd.backward(v_neg_j, grad_tensors=grad_j)
+        net._step_layer_tokens = pend["anchor_tokens"]
+        net._step_seqlens = pend["anchor_seqlens"]
+
+    @staticmethod
+    def _bank_forward(
+        net, anima_call, noisy_model_input, padding_mask,
+        base_kw, timesteps, ce_dtype, text_emb, use_ema: bool = False,
+    ) -> torch.Tensor:
+        """One DiT forward conditioned on ``text_emb`` → velocity (B, C, H, W).
+
+        Re-primes the per-block soft-token splice for this text and runs the
+        frozen DiT with the anchor's (x_t, ε, t). ``use_ema=True`` splices the
+        EMA shadow bank instead of the live params (AGSM Δ value passes — no
+        grad). Returns the squeezed 4D velocity.
+        """
+        text_emb = text_emb.to(dtype=ce_dtype)
+        # front_of_padding needs per-sample seqlens (non-zero rows of the
+        # zero-padded crossattn_emb); end_of_sequence ignores them, so skip the
+        # abs-sum reduction there.
+        if net.splice_position == "front_of_padding":
+            seqlens = (text_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
+        else:
+            seqlens = None
+        net._set_step_tokens(timesteps, seqlens, use_ema=use_ema)
+        kw_j = dict(base_kw)
+        if "pooled_text_override" in kw_j:
+            kw_j["pooled_text_override"] = text_emb.max(dim=1).values
+        return anima_call(
+            noisy_model_input, timesteps, text_emb, padding_mask=padding_mask, **kw_j
+        ).squeeze(2)
+
+    def _neg_penalty(self, net, device) -> Optional[torch.Tensor]:
+        """jaccard mode: α·s subtracted from each negative logit (s = caption
+        tag-overlap surfaced by the dataset). ``None`` for shuffled / hard."""
+        if (
+            getattr(net, "contrastive_negative_mode", "shuffled") == "jaccard"
+            and self._neg_jaccard is not None
+        ):
+            alpha = float(getattr(net, "contrastive_jaccard_alpha", 1.0) or 0.0)
+            return alpha * self._neg_jaccard.to(device).float()
+        return None
+
+    def _record_metrics(self, net, loss, diag) -> None:
+        live = float(getattr(net, "_contrastive_weight", 0.0) or 0.0)
+        loss_val = float(loss.detach().item())
+        self._last_metrics = {
+            "reg/soft_tokens_contrastive": loss_val,
+            "reg/soft_tokens_contrastive_weighted": live * loss_val,
+            "reg/soft_tokens_contrastive_lambda_live": live,
+            "soft_tokens/contrastive_acc": diag["contrastive_acc"],
+            "soft_tokens/contrastive_logit_gap": diag["contrastive_logit_gap"],
+        }
+
+    def _record_agsm_metrics(self, net, loss, l_pos, l_neg, delta) -> None:
+        """AGSM term diagnostics. ``agsm_delta_norm`` is the mean per-sample L2
+        of the guidance direction — near 0 ⇒ matched/mismatched preds collapsed
+        (no alignment signal to shift toward); growing ⇒ the EMA bank does
+        distinguish the two. ``agsm_l_pos`` / ``agsm_l_neg`` should both sit at a
+        bounded steady state (the AGSM fix) rather than ``l_neg`` diverging."""
+        live = float(getattr(net, "_contrastive_weight", 0.0) or 0.0)
+        loss_val = float(loss.detach().item())
+        with torch.no_grad():
+            d_norm = float(delta.float().flatten(1).norm(dim=-1).mean().item())
+        self._last_metrics = {
+            "reg/soft_tokens_contrastive": loss_val,
+            "reg/soft_tokens_contrastive_weighted": live * loss_val,
+            "reg/soft_tokens_contrastive_lambda_live": live,
+            "soft_tokens/agsm_l_pos": float(l_pos.detach().item()),
+            "soft_tokens/agsm_l_neg": float(l_neg.detach().item()),
+            "soft_tokens/agsm_delta_norm": d_norm,
+        }
+
+    def metrics(self, ctx) -> dict:
+        del ctx
+        return dict(self._last_metrics)

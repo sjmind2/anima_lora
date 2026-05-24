@@ -1,0 +1,5 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>LOKR</h2>
+<p>저랭크 크로네커 곱 적응.</p>
+<p><b>공식</b>: ΔW = kron(W1, W2) &times; scale</p>
+<p>가중치 차원을 더 작은 인수 쌍으로 분해한 후 크로네커 곱을 사용하여 전체 랭크 구조를 재구성합니다. <code>network_dim</code>과 차원 크기에 따라 전체 행렬과 저랭크 분해 사이에서 자동으로 적응합니다.</p>
+<p><b>주요 옵션</b>: <code>decompose_both=true</code> (W1과 W2 모두 분해), <code>lokr_factor=-1</code> (자동 인수분해).</p>

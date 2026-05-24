@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 from PIL import Image
-from preprocess.resize_images import process_image
+from library.preprocess.images import process_image
 
 
 def _make_image(path, w=64, h=64):

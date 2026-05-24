@@ -16,96 +16,6 @@ from library.runtime import offloading as custom_offloading_utils
 from library.runtime.device import weighs_to_device
 from networks import attention_dispatch
 
-# KV length buckets for cross-attention trimming. Captions trimmed to the smallest
-# bucket >= max(real_token_lengths). Keeps torch.compile shapes stable (max 4 variants).
-_KV_BUCKETS = (128, 192, 256, 512)
-
-
-class _FP8LinearFunc(torch.autograd.Function):
-    """Custom autograd for fp8 linear: saves compact fp8 weight instead of transient bf16 copy."""
-
-    @staticmethod
-    def forward(
-        input: torch.Tensor, weight_fp8: torch.Tensor, bias: Optional[torch.Tensor]
-    ):
-        return F.linear(input, weight_fp8.to(input.dtype), bias)
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        _, weight_fp8, _ = inputs
-        ctx.save_for_backward(weight_fp8)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        (weight_fp8,) = ctx.saved_tensors
-        grad_input = grad_output @ weight_fp8.to(grad_output.dtype)
-        return grad_input, None, None
-
-
-class FP8Linear(nn.Linear):
-    """Drop-in nn.Linear replacement that stores weights in float8_e4m3fn.
-
-    Subclasses nn.Linear so that LoRA's isinstance checks still match.
-    Uses a custom autograd function so that only the compact fp8 weight
-    (not a transient bf16 copy) is saved for backward.
-    """
-
-    def __init__(self, original: nn.Linear):
-        nn.Module.__init__(self)
-        self.in_features = original.in_features
-        self.out_features = original.out_features
-        self.weight = nn.Parameter(
-            original.weight.data.to(torch.float8_e4m3fn),
-            requires_grad=False,
-        )
-        self.bias = original.bias
-
-    def _apply(self, fn, recurse=True):
-        result = super()._apply(fn, recurse)
-        if self.weight.dtype != torch.float8_e4m3fn:
-            self.weight = nn.Parameter(
-                self.weight.data.to(torch.float8_e4m3fn),
-                requires_grad=False,
-            )
-        return result
-
-    def forward(self, input):
-        return _FP8LinearFunc.apply(input, self.weight, self.bias)
-
-
-# Class names whose children should NOT be quantized to fp8.
-_FP8_SKIP_CLASS_NAMES = {"RMSNorm", "TimestepEmbedding", "FinalLayer", "LLMAdapter"}
-
-
-def quantize_to_fp8(model: nn.Module) -> int:
-    """Replace frozen nn.Linear modules with FP8Linear, skipping sensitive layers.
-
-    Skips: RMSNorm, TimestepEmbedding, FinalLayer, LLMAdapter,
-    and any module with requires_grad=True parameters.
-
-    Returns the number of modules replaced.
-    """
-    skip_modules: set[int] = set()
-    for mod in model.modules():
-        if type(mod).__name__ in _FP8_SKIP_CLASS_NAMES:
-            skip_modules.add(id(mod))
-            for child in mod.modules():
-                skip_modules.add(id(child))
-
-    count = 0
-    for parent in model.modules():
-        if id(parent) in skip_modules:
-            continue
-        for name, child in parent.named_children():
-            if not isinstance(child, nn.Linear):
-                continue
-            if id(child) in skip_modules:
-                continue
-            setattr(parent, name, FP8Linear(child))
-            count += 1
-
-    return count
-
 
 def to_device(x, device):
     if isinstance(x, torch.Tensor):
@@ -219,19 +129,19 @@ def unsloth_checkpoint(function, *args):
 
 
 @torch.compiler.disable(recursive=True)
-def _unpad_static_shape(x, pad_info):
-    """Strip the static-shape padding back to (B, T, H, W, D).
+def _unflatten_native_shape(x, flatten_info):
+    """Restore the fake-5D flattened sequence back to (B, T, H, W, D).
 
-    Disabled from dynamo tracing on purpose: pad_info is a 4-tuple of Python
-    ints (T_s, H_s, W_s, seq_len) computed from the input's pre-pad shape, so
+    Disabled from dynamo tracing on purpose: flatten_info is a 4-tuple of Python
+    ints (T_s, H_s, W_s, seq_len) computed from the input's pre-flatten shape, so
     if this ran inside the compiled frame each bucket would specialize
-    ``pad_info[1] == H_s`` (per-value guard) and narrow the symbolic range
-    on ``pad_info[3]`` (per-bucket seq_len guard). Running it eagerly keeps
+    ``flatten_info[1] == H_s`` (per-value guard) and narrow the symbolic range
+    on ``flatten_info[3]`` (per-bucket seq_len guard). Running it eagerly keeps
     the returned tensor's shape as the only signal crossing back into the
     compile zone — downstream ops (final_layer, unpatchify) then pick up
     symbolic T/H/W from the tensor itself, not from Python ints.
     """
-    T_s, H_s, W_s, seq_len = pad_info
+    T_s, H_s, W_s, seq_len = flatten_info
     x = x.squeeze(3).squeeze(1)
     x = x[:, :seq_len, :]
     x = x.unflatten(1, (T_s, H_s, W_s))
@@ -282,17 +192,22 @@ def apply_rotary_pos_emb_qk(
 
     cos_q = cos_.to(q.dtype)
     sin_q = sin_.to(q.dtype)
-    q_rot, q_pass = q[..., :rot_dim], q[..., rot_dim:]
-    q = torch.cat(
-        ((q_rot * cos_q) + (_rotate_half(q_rot, False) * sin_q), q_pass), dim=-1
-    )
+    # For Anima, dim_t+dim_h+dim_w sum to head_dim by construction (see the
+    # assert in VideoRopePosition3DEmb.__init__), so rot_dim == head_dim and the
+    # pass-through slice is empty. Skip the torch.cat in that case — it would
+    # otherwise allocate+copy a full (B,L,H,D) tensor per Q/K per block for
+    # nothing. `rot_dim == q.shape[-1]` is a compile-time constant (head_dim
+    # never varies across buckets), so the branch resolves once under
+    # torch.compile and never recompiles per bucket.
+    q_rot = q[..., :rot_dim]
+    q_emb = (q_rot * cos_q) + (_rotate_half(q_rot, False) * sin_q)
+    q = q_emb if rot_dim == q.shape[-1] else torch.cat((q_emb, q[..., rot_dim:]), dim=-1)
 
     cos_k = cos_q if k.dtype == q.dtype else cos_.to(k.dtype)
     sin_k = sin_q if k.dtype == q.dtype else sin_.to(k.dtype)
-    k_rot, k_pass = k[..., :rot_dim], k[..., rot_dim:]
-    k = torch.cat(
-        ((k_rot * cos_k) + (_rotate_half(k_rot, False) * sin_k), k_pass), dim=-1
-    )
+    k_rot = k[..., :rot_dim]
+    k_emb = (k_rot * cos_k) + (_rotate_half(k_rot, False) * sin_k)
+    k = k_emb if rot_dim == k.shape[-1] else torch.cat((k_emb, k[..., rot_dim:]), dim=-1)
 
     return q, k
 
@@ -586,8 +501,8 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
 
         # Skip Python dict cache inside compiled code — dict mutations cause dynamo
         # guard failures and recompilation.  The RoPE computation is pure tensor math
-        # that dynamo traces cleanly; with static_token_count the shapes are constant
-        # so there is no recompilation from shape guards.
+        # that dynamo traces cleanly; under native flatten the block graph keys on
+        # token count so there is no recompilation from shape guards.
         _compiling = torch.compiler.is_compiling()
 
         if not _compiling:
@@ -763,7 +678,7 @@ class Timesteps(nn.Module):
         exponent = exponent / (half_dim - 0.0)
 
         emb = torch.exp(exponent)
-        emb = timesteps[:, None].float() * emb[None, :]
+        emb = timesteps[:, None] * emb[None, :]
 
         sin_emb = torch.sin(emb)
         cos_emb = torch.cos(emb)
@@ -1279,7 +1194,6 @@ class Anima(nn.Module):
         rope_enable_fps_modulation: bool = False,
         use_llm_adapter: bool = True,
         attn_mode: str = "torch",
-        split_attn: bool = False,
         attn_softmax_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
@@ -1304,7 +1218,6 @@ class Anima(nn.Module):
         self.use_llm_adapter = use_llm_adapter
 
         self.attn_mode = attn_mode
-        self.split_attn = split_attn
         self.attn_softmax_scale = attn_softmax_scale
 
         # Block swap support
@@ -1313,10 +1226,13 @@ class Anima(nn.Module):
         # Stashed blocks_to_swap while paused (e.g. during eval). None = not paused.
         self._paused_blocks_to_swap: Optional[int] = None
 
-        # Static-shape training: pad all token sequences to this count to eliminate
-        # torch.compile recompilation across different bucket resolutions.
-        # Set via set_static_token_count(). None = disabled (original behavior).
-        self.static_token_count: Optional[int] = None
+        # Native-shape flattening for torch.compile. Flipped True by
+        # compile_blocks(): the forward flattens each bucket's patch sequence to
+        # a fake-5D (B, 1, seq_len, 1, D) shape so dynamo keys the block graph on
+        # token count alone (2 families) instead of guarding H and W separately
+        # (one graph per resolution). Eager forwards leave it False and skip the
+        # reshape — bit-exact to the flattened path, slightly cheaper.
+        self._native_flatten: bool = False
 
         self.build_patch_embed()
         self.build_pos_embed()
@@ -1371,6 +1287,15 @@ class Anima(nn.Module):
             nn.Linear(model_channels, model_channels),
         )
 
+        # Whether the per-forward pooled_text_proj path runs. Default off: the
+        # base DiT checkpoint never carries these weights (re-zeroed on load), so
+        # the proj is a no-op and the max-reduce + 2 linears are pure per-step
+        # overhead. Flipped True only where the module becomes active —
+        # ``load_pooled_text_proj`` (inference / DCW) and distill-mod training.
+        # A plain Python bool set once at load: it guards once under compile (like
+        # ``_native_flatten``) and never toggles per-forward, so no recompile churn.
+        self.enable_pooled_text_modulation = False
+
         # Modulation guidance runtime state as non-persistent buffers (zeros = off).
         # Registered unconditionally so the forward can do unconditional arithmetic
         # (``t_emb + schedule[l] * delta``) without a Python-level None/zero branch —
@@ -1424,58 +1349,66 @@ class Anima(nn.Module):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-    def set_static_token_count(self, count: Optional[int]):
-        """Enable static-shape training by padding all token sequences to `count`.
-
-        All bucket resolutions must produce <= `count` spatial tokens after
-        patchification.  Passing None disables static-shape mode.
-        """
-        self.static_token_count = count
-
     def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None):
-        """torch.compile each block's _forward individually.
+        """Enable native-shape flattening and torch.compile each block's _forward.
 
-        Compiles _forward (the actual attention/MLP computation) rather than
-        forward (the checkpointing wrapper).  This is critical because
-        unsloth_checkpoint has @torch._disable_dynamo, which causes an
-        immediate graph break if forward itself is compiled — dynamo compiles
-        nothing useful but still checks shape guards, causing recompile storms.
+        Two coupled effects, both owned by this one call:
+
+        1. Sets ``self._native_flatten = True`` so the forward flattens every
+           bucket's patch sequence to a fake-5D ``(B, 1, seq_len, 1, D)`` shape.
+           This is what keys the block graph on token count alone — the shipped
+           ``CONSTANT_TOKEN_BUCKETS`` collapses to 2 token-count families (the
+           4032 and 4200 groups) — instead of guarding H and W separately (one
+           graph per resolution, ~24 buckets). Native shapes, no padding, so
+           flash self-attention sees no padded tokens (bit-exact to the eager
+           5D path; the gap=0 control of the retired pad-leak probe verified it).
+
+        2. Compiles ``_forward`` (the actual attention/MLP computation) rather
+           than ``forward`` (the checkpointing wrapper). This is critical because
+           unsloth_checkpoint has @torch._disable_dynamo, which causes an
+           immediate graph break if forward itself is compiled — dynamo compiles
+           nothing useful but still checks shape guards, causing recompile storms.
+
+        Also raises the dynamo cache-size budget to fit those token-count
+        families. ``2 * n + 8``: the ``2 *`` covers fwd+bwd sharing the one
+        ``_forward`` bytecode, the ``+ 8`` covers requires_grad / stride
+        specializations (the live path traces ~5 graphs, not 2). ``max()`` is
+        load-bearing — a caller that knows it has *more* distinct shapes (e.g.
+        the multi-resolution SPD distill) raises the limit higher beforehand and
+        this must not clobber it back down. This call's own budget only ever
+        covers the two full-res families.
 
         ``mode`` maps to torch.compile's inductor preset (e.g. ``reduce-overhead``
         to enable per-block CUDAGraphs). ``None`` leaves it unset (inductor default).
         """
+        self._native_flatten = True
+
+        # Local import: library.datasets.buckets does not import models, so
+        # importing it here (rather than at module top) avoids a circular import.
+        import torch._dynamo as _dynamo
+
+        from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
+
+        n = len(
+            {
+                (h // self.patch_spatial) * (w // self.patch_spatial)
+                for h, w in CONSTANT_TOKEN_BUCKETS
+            }
+        )
+        _dynamo.config.cache_size_limit = max(
+            _dynamo.config.cache_size_limit, 2 * n + 8
+        )
+
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
             compile_kwargs["mode"] = mode
-        for i, block in enumerate(self.blocks):
+        for block in self.blocks:
             block._forward = torch.compile(block._forward, **compile_kwargs)
         print(
-            f"Anima: compiled {len(self.blocks)} block._forward with "
-            f"backend={backend}, mode={mode}"
+            f"Anima: native_flatten on, {n} token-count families "
+            f"(cache_size_limit={_dynamo.config.cache_size_limit}); compiled "
+            f"{len(self.blocks)} block._forward with backend={backend}, mode={mode}"
         )
-
-    def compile_core(self, backend: str = "inductor", mode: Optional[str] = None):
-        """torch.compile the constant-shape block stack (``_run_blocks``).
-
-        Works with ``set_static_token_count``: the pre-blocks eager region
-        (patch/embed/static-pad/RoPE-pad/t_embedder/BlockMask construction)
-        hands off a shape-invariant bundle, so ``_run_blocks`` traces once
-        and a single CUDAGraph serves every bucket in CONSTANT_TOKEN_BUCKETS.
-        Post-blocks (unpad/final_layer/unpatchify) stay eager.
-
-        Requires ``static_token_count`` to be set, ``gradient_checkpointing``
-        off, and ``blocks_to_swap`` unset — the caller asserts these.
-        ``dynamic=False`` is safe because every input to ``_run_blocks`` is
-        shape-pinned by the pre-blocks eager region.
-        """
-        assert self.static_token_count is not None, (
-            "compile_core requires set_static_token_count() to be called first"
-        )
-        compile_kwargs = {"backend": backend, "dynamic": False}
-        if mode is not None:
-            compile_kwargs["mode"] = mode
-        self._run_blocks = torch.compile(self._run_blocks, **compile_kwargs)
-        print(f"Anima: compiled _run_blocks with backend={backend}, mode={mode}")
 
     @property
     def device(self):
@@ -1652,15 +1585,15 @@ class Anima(nn.Module):
         attn_params,
         **block_kwargs,
     ) -> torch.Tensor:
-        """Constant-shape block stack — the compile target for compile_core.
+        """The block loop — the per-block compiled hot path (see compile_blocks).
 
-        Every input is shape-pinned by the eager pre-blocks region:
-        - ``x_padded``: ``(B, 1, static_token_count, 1, D)`` via flatten+pad
+        Inputs from the eager pre-blocks region:
+        - ``x_padded``: ``(B, 1, seq_len, 1, D)`` when native-flattened, else the
+          plain ``(B, T, H, W, D)`` grid (eager forwards skip the flatten)
         - ``t_embedding_B_T_D``: ``(B, 1, D)``
         - ``crossattn_emb``: ``(B, max_text_len, D)`` (padded to max_length)
-        - ``attn_params``: BlockMasks built with tensor-valued seq lens so
-          no per-bucket guards fire on the mask_mod closure
-        - ``block_kwargs["rope_cos_sin"]``: each ``(static_token_count, 1, 1, D_head)``
+        - ``attn_params``: attention params (no self-attn mask in native mode)
+        - ``block_kwargs["rope_cos_sin"]``: each ``(seq_len, 1, 1, D_head)``
         - ``block_kwargs["adaln_lora_B_T_3D"]``: ``(B, 1, 3, D)``
 
         Mod-guidance is applied via buffers on ``self`` (zero = off) so the
@@ -1705,7 +1638,6 @@ class Anima(nn.Module):
         t5_input_ids: Optional[torch.Tensor] = None,
         t5_attn_mask: Optional[torch.Tensor] = None,
         crossattn_seqlens: Optional[torch.Tensor] = None,
-        max_crossattn_seqlen: Optional[int] = None,
         h_offset: int = 0,
         w_offset: int = 0,
         pooled_text_override: Optional[torch.Tensor] = None,
@@ -1749,35 +1681,35 @@ class Anima(nn.Module):
             w_offset=w_offset,
         )
 
-        # --- Static-shape padding: flatten, pad to fixed token count, reshape to fake-5D ---
-        # This makes ALL block inputs shape-identical across buckets, eliminating
-        # torch.compile recompilation.  The fake-5D shape (B, 1, target, 1, D) is
+        # --- Native-shape flattening: flatten 5D → fake-5D so the block graph
+        # keys on token count, not on H/W separately ---
+        # Enabled by compile_blocks(). The fake-5D shape (B, 1, seq_len, 1, D) is
         # compatible with existing Block code because rearrange("b t h w d -> b (t h w) d")
-        # with t=1, w=1 produces the same flat sequential order as the original.
-        _static_pad_info = None
-        if self.static_token_count is not None:
-            target = self.static_token_count
+        # with t=1, w=1 produces the same flat sequential order as the original,
+        # so the block stack sees a flat (B,1,L,1,D) sequence keyed solely by
+        # token count. Otherwise dynamo guards on H and W separately and recompiles
+        # per *resolution* (24 buckets) instead of per token-count (2 families).
+        # No padding → native flash, bit-exact to the eager 5D path (the gap=0
+        # control of the retired pad-leak probe verified it). Eager forwards leave
+        # _native_flatten False and skip the reshape entirely.
+        _native_flatten_info = None
+        if self._native_flatten:
             B_s, T_s, H_s, W_s, D_s = x_B_T_H_W_D.shape
             seq_len = T_s * H_s * W_s
-            _static_pad_info = (T_s, H_s, W_s, seq_len)
+            _native_flatten_info = (T_s, H_s, W_s, seq_len)
 
-            # Flatten 5D → 2D and pad sequence to target length.
-            # Always pad (even when seq_len == target) to avoid a data-dependent
-            # branch that causes torch.compile recompilation across bucket shapes.
+            # Flatten 5D → 2D, then reshape to fake-5D: (B, 1, seq_len, 1, D).
             x_B_T_H_W_D = x_B_T_H_W_D.flatten(1, 3)
-            x_B_T_H_W_D = torch.nn.functional.pad(
-                x_B_T_H_W_D, (0, 0, 0, target - seq_len)
-            )
-            # Reshape to fake-5D: (B, 1, target, 1, D)
             x_B_T_H_W_D = x_B_T_H_W_D.unsqueeze(1).unsqueeze(3)
 
-            # Pad RoPE cos/sin: each (L, 1, 1, D_head) → (target, 1, 1, D_head)
-            if rope_cos_sin is not None:
-                pad = (0, 0, 0, 0, 0, 0, 0, target - rope_cos_sin[0].shape[0])
-                rope_cos_sin = (
-                    torch.nn.functional.pad(rope_cos_sin[0], pad),
-                    torch.nn.functional.pad(rope_cos_sin[1], pad),
-                )
+        # Cast RoPE cos/sin to the block compute dtype once. Without this, every
+        # block's apply_rotary_pos_emb_qk re-materializes the fp32 cache in bf16.
+        if rope_cos_sin is not None:
+            compute_dtype = x_B_T_H_W_D.dtype
+            rope_cos_sin = (
+                rope_cos_sin[0].to(compute_dtype),
+                rope_cos_sin[1].to(compute_dtype),
+            )
 
         if timesteps_B_T.ndim == 1:
             timesteps_B_T = timesteps_B_T.unsqueeze(1)
@@ -1788,7 +1720,10 @@ class Anima(nn.Module):
         # - pooled_text_override: use this tensor instead of computing from crossattn_emb
         #   (used to decouple modulation from prefix/postfix tokens)
         # - skip_pooled_text_proj: disable entirely (for distillation teacher forward)
-        if not skip_pooled_text_proj:
+        # The enable flag short-circuits the whole max/proj path when no trained
+        # pooled_text_proj is loaded (the common LoRA train/infer case) — bit-exact
+        # to running it, since the output layer is zero-init there.
+        if self.enable_pooled_text_modulation and not skip_pooled_text_proj:
             if pooled_text_override is not None:
                 pooled_text = pooled_text_override
             elif crossattn_emb is not None:
@@ -1814,27 +1749,8 @@ class Anima(nn.Module):
         }
 
         attn_params = attention_dispatch.AttentionParams.create_attention_params(
-            self.attn_mode, self.split_attn, self.attn_softmax_scale
+            self.attn_mode, self.attn_softmax_scale
         )
-
-        # Bucketed KV trimming for cross-attention requires flash4 (LSE correction),
-        # which is not supported yet (flash-attention-sm120 disabled).
-        # if (
-        #     crossattn_seqlens is not None
-        #     and getattr(self, "trim_crossattn_kv", False)
-        #     and self.attn_mode == "flash4"
-        #     and not self.split_attn
-        # ):
-        #     full_len = crossattn_emb.shape[1]
-        #     max_real_len = (
-        #         max_crossattn_seqlen
-        #         if max_crossattn_seqlen is not None
-        #         else int(crossattn_seqlens.max())
-        #     )
-        #     trim_len = next((b for b in _KV_BUCKETS if b >= max_real_len), full_len)
-        #     if trim_len < full_len:
-        #         crossattn_emb = crossattn_emb[:, :trim_len].contiguous()
-        #         attn_params.crossattn_full_len = full_len
 
         # Pre-compute cross-attention BlockMask once for all blocks (flex mode only)
         if (
@@ -1859,41 +1775,12 @@ class Anima(nn.Module):
                 device=x_B_T_H_W_D.device,
             )
 
-        # Pre-compute self-attention BlockMask for static-shape mode (flex only).
-        # IMPORTANT: always create the mask (even when seq_len == target, i.e. no
-        # actual padding) so that the compiled _forward always takes the same
-        # code path.  A None-vs-BlockMask control-flow difference triggers dynamo
-        # recompilation; with 5 bucket token-counts × 2 requires_grad states the
-        # shared code cache (all blocks use the same _forward bytecode) exceeds
-        # the recompile limit and falls back to eager, losing flex_attention fusion.
-        if (
-            _static_pad_info is not None
-            and self.attn_mode == "flex"
-            and attention_dispatch.create_block_mask is not None
-        ):
-            # Use a tensor instead of a Python int so dynamo tracks it
-            # symbolically rather than guarding on the exact value.  A plain
-            # int in the mask_mod closure causes a recompile per bucket size.
-            _sa_seq_len = torch.tensor(
-                _static_pad_info[3], dtype=torch.int64, device=x_B_T_H_W_D.device
-            )
-            _sa_target = self.static_token_count
-            _sa_B = x_B_T_H_W_D.shape[0]
+        # No self-attention pad-mask: native shapes never have padded KV
+        # positions, so attn_params.selfattn_block_mask stays None (the legacy
+        # pad-to-static path masked padded positions; that path is gone).
 
-            def _selfattn_mask_mod(b, h, q_idx, kv_idx):
-                return kv_idx < _sa_seq_len
-
-            attn_params.selfattn_block_mask = attention_dispatch.create_block_mask(
-                _selfattn_mask_mod,
-                _sa_B,
-                None,
-                _sa_target,
-                _sa_target,
-                device=x_B_T_H_W_D.device,
-            )
-
-        # Block stack runs in _run_blocks — a split point so `compile_core`
-        # can wrap just the shape-invariant region while pre/post stay eager.
+        # Block stack runs in _run_blocks — a split point kept so pre/post-block
+        # regions stay eager while the block loop is the compiled hot path.
         x_B_T_H_W_D = self._run_blocks(
             x_B_T_H_W_D,
             t_embedding_B_T_D,
@@ -1902,12 +1789,12 @@ class Anima(nn.Module):
             **block_kwargs,
         )
 
-        # --- Static-shape: strip padding and restore original 5D shape ---
+        # --- Native flatten: restore the original 5D shape ---
         # Delegated to a @torch.compiler.disable'd helper so the bucket-
         # dependent tuple (T_s, H_s, W_s, seq_len) never enters the compile
-        # zone. See _unpad_static_shape for rationale.
-        if _static_pad_info is not None:
-            x_B_T_H_W_D = _unpad_static_shape(x_B_T_H_W_D, _static_pad_info)
+        # zone. See _unflatten_native_shape for rationale.
+        if _native_flatten_info is not None:
+            x_B_T_H_W_D = _unflatten_native_shape(x_B_T_H_W_D, _native_flatten_info)
 
         # Unconditional: zero buffers collapse to identity when guidance is off.
         t_emb_final = t_embedding_B_T_D + (
@@ -1985,10 +1872,10 @@ class Anima(nn.Module):
             context = source_hidden_states
             crossattn_mask = source_attention_mask
 
-        # Compute seqlens from mask for bucketed KV trimming with LSE correction.
-        # Pretrained model expects padding as attention sinks (zero keys contribute
-        # exp(0)=1 to softmax denominator); the attention function accounts for
-        # removed sinks via an exact sigmoid correction on the logsumexp.
+        # Compute per-sample text token counts from the mask. Used only by the
+        # flex-attention BlockMask path (attn_mode="flex"); the default sink-
+        # padded attention modes ignore it and treat zero keys as attention
+        # sinks, which is what the pretrained model expects.
         crossattn_seqlens = None
         if crossattn_mask is not None:
             crossattn_seqlens = crossattn_mask.sum(dim=-1).to(torch.int32)
@@ -2007,10 +1894,7 @@ class LLMAdapterRMSNorm(nn.Module):
     def forward(self, hidden_states):
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.weight.dtype)
-
+        hidden_states = hidden_states.to(self.weight.dtype)
         return self.weight * hidden_states
 
 
@@ -2044,19 +1928,16 @@ class AdapterRotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self, x, position_ids):
+        # inv_freq is registered as fp32 but a parent .to(bf16) casts it too —
+        # force fp32 here so the matmul matches position_ids_expanded.
         inv_freq_expanded = (
-            self.inv_freq[None, :, None]
-            .float()
-            .expand(position_ids.shape[0], -1, 1)
-            .to(x.device)
+            self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         )
         position_ids_expanded = position_ids[:, None, :].float()
 
         device_type = x.device.type
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(1, 2)
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
@@ -2163,14 +2044,17 @@ class LLMAdapterAttention(nn.Module):
             k_packed = key_states[eff_kv_mask]
             v_packed = value_states[eff_kv_mask]
 
+            # Pass the padded lengths as max_seqlen_q/k. Slightly over-sizes the
+            # flash kernel's metadata vs the true batch maxima but avoids a
+            # host-device sync from .item() on every adapter layer.
             out_packed = attention_dispatch.flash_attn_varlen_func(
                 q_packed,
                 k_packed,
                 v_packed,
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                q_seqlens.max().item(),
-                kv_seqlens.max().item(),
+                L_q,
+                L_kv,
             )
 
             # Unpack: [total_valid_q, H, D] → [B, L_q, H, D]

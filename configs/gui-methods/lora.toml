@@ -1,19 +1,7 @@
-<<<<<<< Updated upstream
 network_dim = 32
 network_alpha = 32
-<<<<<<< Updated upstream
 learning_rate = 0.0004
 max_train_epochs = 2
-=======
-learning_rate = 2e-5
-max_train_epochs = 4
-=======
-network_dim = 16
-network_alpha = 8
-learning_rate = 0.0002
-max_train_epochs = 20
->>>>>>> Stashed changes
->>>>>>> Stashed changes
 save_every_n_epochs = 2
 checkpointing_epochs = 2
 use_shuffled_caption_variants = true

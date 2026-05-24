@@ -30,6 +30,75 @@ uv pip install adv_optm==2.2.3
 
 ---
 
+## 算法详解
+
+### Adopt_Adv：自适应矩估计 + 投影优化
+
+**算法原理。** Adopt_Adv（`adv_optm.Adopt_adv`）是 [Adopt 优化器](https://arxiv.org/abs/2411.02853) 的高级变体。Adopt 的核心思想是将 Adam 的二阶矩估计替换为**投影操作**：不是简单地累积梯度平方的指数移动平均，而是通过预条件矩阵对梯度进行投影，从而更准确地捕获参数空间的曲率信息。这使得 Adopt 在小批量、高噪声训练场景下比 Adam 更稳定。
+
+Adopt_Adv 在 Adopt 基础上集成了大量可选特性（atan2 裁剪、AdEMAMix 双 EMA、OrthoGrad 正交梯度、Cautious 选择性更新等），形成一套可配置的"优化器工具箱"。这些特性可以自由组合，让用户在内存、速度、稳定性之间灵活取舍。
+
+**适用场景。**
+
+| 场景 | 说明 |
+|------|------|
+| 小批量训练（batch ≤ 4） | Adopt 的投影机制比 Adam 的矩估计更抗噪声，小批量下收敛更稳定 |
+| LyCORIS 变体训练 | LOHA / LOCON / LOKR 等分解式模块参数量少、梯度噪声高，Adopt_Adv 的投影机制能有效稳定训练 |
+| 需要稳定收敛的场景 | atan2 + Cautious 等免费特性可以显著提升训练稳定性 |
+| 低 VRAM 环境 | 启用 Factored 模式可减少 ~75% 优化器内存 |
+| 长期训练（>5000 步） | AdEMAMix 双 EMA 保留长期梯度记忆，避免后期收敛停滞 |
+
+**在训练管道中的集成。** `library/training/optimizers.py` 中的 `get_optimizer` 函数（[optimizers.py:288-299](library/training/optimizers.py#L288-L299)）在检测到 `optimizer_type == "Adopt_Adv"` 时，导入 `adv_optm.Adopt_adv` 并传入 `optimizer_args` 解析后的 `optimizer_kwargs`。如果 `use_atan2` 未被用户显式设置，会打印建议日志提示启用。
+
+### Prodigy_Adv：D-Adaptation 自适应学习率
+
+**算法原理。** Prodigy_Adv（`adv_optm.Prodigy_adv`）是 [Prodigy 优化器](https://arxiv.org/abs/2306.06101) 的高级变体。Prodigy 基于 **D-Adaptation** 框架：维护一个内部状态变量 `d`，在训练过程中自动估计最佳学习率缩放因子。实际学习率为 `lr × d`，其中 `d` 从极小值（`d0 = 1e-6`）开始单调递增。这意味着用户只需将 `learning_rate` 设为 `1.0`，优化器会自动找到合适的有效学习率——无需手动调参或选择学习率调度器。
+
+Prodigy_Adv 在 Prodigy 基础上同样集成了 atan2、Cautious、OrthoGrad 等高级特性，进一步增强了鲁棒性。
+
+**适用场景。**
+
+| 场景 | 说明 |
+|------|------|
+| 不确定最佳学习率 | D-Adaptation 自动调节 lr，省去手动搜索 |
+| 快速实验迭代 | 设 `lr=1.0` 即可开始训练，无需 warmup 配置 |
+| 不同网络架构迁移 | 从 LoRA 切换到 LOHA/LOKR 时无需重新调 lr |
+| LyCORIS 变体训练 | LyCORIS 模块的参数结构与标准 LoRA 不同，手动 lr 不一定适用，Prodigy_Adv 可自动适配 |
+
+**在训练管道中的集成。** `get_optimizer` 函数（[optimizers.py:301-328](library/training/optimizers.py#L301-L328)）在检测到 `optimizer_type == "Prodigy_Adv"` 时，额外执行两项检查：（1）如果 `lr ≤ 0.1`，发出警告提示 Prodigy 系列应使用 `lr ≈ 1.0`；（2）如果存在多个学习率组（`unet_lr` / `text_encoder_lr` 分别设置），警告只有第一个 lr 生效。
+
+## 与 LyCORIS 变体的兼容性
+
+本项目支持三种 LyCORIS 变体：**LOHA**（Hadamard 积分解）、**LOCON**（Tucker 分解增强 LoRA）、**LOKR**（Kronecker 积分解）。它们的实现位于 `networks/lora_modules/` 下的 `loha.py`、`locon.py`、`lokr.py`。
+
+### 优化器兼容性矩阵
+
+| 优化器 | LoRA | LOHA | LOCON | LOKR | 备注 |
+|--------|------|------|-------|------|------|
+| AdamW (fused) | ✅ | ✅ | ✅ | ✅ | 默认优化器，全兼容 |
+| Adopt_Adv | ✅ | ✅ | ✅ | ✅ | 推荐 LyCORIS 训练时启用 `atan2=True` |
+| Prodigy_Adv | ✅ | ✅ | ✅ | ✅ | 注意 `lr=1.0`，适用于所有 LyCORIS 变体 |
+| Adafactor | ✅ | ⚠️ | ⚠️ | ⚠️ | relative_step 模式下 LyCORIS 模块收敛可能不稳定 |
+| ScheduleFree | ✅ | ✅ | ✅ | ✅ | 无已知兼容性问题 |
+
+### LyCORIS 训练优化器选择建议
+
+| 训练场景 | 推荐优化器 | 配置 |
+|----------|-----------|------|
+| LOHA 小批量训练 | Adopt_Adv | `atan2=True`，`lr=2e-5` |
+| LOCON 高秩训练 | Adopt_Adv | `atan2=True, cautious=True`，`lr=1e-5` |
+| LOKR 大模型训练 | Prodigy_Adv | `lr=1.0`，自动适应 Kronecker 分解的参数结构 |
+| LyCORIS 低 VRAM | Adopt_Adv | `atan2=True, factored=True`，节省 ~75% 优化器内存 |
+
+### 注意事项
+
+- **多学习率组。** 当同时设置 `unet_lr` 和 `text_encoder_lr` 时，Prodigy_Adv 只使用第一个 lr 值（D-Adaptation 的固有限制）。如果需要为不同参数组设置不同学习率，请使用 Adopt_Adv 或 AdamW。
+- **梯度噪声。** LyCORIS 的分解结构（尤其是 LOHA 的 Hadamard 积和 LOKR 的 Kronecker 积）会引入额外的梯度噪声。Adopt_Adv 的 `cautious=True` 和 `atan2=True` 可以有效抑制这种噪声，推荐在所有 LyCORIS 训练中启用。
+- **Factored 模式。** LyCORIS 模块本身已经是低秩分解，优化器再启用 `factored=True` 会对优化器状态做进一步分解（SMMF），两者不冲突。适合极端低 VRAM 场景（如 6GB 显卡训练 LOHA）。
+- **OrthoGrad。** 与 LyCORIS 的自定义 autograd 函数（`lycoris_functional.py` 中的 Hadamard / Kronecker 反向传播）兼容，但会增加 ~33% 步长时间。仅在无 weight decay 的 full fine-tuning 场景考虑。
+
+---
+
 ## 脚本 + 配置方式
 
 ### Adopt_Adv 配置示例

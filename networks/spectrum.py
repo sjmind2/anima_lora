@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from library.inference.adapters import clear_hydra_sigma, set_hydra_sigma
 from library.inference import sampling as inference_utils
+from library.inference.sampler_context import SamplerSideChannels
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ def spectrum_denoise(
     guidance_scale: float,
     sampler,  # ERSDESampler / LCMSampler / None — anything with .step(latents, denoised, i)
     device: torch.device,
+    ctx: SamplerSideChannels,
     *,
     window_size: float = 2.0,
     flex_window: float = 0.25,
@@ -239,16 +241,6 @@ def spectrum_denoise(
     lam: float = 0.1,
     stop_caching_step: int = -1,
     calibration_strength: float = 0.0,
-    autocast_enabled: bool = False,
-    pgraft_network=None,
-    lora_cutoff_step: Optional[int] = None,
-    pooled_text_pos: Optional[torch.Tensor] = None,
-    pooled_text_neg: Optional[torch.Tensor] = None,
-    dcw: bool = False,
-    dcw_lambda: float = -0.015,
-    dcw_schedule: str = "one_minus_sigma",
-    dcw_band_mask: str = "LL",
-    dcw_calibrator=None,
 ) -> torch.Tensor:
     """Spectrum-accelerated denoising loop.
 
@@ -266,7 +258,24 @@ def spectrum_denoise(
         stop_caching_step: Force actual forwards from this step onward (-1 = auto: total_steps - 3).
         calibration_strength: Residual calibration strength (0.0 = disabled). On actual forwards,
             computes residual = actual - predicted; on cached steps, adds residual * strength.
+        ctx: Shared conditioning side-channels (DCW / SMC-CFG / soft-tokens /
+            P-GRAFT / pooled-text) — see ``library.inference.sampler_context``.
     """
+    # Unpack the shared side-channels into the locals the loop body uses.
+    pgraft_network = ctx.pgraft_network
+    lora_cutoff_step = ctx.lora_cutoff_step
+    pooled_text_pos = ctx.pooled_text_pos
+    pooled_text_neg = ctx.pooled_text_neg
+    dcw = ctx.dcw
+    dcw_lambda = ctx.dcw_lambda
+    dcw_schedule = ctx.dcw_schedule
+    dcw_band_mask = ctx.dcw_band_mask
+    dcw_calibrator = ctx.dcw_calibrator
+    smc_cfg = ctx.smc_cfg
+    soft_tokens_net = ctx.soft_tokens_net
+    soft_tokens_embed_seqlens = ctx.soft_tokens_embed_seqlens
+    soft_tokens_neg_seqlens = ctx.soft_tokens_neg_seqlens
+
     do_cfg = guidance_scale != 1.0
     num_steps = len(timesteps)
 
@@ -313,17 +322,20 @@ def spectrum_denoise(
 
                 t_exp = t.expand(latents.shape[0])
                 set_hydra_sigma(anima, t_exp)
+                if dcw_calibrator is not None:
+                    # Capture FEI on the pre-forward latent at warmup steps
+                    # for v6 fei_obs={replace,concat} artifacts. Spectrum forces
+                    # actual forwards while i < warmup_steps, so this lines up
+                    # with the v4 g_obs capture at line 409 below.
+                    dcw_calibrator.record_latent_pre_forward(i, latents)
 
                 if actual:
                     # --- Full forward pass ---
-                    with (
-                        torch.no_grad(),
-                        torch.autocast(
-                            device_type=device.type,
-                            dtype=torch.bfloat16,
-                            enabled=autocast_enabled,
-                        ),
-                    ):
+                    if soft_tokens_net is not None:
+                        soft_tokens_net.append_postfix(
+                            embed, soft_tokens_embed_seqlens, timesteps=t_exp
+                        )
+                    with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": pooled_text_pos}
                             if pooled_text_pos is not None
@@ -343,14 +355,13 @@ def spectrum_denoise(
                     cond_fc.update(float(i), feat)
 
                     if do_cfg:
-                        with (
-                            torch.no_grad(),
-                            torch.autocast(
-                                device_type=device.type,
-                                dtype=torch.bfloat16,
-                                enabled=autocast_enabled,
-                            ),
-                        ):
+                        if soft_tokens_net is not None:
+                            soft_tokens_net.append_postfix(
+                                negative_embed,
+                                soft_tokens_neg_seqlens,
+                                timesteps=t_exp,
+                            )
+                        with torch.no_grad():
                             _neg_kw = (
                                 {"pooled_text_override": pooled_text_neg}
                                 if pooled_text_neg is not None
@@ -374,9 +385,14 @@ def spectrum_denoise(
                         ):
                             uncond_residual = ufeat - uncond_fc.predict(float(i))
                         uncond_fc.update(float(i), ufeat)
-                        noise_pred = uncond_noise_pred + guidance_scale * (
-                            noise_pred - uncond_noise_pred
-                        )
+                        if smc_cfg is not None:
+                            noise_pred = smc_cfg.combine(
+                                noise_pred, uncond_noise_pred, guidance_scale
+                            )
+                        else:
+                            noise_pred = uncond_noise_pred + guidance_scale * (
+                                noise_pred - uncond_noise_pred
+                            )
 
                     # Advance schedule (only post-warmup to avoid inflating window)
                     if i >= warmup_steps:
@@ -402,9 +418,14 @@ def spectrum_denoise(
                             uncond_noise_pred = _spectrum_fast_forward(
                                 anima, t_exp, upred_feat
                             )
-                            noise_pred = uncond_noise_pred + guidance_scale * (
-                                noise_pred - uncond_noise_pred
-                            )
+                            if smc_cfg is not None:
+                                noise_pred = smc_cfg.combine(
+                                    noise_pred, uncond_noise_pred, guidance_scale
+                                )
+                            else:
+                                noise_pred = uncond_noise_pred + guidance_scale * (
+                                    noise_pred - uncond_noise_pred
+                                )
 
                     consec_cached += 1
                     pbar.set_postfix(mode="cached", n=fwd_count)

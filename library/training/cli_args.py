@@ -178,6 +178,14 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="base name of trained model file",
     )
     parser.add_argument(
+        "--progress_jsonl",
+        type=str,
+        default=None,
+        help="path to the structured progress JSONL event stream. Unset → derive "
+        "<output_dir>/<output_name>.progress.jsonl (default on). Pass an empty string "
+        "/ 'none' / 'off' to disable.",
+    )
+    parser.add_argument(
         "--huggingface_repo_id",
         type=str,
         default=None,
@@ -347,23 +355,13 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="dynamo backend type (default is inductor)",
     )
     parser.add_argument(
-        "--compile_mode",
-        type=str,
-        default="blocks",
-        choices=["blocks", "full"],
-        help="torch.compile mode: 'blocks' compiles each DiT block individually (default), "
-        "'full' compiles the entire model as one graph for cross-block memory optimization "
-        "(incompatible with gradient checkpointing and block swap)",
-    )
-    parser.add_argument(
         "--compile_inductor_mode",
         type=str,
         default=None,
         choices=[None, "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
         help="Inductor preset forwarded as torch.compile(..., mode=...). "
         "'reduce-overhead' enables CUDAGraphs — requires stable tensor addresses "
-        "across steps and is incompatible with block swap. Works with both "
-        "--compile_mode=blocks and --compile_mode=full (per-block graph vs one graph).",
+        "across steps and is incompatible with block swap.",
     )
     parser.add_argument(
         "--xformers", action="store_true", help="use xformers for CrossAttention"
@@ -438,12 +436,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     )
     parser.add_argument(
         "--full_bf16", action="store_true", help="bf16 training including gradients"
-    )
-    # FP8 is not supported yet — flag kept for CLI compatibility but force-disabled in assert_extra_args.
-    parser.add_argument(
-        "--fp8_base",
-        action="store_true",
-        help="(not supported yet) use fp8 for base model. This flag is force-disabled.",
     )
 
     parser.add_argument(
@@ -675,7 +667,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--method",
         type=str,
         default=None,
-        help="method name under configs/methods/ (e.g. 'tlora', 'hydralora', 'postfix'). Merged after preset so method settings win on overlap.",
+        help="method name under configs/methods/ (e.g. 'tlora', 'hydralora', 'chimera'). Merged after preset so method settings win on overlap.",
     )
     parser.add_argument(
         "--preset",
@@ -858,7 +850,7 @@ def add_network_arguments(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="path to a pretrained LoRA checkpoint to merge into DiT weights before training. "
-        "Intended for postfix/prefix training on top of a fixed LoRA. "
+        "Intended for adapter training on top of a fixed LoRA. "
         "The LoRA is baked into the base weights at load time — no runtime hooks.",
     )
     parser.add_argument(
@@ -1162,6 +1154,18 @@ def add_dataset_arguments(
             "Global override applied to every subset's sample_ratio (0<r≤1). "
             "Unset = use each subset's own value. Exposed here so presets like "
             "`[half]` can propagate a single value across the dataset blueprint."
+        ),
+    )
+    parser.add_argument(
+        "--path_pattern",
+        type=str,
+        default=None,
+        help=(
+            "fnmatch glob applied to each image's path relative to its "
+            "subset's image_dir. `|` separates alternatives — e.g. "
+            "`char_a/*` keeps only the char_a/ subfolder, "
+            "`char_a/*|char_b/*` keeps either. Unset / `*` = use everything. "
+            "Validation and image-count thresholds honour the filtered pool."
         ),
     )
 

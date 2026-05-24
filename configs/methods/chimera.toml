@@ -19,11 +19,10 @@
 network_alpha = 32
 network_dim = 32
 
-
-learning_rate = 2e-5
-max_train_epochs = 4
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+learning_rate = 5e-5
+max_train_epochs = 6
+save_every_n_epochs = 6
+checkpointing_epochs = 6
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -35,21 +34,14 @@ caption_dropout_rate = 0.1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-# -------------
-# Ortho-lora — Cayley-rotated SVD basis on the shared-A leg. ChimeraHydra
-# inherits the OrthoHydra parameterization; ``use_ortho=true`` is implicit
-# in the chimera module but kept here for the unrouted-fallback Linears
-# (router_targets-excluded modules become OrthoLoRA).
+output_name = "anima_hydra"
+path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 use_ortho = true
-
-# -------------
-# Timestep mask (T-LoRA) — applied to the content branch only inside the
-# chimera forward. Freq branch sees full rank at every t.
-
 use_timestep_mask = true
-min_rank = 8
+min_rank = 32
 alpha_rank_scale = 1.0
+channel_scaling_alpha = 0.5
 
 # -------------
 # ChimeraHydra activation. The three-axis routing fields
@@ -60,19 +52,30 @@ alpha_rank_scale = 1.0
 # path.
 
 use_chimera_hydra = true
-num_experts_content = 4
+num_experts_content = 6
 num_experts_freq = 2
 
 # Outer balance multiplier is 1.0 so the per-pool weights below are the
 # only scalars on the balance loss. Default per-pool weights match the
 # OrthoHydra production value (~2e-5, see
 # [[project_hydra_balance_weight_ceiling]]).
-balance_loss_warmup_ratio = 0.2
+#
+# Warmup is asymmetric on the chimera path: only the per-Linear CONTENT
+# router gates through ``balance_loss_warmup_ratio``. The FREQ router
+# bypasses warmup entirely — its FEI input + ``freq_router_init_std``
+# break symmetry from step 0, so its load-balance pressure can fire
+# immediately without pinning the router to uniform.
+
+balance_loss_warmup_ratio = 0.1
 balance_loss_weight = 1.0
-balance_w_content = 2e-7
+balance_w_content = 1e-6
 balance_w_freq = 5e-7
-network_content_router_lr_scale = 10
-network_freq_router_lr_scale = 2.0
+network_content_router_lr_scale = 10.0
+network_freq_router_lr_scale = 5.0
+
+content_router_source = "crossattn_emb"
+content_router_init_std = 0.001      # non-zero (uniform would be a fixed point)
+content_router_layer_norm = true   # parameterless LN on the pooled input
 
 # FreqRouter input. FEI = 2-band simplex (e_low, e_high). σ-features
 # disabled by default (sigma_feature_dim = 0), so the FreqRouter input
@@ -82,30 +85,38 @@ network_freq_router_lr_scale = 2.0
 fei_feature_dim = 2
 fei_sigma_low_div = 4.0
 sigma_feature_dim = 16
-
-# Per-modality LayerNorm on the FreqRouter input. Active only when BOTH
-# FEI and σ feature blocks are enabled (variance balance is the only job
-# — with σ off, LN either no-ops or destroys the 2-D FEI simplex). At
-# fei_feature_dim=2 + sigma_feature_dim=16 the σ block fan-in-overpowers
-# FEI ~8× at init; LN equalizes per-modality contribution variance so
-# the router can actually learn from FEI instead of routing on σ alone.
-# Parameterless (elementwise_affine=False) — no state_dict footprint.
 freq_router_layer_norm = true
-
-# FreqRouter init magnitude (N(0, std) on the output Linear). Non-zero is
-# load-bearing — zero-init would make the freq pool a fixed point of the
-# additive composition and the router weights would never escape zero.
-# See chimera.py::FreqRouter class docstring.
-freq_router_init_std = 0.02
+freq_router_init_std = 0.1
 
 # Routing scope. Every Linear matched by this regex becomes a chimera
 # leaf; non-matching layers fall back to OrthoLoRA (single-pool Cayley,
 # no router). Same default as the other hydra variants.
-router_targets = ".*(mlp\\.layer[12])$"
-output_name = "anima_chimera"
-
+# router_targets = ".*(output_proj|mlp\\.layer[12])$"
+router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
+# output_name = "anima_chimera-0521"
+[[datasets]]
+validation_split_num = 0
+# -------------
+# Optional: global content router. Default is the paper-faithful per-Linear
+# softmax over pooled rank-R lx_c (`self.router` on every chimera module).
+# Flipping `content_router_source = "crossattn_emb"` swaps that for a single
+# network-level ContentRouter fed by pooled crossattn_emb (post-LLM-adapter
+# T5-space text features). π_c then routes from a global "caption regime"
+# axis instead of a per-site decision — analogous to FeRA on the freq pool.
+# Per-Linear `router.weight` / `router.bias` keys are absent from the
+# checkpoint in that case; FreqRouter contract is unchanged.
+#
+# Tradeoffs:
+#  • Faster convergence on the content axis (one router updated jointly
+#    by all chimera Linears) and fewer params on disk.
+#  • Loses per-site specialization (cross_attn.output_proj vs mlp.layer1
+#    can no longer pick different K_c partitions).
+#  • Router-collapse risk is correlated across every chimera layer (same
+#    failure mode as FeRA's GlobalRouter — see networks/CLAUDE.md).
+#  • LR-sensitive. Start with the same scale FreqRouter uses (10×).
+#
 
 # -------------
-# REPA / VR-loss compositions are not gated. Both modify what shared A
-# learns, so co-train compat is unknown — sanity-check at bench before
-# stacking on top of chimera.
+# VR-loss composition is not gated. It modifies what shared A learns, so
+# co-train compat is unknown — sanity-check at bench before stacking on
+# top of chimera.

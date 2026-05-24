@@ -143,17 +143,17 @@ def populate_schema(
         (
             "source_image_dir",
             "image_dataset",
-            "Where raw images and .txt captions live. Read by preprocess/resize_images.py and preprocess/cache_text_embeddings.py.",
+            "Where raw images and .txt captions live. Read by scripts/preprocess/resize_images.py and scripts/preprocess/cache_text_embeddings.py.",
         ),
         (
             "resized_image_dir",
             "post_image_dataset/resized",
-            "Where preprocess/resize_images.py writes VAE-aligned PNGs. Also resolved into the dataset subset's image_dir at training time.",
+            "Where scripts/preprocess/resize_images.py writes VAE-aligned PNGs. Also resolved into the dataset subset's image_dir at training time.",
         ),
         (
             "lora_cache_dir",
             "post_image_dataset/lora",
-            "Where preprocess/cache_latents.py and cache_text_embeddings.py write VAE/TE caches. Also resolved into the dataset subset's cache_dir.",
+            "Where scripts/preprocess/cache_latents.py and cache_text_embeddings.py write VAE/TE caches. Also resolved into the dataset subset's cache_dir.",
         ),
     ):
         CONFIG_SCHEMA.setdefault(
@@ -166,6 +166,40 @@ def populate_schema(
                 source="manual",
             ),
         )
+
+    # Preprocess input filter — consumed by scripts/tasks/preprocess.py (forwarded
+    # to scripts/preprocess/resize_images.py and scripts/preprocess/cache_text_embeddings.py as
+    # ``--min_pixels``). Not an argparse arg on train.py — preprocess reads it
+    # straight from the merged config chain via load_path_overrides().
+    CONFIG_SCHEMA.setdefault(
+        "drop_lowres_images",
+        ConfigKey(
+            name="drop_lowres_images",
+            type="bool",
+            default=True,
+            help=(
+                "When true, the preprocess auto-chain skips source images "
+                "smaller than ``min_pixels`` (see below) so they never enter "
+                "the resize/VAE/TE caches. Set false to keep every image."
+            ),
+            source="manual",
+        ),
+    )
+    CONFIG_SCHEMA.setdefault(
+        "min_pixels",
+        ConfigKey(
+            name="min_pixels",
+            type="int",
+            default=500_000,
+            help=(
+                "Pixel-count threshold for ``drop_lowres_images`` "
+                "(default 500_000 = 0.5MP). Forwarded to "
+                "scripts/preprocess/resize_images.py + cache_text_embeddings.py as "
+                "``--min_pixels``. Ignored when ``drop_lowres_images=false``."
+            ),
+            source="manual",
+        ),
+    )
 
     if extras:
         for k, v in extras.items():

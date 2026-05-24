@@ -1,6 +1,0 @@
-<h2>LOHA</h2>
-<p>Low-Rank Hadamard Product adaptation.</p>
-<p><b>Formula</b>: ΔW = (A@B) ⊙ (C@D) × scale</p>
-<p>The Hadamard (element-wise) product of two low-rank matrices gives an effective rank of <code>dim²</code> with only <code>2×dim×(M+N)</code> parameters — significantly more expressive than standard LoRA at the same parameter budget.</p>
-<p><b>Scale</b>: <code>scale = alpha / dim</code>. Recommended range <b>0.1–0.5</b>. Excessive scale (e.g. 1.0) causes oversized weight updates and severely degrades output quality.</p>
-<p><b>Tip</b>: <code>dim=32, alpha=16</code> (scale=0.5) is a good starting point. Lower alpha or increase dim to further reduce scale.</p>

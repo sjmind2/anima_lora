@@ -1,7 +1,7 @@
-"""Save-pipeline orchestrator for the LoRA / Ortho / Hydra / DoRA family.
+"""Save-pipeline orchestrator for the LoRA / Ortho / Hydra family.
 
 The per-variant save logic — Cayley distillation, MoE write layout,
-DoRA/qkv defuse — lives on the variant's module class in
+qkv defuse — lives on the variant's module class in
 ``networks/lora_modules/`` (``OrthoLoRAModule.distill_save_state_dict``,
 ``HydraLoRAModule.build_moe_state_dict``, etc). This file is the thin
 ordering layer that calls them and writes the resulting file(s).
@@ -44,7 +44,7 @@ from networks.lora_modules import (
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
 )
-from networks.lora_modules.lora import rename_dora_and_defuse_standard
+from networks.lora_modules.lora import defuse_and_bake_standard
 from networks.attn_fuse import match_fused_spec
 
 setup_logging()
@@ -367,7 +367,7 @@ def save_network_weights(
     #     ``freq_router.*`` → ``*_chimera.safetensors``.
     #   * ``hydra_moe`` / ``ortho_hydra_to_hydra``: shared-A Hydra
     #     ``(lora_down, lora_ups.{i})`` → ``*_moe.safetensors``.
-    #   * standard: rename DoRA + defuse qkv → ``*.safetensors``.
+    #   * standard: defuse qkv → ``*.safetensors``.
     #
     # Auto-fallback for hydra: any ``.lora_up_weight`` key surviving the
     # distill chain implies a Hydra payload. Kept for callers that don't
@@ -416,7 +416,7 @@ def save_network_weights(
     # Standard (lora / ortho / dora) write path.
     defuse_loha_qkv(state_dict)
     defuse_lokr_qkv(state_dict)
-    rename_dora_and_defuse_standard(state_dict)
+    defuse_and_bake_standard(state_dict)
 
     if dtype is not None:
         for key in list(state_dict.keys()):

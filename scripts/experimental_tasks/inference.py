@@ -1,7 +1,7 @@
 """Experimental inference entry-points (exp-test-* commands).
 
-Covers the unstable methods kept under ``make exp-*``:
-postfix / postfix_exp / postfix_func, IP-Adapter, EasyControl. Reference-image
+Covers the unstable methods kept under ``make exp-*``: soft tokens, IP-Adapter,
+EasyControl, plus the DirectEdit + postfix-tail inversion probes. Reference-image
 variants (exp-test-ip / exp-test-easycontrol) accept REF_IMAGE env or first
 positional arg, copy the ref alongside the generated output.
 """
@@ -27,7 +27,9 @@ _REF_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 def _random_ref_image(directory: Path) -> str | None:
     if not directory.is_dir():
         return None
-    pool = [p for p in directory.iterdir() if p.suffix.lower() in _REF_IMAGE_EXTS]
+    # resized/ (and other source layouts) nest images under per-artist subdirs,
+    # so recurse rather than only scanning top-level files.
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
     if not pool:
         return None
     pick = random.choice(pool)
@@ -35,50 +37,22 @@ def _random_ref_image(directory: Path) -> str | None:
     return str(pick)
 
 
-def cmd_test_postfix(extra):
-    # exclude both _exp and _func so the vanilla postfix target doesn't grab them
-    outputs = sorted(
-        (
-            f
-            for f in (ROOT / "output" / "ckpt").glob("anima_postfix*.safetensors")
-            if "_exp" not in f.name and "_func" not in f.name
-        ),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not outputs:
-        print(
-            "No 'anima_postfix*.safetensors' files found in output/ckpt/",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def cmd_test_soft(extra):
+    """Inference with latest soft_tokens weight (SoftREPA-style per-layer × per-t bank).
+
+    Resolves the newest ``anima_soft_tokens*.safetensors`` under ``output/ckpt/``
+    and passes it via ``--soft_tokens_weight``. The network is built in
+    ``library/inference/generation.py``, ``apply_to`` monkey-patches the first
+    ``n_layers`` ``Block.forward``s, and ``append_postfix(..., timesteps=t)``
+    fires per CFG branch inside the denoising loop (mirrored in the Spectrum
+    runner). Composes freely with ``--spectrum``; cached spectrum steps skip
+    blocks so soft_tokens silently no-ops on those steps.
+    """
     run(
         [
             *INFERENCE_BASE,
-            "--postfix_weight",
-            str(outputs[0]),
-            *extra,
-        ]
-    )
-
-
-def cmd_test_postfix_exp(extra):
-    run(
-        [
-            *INFERENCE_BASE,
-            "--postfix_weight",
-            str(latest_output("anima_postfix_exp")),
-            *extra,
-        ]
-    )
-
-
-def cmd_test_postfix_func(extra):
-    run(
-        [
-            *INFERENCE_BASE,
-            "--postfix_weight",
-            str(latest_output("anima_postfix_func")),
+            "--soft_tokens_weight",
+            str(latest_output("anima_soft_tokens")),
             *extra,
         ]
     )
@@ -119,6 +93,48 @@ def _override_arg(argv: list[str], flag: str, value: str) -> list[str]:
     # Drop the flag and its single value; INFERENCE_BASE doesn't use multi-arg
     # flags for these two keys.
     return argv[:i] + [flag, value] + argv[i + 2 :]
+
+
+def cmd_test_spd(extra):
+    """Inference with the latest SPD fine-tune LoRA on the SPD sampler.
+
+    Runs at the *schedule the LoRA was trained on* — read from the safetensors
+    metadata (``ss_spd_stages`` / ``ss_spd_transition_sigmas``, stamped by
+    ``scripts/distill_spd.py``) so the trajectory geometry can't silently
+    mismatch what was trained (proposal R2). CFG stays at the production
+    default (4.0); ``--spd`` forces Euler internally.
+
+        make exp-test-spd
+        make exp-test-spd ARGS="--spd_stages 0.5 0.75 1.0 --spd_transition_sigmas 0.6 0.4"
+        make exp-test-spd ARGS="--seed 1234 --image_size 832 1248"
+
+    User ``ARGS`` win: passing ``--spd_stages`` / ``--spd_transition_sigmas``
+    in ARGS overrides the metadata schedule.
+    """
+    import json
+
+    from safetensors import safe_open
+
+    weight = latest_output("anima_spd")
+    md: dict[str, str] = {}
+    try:
+        with safe_open(str(weight), "pt") as f:
+            md = f.metadata() or {}
+    except Exception as e:  # noqa: BLE001
+        print(f"  warn: could not read SPD schedule from {weight}: {e}")
+
+    base = _override_arg(list(INFERENCE_BASE), "--sampler", "euler")  # SPD forces Euler
+    cmd = [*base, "--lora_weight", str(weight), "--spd"]
+
+    stages = md.get("ss_spd_stages")
+    trans = md.get("ss_spd_transition_sigmas")
+    label = md.get("ss_spd_schedule_label", "?")
+    if stages and "--spd_stages" not in extra:
+        cmd += ["--spd_stages", *(str(s) for s in json.loads(stages))]
+    if trans and "--spd_transition_sigmas" not in extra:
+        cmd += ["--spd_transition_sigmas", *(str(s) for s in json.loads(trans))]
+    print(f"  > SPD LoRA: {weight}  schedule='{label}' stages={stages} σ={trans}")
+    run([*cmd, *extra])
 
 
 def cmd_test_ip(extra):
@@ -165,7 +181,16 @@ def cmd_test_ip(extra):
     ]
     if scale := os.environ.get("IP_SCALE"):
         args += ["--ip_scale", scale]
-    args += ["--prompt", os.environ.get("PROMPT") or "double peace, v v,"]
+    # Default is a coherent *target*-scene prompt with NO character/copyright
+    # tag, so any identity match must come through the IP image rather than the
+    # text path. (Distinct-pair training pairs the target's own caption with the
+    # denoised latent; identity flows from a *different* ref image's PE features.
+    # A thin prompt like "double peace" under-constrains the scene -> garbage.)
+    default_prompt = (
+        "masterpiece, best quality, score_7, safe. 1girl, solo, standing in a "
+        "cafe, holding a coffee cup, looking at viewer, smile, soft lighting."
+    )
+    args += ["--prompt", os.environ.get("PROMPT") or default_prompt]
     if neg := os.environ.get("NEG"):
         args += ["--negative_prompt", neg]
     args += list(extra)
@@ -241,10 +266,11 @@ def cmd_test_directedit(extra):
         edit_prompt = "double peace, v v. She is showing double peace"
 
     # 3. Run Anima Tagger on the source.
-    sys.path.insert(0, str(ROOT))
     from PIL import Image  # noqa: PLC0415
 
-    anima_ckpt = ROOT / "models" / "captioners" / "anima-tagger-v1" / "model.safetensors"
+    anima_ckpt = (
+        ROOT / "models" / "captioners" / "anima-tagger-v1" / "model.safetensors"
+    )
     if not anima_ckpt.exists():
         raise SystemExit(
             f"Anima Tagger checkpoint missing at {anima_ckpt} — "
@@ -263,7 +289,9 @@ def cmd_test_directedit(extra):
             "prompt — DirectEdit reconstruction will be weaker than usual.",
             file=sys.stderr,
         )
-    print(f"  > src caption: {src_caption[:120]}{'...' if len(src_caption) > 120 else ''}")
+    print(
+        f"  > src caption: {src_caption[:120]}{'...' if len(src_caption) > 120 else ''}"
+    )
 
     # 4. Save dir + edit.py invocation. Reuse INFERENCE_BASE for the model
     #    path trio (--dit / --text_encoder / --vae) so this stays in sync with
@@ -284,10 +312,14 @@ def cmd_test_directedit(extra):
     leftover_base = list(base_iter)
     args = [py, "scripts/edit.py", *_filter_inference_base_for_edit(leftover_base)]
     args += [
-        "--image", str(ref_image),
-        "--prompt_src", src_caption,
-        "--edit_instruction", edit_prompt,
-        "--save_path", str(save_dir),
+        "--image",
+        str(ref_image),
+        "--prompt_src",
+        src_caption,
+        "--edit_instruction",
+        edit_prompt,
+        "--save_path",
+        str(save_dir),
     ]
     args += list(extra)
     run(args)
@@ -367,9 +399,12 @@ def cmd_test_directedit_dry(extra):
     leftover_base = list(base_iter)
     args = [py, "scripts/edit.py", *_filter_inference_base_for_edit(leftover_base)]
     args += [
-        "--image", str(ref_image),
-        "--cached_embed", str(cache_path),
-        "--save_path", str(save_dir),
+        "--image",
+        str(ref_image),
+        "--cached_embed",
+        str(cache_path),
+        "--save_path",
+        str(save_dir),
     ]
     args += list(extra)
     run(args)
@@ -407,7 +442,7 @@ def _resolve_ref_image_pool(directory: Path, n: int) -> list[str]:
     """
     if not directory.is_dir():
         return []
-    pool = [p for p in directory.iterdir() if p.suffix.lower() in _REF_IMAGE_EXTS]
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
     if not pool:
         return []
     if n >= len(pool):
@@ -453,7 +488,6 @@ def cmd_invert_directedit(extra):
       N_IMAGES=3 make exp-invert-directedit
       K=8 INVERT_STEPS=50 make exp-invert-directedit
     """
-    sys.path.insert(0, str(ROOT))
 
     # 1. Resolve image pool.
     ref_image_override = os.environ.get("REF_IMAGE", "").strip()
@@ -489,15 +523,15 @@ def cmd_invert_directedit(extra):
     # 2. Inversion knobs — env overrides for the common dials, defaults match
     #    the proposal (and the invert_postfix_tail.py CLI defaults).
     K = int(os.environ.get("K", "32"))
-    invert_steps = int(os.environ.get("INVERT_STEPS", "15"))
-    invert_lr = float(os.environ.get("INVERT_LR", "2e-2"))
+    invert_steps = int(os.environ.get("INVERT_STEPS", "30"))
+    invert_lr = float(os.environ.get("INVERT_LR", "1e-2"))
     lambda_zero = float(os.environ.get("LAMBDA_ZERO", "0.0"))
     sigma_min = float(os.environ.get("SIGMA_MIN", "0"))
-    sigma_max = float(os.environ.get("SIGMA_MAX", "0.25"))
+    sigma_max = float(os.environ.get("SIGMA_MAX", "0.5"))
     basis_kind = os.environ.get("BASIS", "svd_te").strip()
     seed = int(os.environ.get("SEED", "0"))
     timesteps_per_step = int(os.environ.get("TIMESTEPS_PER_STEP", "2"))
-    grad_accum = int(os.environ.get("GRAD_ACCUM", "8"))
+    grad_accum = int(os.environ.get("GRAD_ACCUM", "6"))
 
     run_root = ROOT / "output" / "tests" / "invert_directedit"
     run_root.mkdir(parents=True, exist_ok=True)
@@ -512,7 +546,7 @@ def cmd_invert_directedit(extra):
     attn_mode = _resolve_inference_base_flag("--attn_mode") or "flash"
 
     # Lazy import — keep the task module light when this command isn't run.
-    from library.inference.postfix_inversion import (  # noqa: PLC0415
+    from library.inference.editing.postfix_inversion import (  # noqa: PLC0415
         load_or_build_basis,
         load_tail_s,
         splice_tail_into_te_cache,
@@ -558,23 +592,39 @@ def cmd_invert_directedit(extra):
             invert_cmd = [
                 py,
                 "scripts/inversion/invert_postfix_tail.py",
-                "--dit", str(dit_path),
-                "--attn_mode", str(attn_mode),
-                "--image_dir", str(te_path.parent),
-                "--image_stem", stem,
-                "--K", str(K),
-                "--basis", basis_kind,
-                "--basis_path", str(basis_path),
-                "--steps", str(invert_steps),
-                "--lr", str(invert_lr),
-                "--lambda_zero", str(lambda_zero),
-                "--sigma_min", str(sigma_min),
-                "--sigma_max", str(sigma_max),
-                "--seed", str(seed),
-                "--timesteps_per_step", str(timesteps_per_step),
-                "--grad_accum", str(grad_accum),
-                "--output_dir", str(invert_out),
-                "--vr"
+                "--dit",
+                str(dit_path),
+                "--attn_mode",
+                str(attn_mode),
+                "--image_dir",
+                str(te_path.parent),
+                "--image_stem",
+                stem,
+                "--K",
+                str(K),
+                "--basis",
+                basis_kind,
+                "--basis_path",
+                str(basis_path),
+                "--steps",
+                str(invert_steps),
+                "--lr",
+                str(invert_lr),
+                "--lambda_zero",
+                str(lambda_zero),
+                "--sigma_min",
+                str(sigma_min),
+                "--sigma_max",
+                str(sigma_max),
+                "--seed",
+                str(seed),
+                "--timesteps_per_step",
+                str(timesteps_per_step),
+                "--grad_accum",
+                str(grad_accum),
+                "--output_dir",
+                str(invert_out),
+                "--vr",
             ]
             run(invert_cmd)
             if not s_path.exists():
@@ -617,21 +667,21 @@ def cmd_invert_directedit(extra):
             save_dir.mkdir(parents=True, exist_ok=True)
             edit_cmd = [
                 *edit_base_args,
-                "--image", str(ref_image),
-                "--cached_embed", str(cache_for_run),
-                "--cached_embed_variants", "0",
-                "--save_path", str(save_dir),
+                "--image",
+                str(ref_image),
+                "--cached_embed",
+                str(cache_for_run),
+                "--cached_embed_variants",
+                "0",
+                "--save_path",
+                str(save_dir),
                 *list(extra),
             ]
             run(edit_cmd)
 
             # Paste the source for side-by-side eyeballing.
             pngs = sorted(
-                (
-                    p
-                    for p in save_dir.glob("*.png")
-                    if not p.name.endswith("_src.png")
-                ),
+                (p for p in save_dir.glob("*.png") if not p.name.endswith("_src.png")),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
