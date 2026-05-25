@@ -33,7 +33,7 @@
   "gradient_accumulation_steps": "Accumulate gradients over N steps before updating. Effective batch size = batch_size × accumulation_steps.",
   "use_shuffled_caption_variants": "Consume preprocessed caption-shuffle variants from the text-encoder cache. When the cache holds multiple variants, a random one is drawn per sample. Falls back silently to single-variant if no variants were preprocessed.",
   "caption_dropout_rate": "Probability per sample of dropping the caption (replaced with empty text embedding). Pushes the LoRA toward an unconditional bias — useful for style training where you want the look to apply regardless of prompt. Typical: 0.0–0.05 for character/concept LoRAs, 0.1–0.25 for style LoRAs (그림체 학습). Too high can blur prompt-driven diversity (pose/composition).",
-  "optimizer_type": "Optimizer algorithm. AdamW8bit: memory-efficient 8-bit Adam. Others: AdamW, Lion, Prodigy, Adopt_Adv, Prodigy_Adv, etc.",
+  "optimizer_type": "Optimizer algorithm. AdamW8bit: memory-efficient 8-bit Adam. CAME: confidence-guided memory-efficient optimizer (ACL 2023). Others: AdamW, Lion, Prodigy, Adopt_Adv, Prodigy_Adv, etc.",
   "lr_scheduler": "Learning rate schedule. constant: fixed LR. Others: cosine, cosine_with_restarts, polynomial.",
   "timestep_sampling": "How denoising timesteps are sampled during training. sigmoid: biased toward middle timesteps (recommended for flow matching).",
   "discrete_flow_shift": "Flow-matching shift parameter controlling the noise schedule distribution. Default: 1.0.",

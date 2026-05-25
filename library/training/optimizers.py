@@ -331,6 +331,17 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
         optimizer_class = adv_optm.Prodigy_adv
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
+    elif optimizer_type == "CAME".lower():
+        from library.training.came_optimizer import CAME
+
+        logger.info(f"use CAME optimizer | {optimizer_kwargs}")
+        logger.info(
+            "CAME: recommended learning rate is 0.5-0.9x of AdamW lr. "
+            "Consider tuning betas via optimizer_args, e.g. betas=0.9,0.999,0.9999"
+        )
+        optimizer_class = CAME
+        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
     elif optimizer_type == "AdamW".lower():
         if "fused" not in optimizer_kwargs and torch.cuda.is_available():
             optimizer_kwargs["fused"] = True
