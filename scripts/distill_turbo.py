@@ -61,6 +61,11 @@ from tqdm import tqdm
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
 from library.datasets.distill import CachedDataset
+from library.runtime.harness import (
+    compile_dit_blocks,
+    enable_training_grad_ckpt,
+    place_dit_for_training,
+)
 from library.inference.uncond import (
     default_uncond_path,
     load_uncond_crossattn,
@@ -308,31 +313,13 @@ def main():
         dit_weight_dtype=dtype,
     )
 
-    # Block swap setup (per-forward prepare hook done at each forward call below).
-    if args.blocks_to_swap > 0:
-        model.enable_block_swap(args.blocks_to_swap, device)
-        model.move_to_device_except_swap_blocks(device)
-        model.switch_block_swap_for_training()
-    else:
-        model.to(device)
+    # Block swap setup (per-forward prepare hook done at each forward call below),
+    # then compile each block._forward (native-shape flatten, one graph per
+    # token count; the pool spans more than the 2 CONSTANT_TOKEN_BUCKETS families).
+    place_dit_for_training(model, device, blocks_to_swap=args.blocks_to_swap)
+    compile_dit_blocks(model, enabled=args.torch_compile, mode="default")
 
-    if args.torch_compile:
-        import torch._dynamo as _dynamo
-
-        # compile_blocks turns on native-shape flattening (each aspect bucket at
-        # its real token count, no padding → no flash pad-leak) and traces one
-        # block graph per distinct token count. The pool spans more than the 2
-        # CONSTANT_TOKEN_BUCKETS families, so pre-raise the dynamo cache
-        # (compile_blocks' max() won't lower it) so each shape traces instead of
-        # eager fallback.
-        _dynamo.config.cache_size_limit = max(_dynamo.config.cache_size_limit, 64)
-        model.compile_blocks(mode="default")
-
-    if args.grad_ckpt:
-        model.enable_gradient_checkpointing(unsloth_offload=True)
-        logger.info("gradient checkpointing: on (unsloth CPU offload)")
-    else:
-        logger.info("gradient checkpointing: off")
+    enable_training_grad_ckpt(model, enabled=args.grad_ckpt)
 
     # ---------------- LoRA stacks ----------------
     turbo = TurboDMDNetwork(

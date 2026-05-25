@@ -21,13 +21,13 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 64
-network_dim = 64
+network_alpha = 32
+network_dim = 32
 
-learning_rate = 5e-5
-max_train_epochs = 1
-save_every_n_epochs = 1
-checkpointing_epochs = 1
+learning_rate = 2e-5
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -36,16 +36,15 @@ caption_dropout_rate = 0.1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-output_name = "anima_all"
+output_name = "anima_quarter"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0
 
-compile_inductor_mode = "reduce-overhead"
+# compile_inductor_mode = "reduce-overhead"
 
 channel_scaling_alpha = 0.5
-max_data_loader_n_workers=1
 
 # -------------
 # Ortho-lora

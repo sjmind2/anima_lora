@@ -195,3 +195,84 @@ def build_anima(
         anima.compile_blocks(mode=mode)
 
     return AnimaBundle(anima=anima, network=network, device=device, dtype=dtype)
+
+
+# --- Training-side build helpers -------------------------------------------
+#
+# ``build_anima`` above owns the *inference / existing-adapter* path: it loads a
+# checkpoint with ``create_network_from_weights`` + ``load_weights``. The
+# distillation trainers (``scripts/distill_{mod,spd,turbo}.py``) instead build a
+# *fresh, untrained* network (or train an in-model MLP), each with its own
+# ordering of freeze / optimizer / per-forward swap toggles — so they can't call
+# ``build_anima`` wholesale. These three composable helpers factor out the parts
+# that were copied verbatim across all three (the block-swap placement, the
+# dynamo-cache-bump + ``compile_blocks``, and the grad-checkpoint toggle) without
+# imposing a single ordering. Call them in whatever order your trainer needs;
+# the compile-after-monkey-patch invariant still applies — run
+# ``compile_dit_blocks`` only after the network's ``apply_to``.
+
+
+def place_dit_for_training(
+    anima: object, device: torch.device, *, blocks_to_swap: int = 0
+) -> None:
+    """Move a (frozen-base) DiT onto ``device`` for a training run.
+
+    With block swap on, the swapped blocks stay on CPU and ride the
+    forward+backward swap hooks while everything else moves to ``device``;
+    without it the whole model moves. This arms the *training* swap path (two
+    block movements per step) — distinct from the inference placement
+    ``build_anima`` does. Call before ``compile_dit_blocks`` / ``train()``.
+    """
+    if blocks_to_swap > 0:
+        anima.enable_block_swap(blocks_to_swap, device)
+        anima.move_to_device_except_swap_blocks(device)
+        anima.switch_block_swap_for_training()  # forward+backward block movement
+    else:
+        anima.to(device)
+
+
+def compile_dit_blocks(
+    anima: object,
+    *,
+    enabled: bool = True,
+    cache_size_limit: int = 64,
+    backend: str = "inductor",
+    mode: Optional[str] = None,
+) -> None:
+    """``torch.compile`` each ``Block._forward`` for a distillation/training run.
+
+    ``compile_blocks`` turns on native-shape flattening (every aspect bucket
+    runs at its real token count, no padding → no flash pad-leak into the
+    target) and traces one block graph per distinct token count. Distillation
+    pools span more than the 2 ``CONSTANT_TOKEN_BUCKETS`` families, so pre-raise
+    the dynamo cache to ``cache_size_limit`` (``compile_blocks``' own ``max()``
+    won't lower it) so each shape traces instead of falling back to eager
+    mid-warmup. No-op when ``enabled`` is False.
+
+    COMPILE LAST — install the adapter / network monkey-patches first, or
+    torch.compile traces the wrong forward (the invariant ``build_anima``
+    encodes).
+    """
+    if not enabled:
+        return
+    import torch._dynamo as _dynamo
+
+    _dynamo.config.cache_size_limit = max(
+        _dynamo.config.cache_size_limit, cache_size_limit
+    )
+    anima.compile_blocks(backend, mode=mode)
+
+
+def enable_training_grad_ckpt(anima: object, *, enabled: bool) -> None:
+    """Toggle unsloth CPU-offload gradient checkpointing for a training run.
+
+    Recomputes block activations in backward, offloading saved tensors to CPU
+    between forward/backward. The model must stay in ``train()`` mode —
+    ``Block.forward`` gates checkpointing on ``self.training``. Logs and no-ops
+    when ``enabled`` is False.
+    """
+    if enabled:
+        anima.enable_gradient_checkpointing(unsloth_offload=True)
+        log.info("gradient checkpointing: on (unsloth CPU offload)")
+    else:
+        log.info("gradient checkpointing: off")

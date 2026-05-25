@@ -324,6 +324,13 @@ def cmd_caption_index(extra):
     )
 
 
+# Same default the build_caption_index.py CLI uses; the index step is skipped
+# (not fatal) when this vocab is absent. `make download-models` fetches it (via
+# `download-tagger`), so a fresh checkout that ran the standard download will
+# have it; only a partial/offline setup hits the skip path.
+_CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
+
+
 def cmd_preprocess_subsets(extra):
     subsets = _load_subset_configs()
     if not subsets:
@@ -434,6 +441,19 @@ def cmd_preprocess(extra):
     _, vae_extra = _resolve_lowres_filter(extra)
     cmd_preprocess_vae(vae_extra)
     cmd_preprocess_te(extra)
+    # Build the method-agnostic caption index (pure data, no GPU, ~seconds) as a
+    # free by-product — it's consumed by the IP-Adapter pair sampler, artist
+    # balancing, and dataset analytics. Best-effort: the lowres/resize flags in
+    # `extra` aren't part of its argparse, so pass none; skip cleanly when the
+    # tagger vocab is missing rather than aborting the (already-done) GPU work.
+    if os.path.exists(_path("caption_index_vocab", _CAPTION_INDEX_VOCAB)):
+        cmd_caption_index([])
+    else:
+        print(
+            f"  [preprocess] skipping caption-index: tagger vocab not found at "
+            f"{_CAPTION_INDEX_VOCAB}. Run `make download-tagger`, then "
+            f"`make caption-index`."
+        )
 
 
 def cmd_preprocess_config(extra):
