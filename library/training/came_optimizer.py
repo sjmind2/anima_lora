@@ -4,10 +4,6 @@ from collections import defaultdict
 import torch
 
 
-def _came_rms(tensor):
-    return tensor.norm(2) / (tensor.numel() ** 0.5)
-
-
 def _came_approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
     r_factor = (
         (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True))
@@ -18,17 +14,7 @@ def _came_approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
     return torch.mul(r_factor, c_factor)
 
 
-def _came_approx_sq_grad_batch(exp_avg_sq_row, exp_avg_sq_col):
-    r_factor = (
-        (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True))
-        .rsqrt_()
-        .unsqueeze(-1)
-    )
-    c_factor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
-    return torch.mul(r_factor, c_factor)
-
-
-def _came_step_factored_kernel(
+def _came_step_factored_single(
     param_data, grad, exp_avg, exp_avg_sq_row, exp_avg_sq_col,
     exp_avg_res_row, exp_avg_res_col,
     lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay,
@@ -37,7 +23,7 @@ def _came_step_factored_kernel(
     exp_avg_sq_row = exp_avg_sq_row.mul(beta1).add(update.mean(dim=-1), alpha=1.0 - beta1)
     exp_avg_sq_col = exp_avg_sq_col.mul(beta1).add(update.mean(dim=-2), alpha=1.0 - beta1)
     update = _came_approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col).mul(grad)
-    rms = _came_rms(update)
+    rms = update.norm(2) / (update.numel() ** 0.5)
     update = update.div((rms / clip_threshold).clamp(min=1.0))
     exp_avg = exp_avg.mul(beta0).add(update, alpha=1.0 - beta0)
     res = (update - exp_avg) ** 2 + eps1
@@ -52,14 +38,14 @@ def _came_step_factored_kernel(
     return param_data, exp_avg, exp_avg_sq_row, exp_avg_sq_col, exp_avg_res_row, exp_avg_res_col
 
 
-def _came_step_unfactored_kernel(
+def _came_step_unfactored_single(
     param_data, grad, exp_avg, exp_avg_sq,
     lr, beta0, beta1, eps0, clip_threshold, weight_decay,
 ):
     update = (grad ** 2) + eps0
     exp_avg_sq = exp_avg_sq.mul(beta1).add(update, alpha=1.0 - beta1)
     update = exp_avg_sq.rsqrt().mul(grad)
-    rms = _came_rms(update)
+    rms = update.norm(2) / (update.numel() ** 0.5)
     update = update.div((rms / clip_threshold).clamp(min=1.0))
     exp_avg = exp_avg.mul(beta0).add(update, alpha=1.0 - beta0)
     update = exp_avg.clone()
@@ -70,56 +56,66 @@ def _came_step_unfactored_kernel(
     return param_data, exp_avg, exp_avg_sq
 
 
-_came_step_factored_compiled = None
-_came_step_unfactored_compiled = None
+def _came_factored_stacked_core(
+    params_stack, grads_stack, exp_avg_stack,
+    sq_row_stack, sq_col_stack, res_row_stack, res_col_stack,
+    lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay, numel_sqrt,
+):
+    update = (grads_stack ** 2) + eps0
+    sq_row_stack = sq_row_stack.mul(beta1).add(update.mean(dim=-1), alpha=1.0 - beta1)
+    sq_col_stack = sq_col_stack.mul(beta1).add(update.mean(dim=-2), alpha=1.0 - beta1)
+    update = _came_approx_sq_grad(sq_row_stack, sq_col_stack).mul(grads_stack)
+    rms_per_param = update.flatten(start_dim=1).norm(2, dim=1) / numel_sqrt
+    clamp_factors = (rms_per_param / clip_threshold).clamp(min=1.0)
+    n = params_stack.shape[0]
+    update = update / clamp_factors.view(n, 1, 1)
+    exp_avg_stack = exp_avg_stack.mul(beta0).add(update, alpha=1.0 - beta0)
+    res = (update - exp_avg_stack) ** 2 + eps1
+    res_row_stack = res_row_stack.mul(beta2).add(res.mean(dim=-1), alpha=1.0 - beta2)
+    res_col_stack = res_col_stack.mul(beta2).add(res.mean(dim=-2), alpha=1.0 - beta2)
+    res_approx = _came_approx_sq_grad(res_row_stack, res_col_stack)
+    update = res_approx.mul(exp_avg_stack)
+    if weight_decay != 0:
+        params_stack = params_stack.add(params_stack, alpha=-weight_decay * lr)
+    update = update.mul(lr)
+    params_stack = params_stack.add(-update)
+    return params_stack, exp_avg_stack, sq_row_stack, sq_col_stack, res_row_stack, res_col_stack
+
+
+_factored_single_compiled = None
+_unfactored_single_compiled = None
+_factored_stacked_compiled = None
 
 
 def _ensure_compiled():
-    global _came_step_factored_compiled, _came_step_unfactored_compiled
-    if _came_step_factored_compiled is not None:
+    global _factored_single_compiled, _unfactored_single_compiled, _factored_stacked_compiled
+    if _factored_single_compiled is not None:
         return
-    _came_step_factored_compiled = torch.compile(_came_step_factored_kernel, fullgraph=False)
-    _came_step_unfactored_compiled = torch.compile(_came_step_unfactored_kernel, fullgraph=False)
+    _factored_single_compiled = torch.compile(_came_step_factored_single, fullgraph=False)
+    _unfactored_single_compiled = torch.compile(_came_step_unfactored_single, fullgraph=False)
+    _factored_stacked_compiled = torch.compile(_came_factored_stacked_core, fullgraph=False)
 
 
-def _step_group_factored_stacked(group_items, lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay):
-    n = len(group_items)
-    params_stack = torch.stack([p.data for p, g, s in group_items])
-    grads_stack = torch.stack([g for p, g, s in group_items])
-    exp_avg_stack = torch.stack([s["exp_avg"] for p, g, s in group_items])
-    sq_row_stack = torch.stack([s["exp_avg_sq_row"] for p, g, s in group_items])
-    sq_col_stack = torch.stack([s["exp_avg_sq_col"] for p, g, s in group_items])
-    res_row_stack = torch.stack([s["exp_avg_res_row"] for p, g, s in group_items])
-    res_col_stack = torch.stack([s["exp_avg_res_col"] for p, g, s in group_items])
+def _step_group_factored_stacked(items, lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay, use_compiled):
+    n = len(items)
+    numel_sqrt = math.sqrt(items[0][0].numel())
 
-    update = (grads_stack ** 2) + eps0
+    params_stack = torch.stack([p.data for p, g, s in items])
+    grads_stack = torch.stack([g for p, g, s in items])
+    exp_avg_stack = torch.stack([s["exp_avg"] for p, g, s in items])
+    sq_row_stack = torch.stack([s["exp_avg_sq_row"] for p, g, s in items])
+    sq_col_stack = torch.stack([s["exp_avg_sq_col"] for p, g, s in items])
+    res_row_stack = torch.stack([s["exp_avg_res_row"] for p, g, s in items])
+    res_col_stack = torch.stack([s["exp_avg_res_col"] for p, g, s in items])
 
-    sq_row_stack = sq_row_stack.mul(beta1).add(update.mean(dim=-1), alpha=1.0 - beta1)
-    sq_col_stack = sq_col_stack.mul(beta1).add(update.mean(dim=-2), alpha=1.0 - beta1)
+    fn = _factored_stacked_compiled if use_compiled else _came_factored_stacked_core
+    params_stack, exp_avg_stack, sq_row_stack, sq_col_stack, res_row_stack, res_col_stack = fn(
+        params_stack, grads_stack, exp_avg_stack,
+        sq_row_stack, sq_col_stack, res_row_stack, res_col_stack,
+        lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay, numel_sqrt,
+    )
 
-    update = _came_approx_sq_grad_batch(sq_row_stack, sq_col_stack).mul(grads_stack)
-
-    rms_per_param = update.flatten(start_dim=1).norm(2, dim=1) / math.sqrt(update[0].numel())
-    clamp_factors = (rms_per_param / clip_threshold).clamp(min=1.0)
-    update = update / clamp_factors.view(n, 1, 1)
-
-    exp_avg_stack = exp_avg_stack.mul(beta0).add(update, alpha=1.0 - beta0)
-
-    res = (update - exp_avg_stack) ** 2 + eps1
-
-    res_row_stack = res_row_stack.mul(beta2).add(res.mean(dim=-1), alpha=1.0 - beta2)
-    res_col_stack = res_col_stack.mul(beta2).add(res.mean(dim=-2), alpha=1.0 - beta2)
-
-    res_approx = _came_approx_sq_grad_batch(res_row_stack, res_col_stack)
-    update = res_approx.mul(exp_avg_stack)
-
-    if weight_decay != 0:
-        params_stack = params_stack.add(params_stack, alpha=-weight_decay * lr)
-
-    update = update.mul(lr)
-    params_stack = params_stack.add(-update)
-
-    for i, (p, g, s) in enumerate(group_items):
+    for i, (p, g, s) in enumerate(items):
         p.data = params_stack[i]
         s["exp_avg"] = exp_avg_stack[i]
         s["exp_avg_sq_row"] = sq_row_stack[i]
@@ -128,16 +124,16 @@ def _step_group_factored_stacked(group_items, lr, beta0, beta1, beta2, eps0, eps
         s["exp_avg_res_col"] = res_col_stack[i]
 
 
-def _step_group_unfactored_foreach(group_items, lr, beta0, beta1, eps0, clip_threshold, weight_decay):
-    params_list = [p.data for p, g, s in group_items]
-    grads_list = [g for p, g, s in group_items]
-    exp_avg_list = [s["exp_avg"] for p, g, s in group_items]
-    exp_avg_sq_list = [s["exp_avg_sq"] for p, g, s in group_items]
+def _step_group_unfactored_foreach(items, lr, beta0, beta1, eps0, clip_threshold, weight_decay):
+    params_list = [p.data for p, g, s in items]
+    grads_list = [g for p, g, s in items]
+    exp_avg_list = [s["exp_avg"] for p, g, s in items]
+    exp_avg_sq_list = [s["exp_avg_sq"] for p, g, s in items]
 
-    updates = torch._foreach_pow(grads_list, [2.0])
-    torch._foreach_add_(updates, [eps0])
+    updates = torch._foreach_pow(grads_list, 2.0)
+    torch._foreach_add_(updates, eps0)
 
-    torch._foreach_mul_(exp_avg_sq_list, [beta1])
+    torch._foreach_mul_(exp_avg_sq_list, beta1)
     torch._foreach_add_(exp_avg_sq_list, updates, alpha=1.0 - beta1)
 
     torch._foreach_rsqrt_(exp_avg_sq_list)
@@ -145,11 +141,11 @@ def _step_group_unfactored_foreach(group_items, lr, beta0, beta1, eps0, clip_thr
     updates = [v.clone() for v in exp_avg_sq_list]
 
     rms_vals = torch._foreach_norm(updates, 2)
-    nelem_sqrt = math.sqrt(group_items[0][0].numel())
+    nelem_sqrt = math.sqrt(items[0][0].numel())
     clamp_factors = [max(1.0, (r.item() / nelem_sqrt) / clip_threshold) for r in rms_vals]
     torch._foreach_div_(updates, clamp_factors)
 
-    torch._foreach_mul_(exp_avg_list, [beta0])
+    torch._foreach_mul_(exp_avg_list, beta0)
     torch._foreach_add_(exp_avg_list, updates, alpha=1.0 - beta0)
 
     final_updates = [ea.clone() for ea in exp_avg_list]
@@ -157,10 +153,10 @@ def _step_group_unfactored_foreach(group_items, lr, beta0, beta1, eps0, clip_thr
     if weight_decay != 0:
         torch._foreach_add_(params_list, params_list, alpha=-weight_decay * lr)
 
-    torch._foreach_mul_(final_updates, [lr])
+    torch._foreach_mul_(final_updates, lr)
     torch._foreach_sub_(params_list, final_updates)
 
-    for i, (p, g, s) in enumerate(group_items):
+    for i, (p, g, s) in enumerate(items):
         p.data = params_list[i]
         s["exp_avg"] = exp_avg_list[i]
         s["exp_avg_sq"] = exp_avg_sq_list[i]
@@ -201,8 +197,6 @@ class CAME(torch.optim.Optimizer):
 
             factored_groups = defaultdict(list)
             unfactored_groups = defaultdict(list)
-            single_factored = []
-            single_unfactored = []
 
             for p in group["params"]:
                 if p.grad is None:
@@ -225,16 +219,16 @@ class CAME(torch.optim.Optimizer):
                     shape_key = tuple(grad.shape)
                     unfactored_groups[shape_key].append(item)
 
+            is_cuda = len(factored_groups) > 0 and next(iter(factored_groups.values()))[0][1].is_cuda
+            if is_cuda:
+                _ensure_compiled()
+
             for shape_key, items in factored_groups.items():
                 if len(items) > 1:
-                    _step_group_factored_stacked(items, lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay)
+                    _step_group_factored_stacked(items, lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay, use_compiled=is_cuda)
                 else:
                     p, grad, state = items[0]
-                    if grad.is_cuda:
-                        _ensure_compiled()
-                        fn = _came_step_factored_compiled
-                    else:
-                        fn = _came_step_factored_kernel
+                    fn = _factored_single_compiled if is_cuda else _came_step_factored_single
                     p.data, state["exp_avg"], state["exp_avg_sq_row"], state["exp_avg_sq_col"], state["exp_avg_res_row"], state["exp_avg_res_col"] = fn(
                         p.data, grad, state["exp_avg"], state["exp_avg_sq_row"], state["exp_avg_sq_col"], state["exp_avg_res_row"], state["exp_avg_res_col"],
                         lr, beta0, beta1, beta2, eps0, eps1, clip_threshold, weight_decay,
@@ -245,11 +239,10 @@ class CAME(torch.optim.Optimizer):
                     _step_group_unfactored_foreach(items, lr, beta0, beta1, eps0, clip_threshold, weight_decay)
                 else:
                     p, grad, state = items[0]
-                    if grad.is_cuda:
+                    is_item_cuda = grad.is_cuda
+                    if is_item_cuda:
                         _ensure_compiled()
-                        fn = _came_step_unfactored_compiled
-                    else:
-                        fn = _came_step_unfactored_kernel
+                    fn = _unfactored_single_compiled if is_item_cuda else _came_step_unfactored_single
                     p.data, state["exp_avg"], state["exp_avg_sq"] = fn(
                         p.data, grad, state["exp_avg"], state["exp_avg_sq"],
                         lr, beta0, beta1, eps0, clip_threshold, weight_decay,
