@@ -53,13 +53,13 @@ class AnimaEfficientLoader:
                 "clip_name": (_get_folder_list("text_encoders", "clip"),),
                 "vae_name": (folder_paths.get_filename_list("vae"),),
                 "lora_name": (["None"] + folder_paths.get_filename_list("loras"),),
-                "strength_lora": (
+                "strength_model": (
                     "FLOAT",
-                    {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                    {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
                 ),
-                "strength_reft": (
+                "strength_clip": (
                     "FLOAT",
-                    {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05},
+                    {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01},
                 ),
                 "positive": ("STRING", {"default": "", "multiline": True}),
                 "negative": ("STRING", {"default": "", "multiline": True}),
@@ -106,8 +106,8 @@ class AnimaEfficientLoader:
         clip_name,
         vae_name,
         lora_name,
-        strength_lora,
-        strength_reft,
+        strength_model,
+        strength_clip,
         positive,
         negative,
         empty_latent_width,
@@ -131,8 +131,10 @@ class AnimaEfficientLoader:
 
         if lora_name != "None":
             lora_path = folder_paths.get_full_path("loras", lora_name)
-            model = model.clone()
-            _try_apply_adapter(model, lora_path, strength_lora, strength_reft)
+            lora_sd = comfy.utils.load_torch_file(lora_path)
+            model, clip = comfy.sd.load_lora_for_models(
+                model, clip, lora_sd, strength_model, strength_clip
+            )
 
         positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
         negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
@@ -153,8 +155,8 @@ class AnimaEfficientLoader:
             clip,
             vae_name,
             lora_name,
-            strength_lora,
-            strength_reft,
+            strength_model,
+            strength_clip,
             positive,
             negative,
             empty_latent_width,
@@ -399,41 +401,41 @@ class AnimaEfficientKSampler:
             if lora_name != "None":
                 lora_path = folder_paths.get_full_path("loras", lora_name)
                 base_model = deps[0]
-                strength_reft = deps[5]
-                new_model = base_model.clone()
-                ok = _try_apply_adapter(
-                    new_model, lora_path, float(param_val), strength_reft
+                clip = deps[1]
+                strength_clip = deps[5]
+                positive_text = deps[6]
+                negative_text = deps[7]
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    base_model, clip, lora_sd, float(param_val), strength_clip
                 )
-                if not ok:
-                    raise RuntimeError(
-                        f"Failed to apply adapter '{lora_name}' "
-                        f"with strength {param_val}."
-                    )
                 cur["model"] = new_model
+                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
+                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
         elif param_type == "anima_reft_strength":
             lora_name = deps[3]
             if lora_name != "None":
                 lora_path = folder_paths.get_full_path("loras", lora_name)
                 base_model = deps[0]
-                strength_lora = deps[4]
-                new_model = base_model.clone()
-                ok = _try_apply_adapter(
-                    new_model, lora_path, strength_lora, float(param_val)
-                )
-                if not ok:
-                    raise RuntimeError(
-                        f"Failed to apply adapter '{lora_name}' "
-                        f"with ReFT strength {param_val}."
-                    )
-                cur["model"] = new_model
-        elif param_type == "lora":
-            lora_name, model_str, clip_str = param_val
-            if lora_name != "None":
-                lora_path = folder_paths.get_full_path("loras", lora_name)
-                base_model = deps[0]
                 clip = deps[1]
+                strength_model = deps[4]
                 positive_text = deps[6]
                 negative_text = deps[7]
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    base_model, clip, lora_sd, strength_model, float(param_val)
+                )
+                cur["model"] = new_model
+                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
+                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
+        elif param_type == "lora":
+            lora_name, model_str, clip_str = param_val
+            base_model = deps[0]
+            clip = deps[1]
+            positive_text = deps[6]
+            negative_text = deps[7]
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
                 lora_sd = comfy.utils.load_torch_file(lora_path)
                 new_model, new_clip = comfy.sd.load_lora_for_models(
                     base_model, clip, lora_sd, model_str, clip_str
@@ -441,6 +443,10 @@ class AnimaEfficientKSampler:
                 cur["model"] = new_model
                 cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
                 cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
+            else:
+                cur["model"] = base_model.clone()
+                cur["positive"] = CLIPTextEncode().encode(clip, positive_text)[0]
+                cur["negative"] = CLIPTextEncode().encode(clip, negative_text)[0]
         elif param_type == "checkpoint":
             ckpt_path = _get_folder_path("diffusion_models", param_val, "unet")
             cur["model"] = comfy.sd.load_diffusion_model(ckpt_path)
