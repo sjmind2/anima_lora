@@ -42,8 +42,9 @@ DEFAULT_EMBED_DIM = 1024
 # Contrastive negative-sourcing modes (docs/proposal/soft_tokens_contrastive.md):
 # ``shuffled`` = unrelated cached-TE negative; ``jaccard`` = shuffled but logit
 # down-weighted by caption tag-overlap; ``hard`` = same-artist/different-character
-# sibling (falls back to shuffled for orphan artists).
-CONTRASTIVE_MODES = ("shuffled", "jaccard", "hard")
+# sibling (falls back to shuffled for orphan artists); ``hard_backoff`` = tiered
+# same-artist → same-copyright → shuffled (copyright tier rescues hard's fallback).
+CONTRASTIVE_MODES = ("shuffled", "jaccard", "hard", "hard_backoff")
 
 # Contrastive objective, sharing the extra-forward plumbing:
 #   ``infonce`` — SoftREPA InfoNCE over cached-TE negatives (default).

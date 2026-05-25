@@ -42,11 +42,14 @@ network_dim = 8
 #                                 contrastive_weight if you want to hold the
 #                                 average pull constant. Costs no extra memory
 #                                 (firing-step peak unchanged, off-steps cheaper).
-# contrastive_negative_mode     — negative sourcing. "shuffled" (unrelated
-#                                 cached negative), "jaccard" (shuffled + logit
-#                                 down-weight by caption tag-overlap), or "hard"
-#                                 (same-artist / different-character; falls back
-#                                 to shuffled for orphan artists).
+# contrastive_negative_mode     — negative sourcing: "shuffled" (unrelated),
+#                                 "jaccard" (shuffled + tag-overlap logit
+#                                 down-weight), "hard" (same-artist/diff-char),
+#                                 or "hard_backoff" (tiered same-artist → same-
+#                                 copyright → same-artist-`original` → shuffled).
+#                                 Setup log prints the level mix; genuine-negative
+#                                 rate tracks caption_index.json char coverage —
+#                                 regen with `make caption-index` if stale.
 # contrastive_jaccard_alpha     — logit penalty for "jaccard" mode (ℓ_neg −= α·s,
 #                                 sweep 0.5–2.0). Unused by other modes.
 # contrastive_tau               — InfoNCE temperature on the logit
@@ -79,7 +82,7 @@ network_args = [
     "contrastive_weight=0.15",
     "contrastive_every_n=3",
     "contrastive_k=1",
-    "contrastive_negative_mode=hard",
+    "contrastive_negative_mode=hard_backoff",
 
     "contrastive_objective=agsm",
     "agsm_gamma=0.5",
@@ -97,10 +100,10 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 
 # Soft tokens are tiny — higher LR is fine.
-learning_rate = 5e-4
-max_train_epochs = 8
-save_every_n_epochs = 2
-checkpointing_epochs = 2
+learning_rate = 1e-3
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 # compile_inductor_mode = "reduce-overhead"
 
 # gradient_accumulation_steps = 2

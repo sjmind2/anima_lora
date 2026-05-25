@@ -17,7 +17,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 2000
+iterations = 4000
 batch_size = 1
 seed = 42
 compile_inductor_mode = "reduce-overhead"

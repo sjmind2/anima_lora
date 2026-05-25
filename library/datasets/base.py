@@ -1355,17 +1355,21 @@ class BaseDataset(torch.utils.data.Dataset):
         the soft-tokens contrastive objective.
 
         ``mode`` (docs/proposal/soft_tokens_contrastive.md):
-          - ``shuffled`` — an unrelated image (no character/copyright overlap).
-          - ``jaccard``  — shuffled sourcing + a per-negative tag-overlap weight
-            (``neg_jaccard``) the loss uses to down-weight near-misses.
-          - ``hard``     — a same-artist / different-character sibling (falls
+          - ``shuffled``    — an unrelated image (no character/copyright overlap).
+          - ``jaccard``     — shuffled sourcing + a per-negative tag-overlap
+            weight (``neg_jaccard``) the loss uses to down-weight near-misses.
+          - ``hard``        — a same-artist / different-character sibling (falls
             back to shuffled for orphan artists).
+          - ``hard_backoff`` — tiered hard negative: same-artist/different-
+            character → same-copyright/different-character → shuffled. The
+            copyright tier rescues most of ``hard``'s ~71% orphan fallback.
 
         The candidate pool is restricted to this dataset's registered stems so
         negatives never leak in from another split."""
-        if mode not in ("shuffled", "jaccard", "hard"):
+        if mode not in ("shuffled", "jaccard", "hard", "hard_backoff"):
             raise ValueError(
-                f"contrastive_negative_mode must be shuffled/jaccard/hard, got {mode!r}"
+                "contrastive_negative_mode must be shuffled/jaccard/hard/"
+                f"hard_backoff, got {mode!r}"
             )
         from library.datasets.identity_pairs import IdentityPairSampler
 
@@ -1390,6 +1394,30 @@ class BaseDataset(torch.utils.data.Dataset):
                 f"are absent from {index_path} (will skip negatives for those). "
                 f"Re-run `make caption-index` if the dataset changed."
             )
+
+        # One-shot hardness diagnostic: tally the negative *level* each registered
+        # stem would draw under this mode (one deterministic draw per stem). Lets
+        # you read the strict-vs-shuffled mix before committing to a run — e.g.
+        # how much of `hard`'s shuffled fallback the `hard_backoff` copyright tier
+        # actually rescues. Skipped for shuffled/jaccard (every draw is shuffled).
+        if mode in ("hard", "hard_backoff"):
+            from collections import Counter
+
+            diag_rng = random.Random(0)
+            hist: Counter[str] = Counter()
+            for s in sorted(registered):
+                if self.contrastive_neg_sampler.has(s):
+                    _, lvl = self.contrastive_neg_sampler.draw(s, mode, diag_rng)
+                    hist[lvl] += 1
+            total = sum(hist.values())
+            if total:
+                breakdown = ", ".join(
+                    f"{lvl}={n} ({100 * n / total:.0f}%)"
+                    for lvl, n in sorted(hist.items(), key=lambda kv: -kv[1])
+                )
+                logger.info(
+                    f"[contrastive] negative-level mix ({mode}, n={total}): {breakdown}"
+                )
 
     def _load_te_for_stem(
         self, stem: str, subset, rel_dir: str
@@ -1814,10 +1842,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 neg_feats: List[torch.Tensor] = []
                 neg_jacc: List[float] = []
                 for _ in range(k):
-                    if mode == "hard":
-                        neg_stem, _lvl = neg_sampler.hard_negative(target_stem, nrng)
-                    else:  # shuffled / jaccard both source shuffled negatives
-                        neg_stem, _lvl = neg_sampler.shuffled(target_stem, nrng)
+                    neg_stem, _lvl = neg_sampler.draw(target_stem, mode, nrng)
                     if neg_stem == target_stem:
                         continue  # no distinct negative reachable
                     feat = self._load_te_for_stem(
