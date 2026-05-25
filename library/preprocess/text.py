@@ -157,9 +157,11 @@ def cache_text_embeddings(
             if w * h < min_pixels:
                 skipped_small += 1
                 continue
+        # An empty caption file is a valid explicit empty caption
+        # (unconditional / style-LoRA training) — encode "" rather than
+        # dropping the image, so the cached set matches the training dataset.
         caption = caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
-        if caption:
-            entries.append((p, caption))
+        entries.append((p, caption))
 
     if skipped_small and verbose:
         print(

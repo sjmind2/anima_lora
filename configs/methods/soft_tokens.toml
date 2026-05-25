@@ -76,7 +76,7 @@ network_args = [
     "n_t_buckets=14",
     "init_std=0.02",
     "splice_position=front_of_padding",
-    "contrastive_weight=0.05",
+    "contrastive_weight=0.15",
     "contrastive_every_n=3",
     "contrastive_k=1",
     "contrastive_negative_mode=hard",
@@ -97,10 +97,10 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 
 # Soft tokens are tiny — higher LR is fine.
-learning_rate = 1e-3
-max_train_epochs = 4
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+learning_rate = 5e-4
+max_train_epochs = 8
+save_every_n_epochs = 2
+checkpointing_epochs = 2
 # compile_inductor_mode = "reduce-overhead"
 
 # gradient_accumulation_steps = 2
