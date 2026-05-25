@@ -834,6 +834,13 @@ class SoftTokensMethodAdapter(MethodAdapter):
         net = ctx.accelerator.unwrap_model(ctx.network)
         if float(getattr(net, "_contrastive_target_weight", 0.0) or 0.0) <= 0.0:
             return None
+        # Warmup gate: while ``_contrastive_weight`` is held at 0 (first
+        # ``_contrastive_warmup_ratio`` of training) the loss is multiplied by 0
+        # downstream and ``after_backward`` is already skipped — so the k negative
+        # DiT value forwards below would be pure waste. Skip the whole block.
+        if float(getattr(net, "_contrastive_weight", 0.0) or 0.0) <= 0.0:
+            self._pending_gradcache = None
+            return None
         # Cadence gate: skip the whole contrastive block (no_grad value pass +
         # after_backward replay) on non-firing steps. The flag is set per step
         # by ``step_contrastive_warmup`` on the optimizer-step clock.
