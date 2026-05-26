@@ -176,6 +176,10 @@ def cmd_preprocess_pe(extra):
 
     Consumed by IP-Adapter when reading PE features off disk and by the
     DCW v4 fusion head's pooled-image-feature input channel.
+
+    Also emits the dataset-mean PE centroid sidecar
+    (``post_image_dataset/ip_adapter/anima_pe_centroid_pe.safetensors``) via
+    ``--centroid`` so IP-Adapter mean-centering works without a separate pass.
     """
     run(
         [
@@ -188,6 +192,10 @@ def cmd_preprocess_pe(extra):
             "--encoder",
             "pe",
             "--recursive",
+            # Emit the dataset-mean PE centroid sidecar after the cache pass so
+            # IP-Adapter's mean-centering (ip_centroid_path) and DCW v4 have it
+            # without a separate --centroid_only run.
+            "--centroid",
             *extra,
         ]
     )
