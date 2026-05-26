@@ -112,7 +112,9 @@ def _load_subset_configs() -> list[dict] | None:
         print(f"  _load_subset_configs: no subsets in first dataset", file=sys.stderr)
         return None
     print(f"  _load_subset_configs: loaded {len(subsets)} subset(s) from {variant_path}", file=sys.stderr)
-    source_image_dir = data.get("source_image_dir", "")
+    source_image_dir = _path_overrides().get(
+        "source_image_dir", data.get("source_image_dir", "")
+    )
     for idx, sub in enumerate(subsets):
         image_dir = sub.get("image_dir", "")
         if not sub.get("source_dir") and image_dir:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 from ._common import PY, _load_subset_configs, _path, run
+
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff', '.tif', '.avif'}
 
 
 # Subfolders under the source dir are walked by default — matches the
@@ -284,29 +287,36 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
     )
     shuffle_variants = os.environ.get("CAPTION_SHUFFLE_VARIANTS", "4")
     tag_dropout_rate = os.environ.get("CAPTION_TAG_DROPOUT_RATE", "0.1")
-    run(
-        [
-            PY,
-            "scripts/preprocess/cache_text_embeddings.py",
-            "--dir",
-            source_dir,
-            "--cache_dir",
-            dst,
-            "--tree",
-            "--qwen3",
-            "models/text_encoders/qwen_3_06b_base.safetensors",
-            "--dit",
-            _path(
-                "pretrained_model_name_or_path",
-                "models/diffusion_models/anima-base-v1.0.safetensors",
-            ),
-            "--caption_shuffle_variants",
-            shuffle_variants,
-            "--caption_tag_dropout_rate",
-            tag_dropout_rate,
-            *extra,
-        ]
-    )
+    for i, subset in enumerate(subsets):
+        name = subset.get("name", "")
+        sd = subset.get("source_dir", "")
+        cd = subset.get("cache_dir", "")
+        if not sd or not cd:
+            print(f"  TE subset[{i}] ({name!r}): missing source_dir or cache_dir, skipping", file=sys.stderr)
+            continue
+        print(f"  TE subset[{i}] ({name!r}): --dir {sd!r} --cache_dir {cd!r}", file=sys.stderr)
+        run(
+            [
+                PY,
+                "scripts/preprocess/cache_text_embeddings.py",
+                "--dir",
+                sd,
+                "--cache_dir",
+                cd,
+                "--qwen3",
+                "models/text_encoders/qwen_3_06b_base.safetensors",
+                "--dit",
+                _path(
+                    "pretrained_model_name_or_path",
+                    "models/diffusion_models/anima-base-v1.0.safetensors",
+                ),
+                "--caption_shuffle_variants",
+                shuffle_variants,
+                "--caption_tag_dropout_rate",
+                tag_dropout_rate,
+                *extra,
+            ]
+        )
 
 
 def cmd_caption_index(extra):
@@ -337,8 +347,9 @@ def cmd_caption_index(extra):
 _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 
-def cmd_preprocess_subsets(extra):
-    subsets = _load_subset_configs()
+def cmd_preprocess_subsets(extra, subsets=None):
+    if subsets is None:
+        subsets = _load_subset_configs()
     if not subsets:
         print("  cmd_preprocess_subsets: no subset configs found, nothing to do", file=sys.stderr)
         return
@@ -431,38 +442,63 @@ def cmd_preprocess_subsets(extra):
     print(f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed", file=sys.stderr)
 
 
-def cmd_preprocess(extra):
-    # PE features are intentionally NOT cached here — only IP-Adapter / CMMD /
-    # DCW v4 need them, and those paths chain `preprocess-pe` explicitly (see
-    # `exp-ip-adapter-preprocess`). Leaving PE out keeps the default LoRA
-    # preprocess fast on machines that won't ever use the vision tower.
+def _auto_scan_subsets(source_dir: str) -> list[dict]:
+    src = Path(source_dir)
+    if not src.is_dir():
+        return []
+    basename = src.name
+    subsets = []
+    root_images = [f for f in src.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS]
+    if root_images:
+        subsets.append({
+            "name": "(root)",
+            "source_dir": str(src),
+            "image_dir": f"post_image_dataset/{basename}/.resized",
+            "cache_dir": f"post_image_dataset/{basename}/.lora",
+            "num_repeats": 1,
+            "recursive": True,
+        })
+    for child in sorted(src.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        m = re.match(r"^(\d+)_.+", child.name)
+        num_repeats = int(m.group(1)) if m else 1
+        subsets.append({
+            "name": child.name,
+            "source_dir": str(child),
+            "image_dir": f"post_image_dataset/{basename}/{child.name}/.resized",
+            "cache_dir": f"post_image_dataset/{basename}/{child.name}/.lora",
+            "num_repeats": num_repeats,
+            "recursive": True,
+        })
+    return subsets
 
+
+def cmd_preprocess(extra):
     subsets = _load_subset_configs()
-    if subsets:
-        print(f"  cmd_preprocess: multi-subset mode detected ({len(subsets)} subset(s))", file=sys.stderr)
-        cmd_preprocess_subsets(extra)
-        return
-    print("  cmd_preprocess: single-dataset mode (no subset configs found)", file=sys.stderr)
-    cmd_preprocess_resize(extra)
-    # The VAE step doesn't filter on size; strip the low-res convenience flags
-    # so its argparse never sees an arg it doesn't define. (resize/te pop them
-    # themselves via _resolve_lowres_filter.)
-    _, vae_extra = _resolve_lowres_filter(extra)
-    cmd_preprocess_vae(vae_extra)
-    cmd_preprocess_te(extra)
-    # Build the method-agnostic caption index (pure data, no GPU, ~seconds) as a
-    # free by-product — it's consumed by the IP-Adapter pair sampler, artist
-    # balancing, and dataset analytics. Best-effort: the lowres/resize flags in
-    # `extra` aren't part of its argparse, so pass none; skip cleanly when the
-    # tagger vocab is missing rather than aborting the (already-done) GPU work.
-    if os.path.exists(_path("caption_index_vocab", _CAPTION_INDEX_VOCAB)):
-        cmd_caption_index([])
-    else:
+    if not subsets:
+        source_image_dir = _path("source_image_dir", "image_dataset")
         print(
-            f"  [preprocess] skipping caption-index: tagger vocab not found at "
-            f"{_CAPTION_INDEX_VOCAB}. Run `make download-tagger`, then "
-            f"`make caption-index`."
+            f"  cmd_preprocess: no subsets in method TOML — auto-scanning "
+            f"source_image_dir={source_image_dir!r}",
+            file=sys.stderr,
         )
+        subsets = _auto_scan_subsets(source_image_dir)
+        if subsets:
+            print(f"  cmd_preprocess: auto-scan found {len(subsets)} subset(s)", file=sys.stderr)
+        else:
+            print(
+                f"  cmd_preprocess: source_image_dir {source_image_dir!r} is empty or does not exist",
+                file=sys.stderr,
+            )
+
+    if subsets:
+        print(f"  cmd_preprocess: tree mode with {len(subsets)} subset(s)", file=sys.stderr)
+        cmd_preprocess_subsets(extra, subsets=subsets)
+        return
+
+    print("  cmd_preprocess: no source data found, aborting", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_preprocess_config(extra):

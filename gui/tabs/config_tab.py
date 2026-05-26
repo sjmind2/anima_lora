@@ -761,6 +761,17 @@ class ConfigTab(QWidget):
                 base_split_num=base_vsn,
             )
 
+        if not self._subsets:
+            src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+            if src:
+                logger.info("_save_preset: no subsets — auto-scanning source_image_dir=%r", src)
+                self._subsets = scan_source_dir(src)
+                if self._subsets:
+                    self._rebuild_subset_ui()
+                    logger.info("_save_preset: auto-scan produced %d subset(s)", len(self._subsets))
+                else:
+                    logger.warning("_save_preset: auto-scan returned no subsets for %r", src)
+
         if self._subsets:
             logger.info("_save_preset: writing %d subset(s) to variant TOML", len(self._subsets))
             dataset_entry = out.get("datasets")
@@ -790,7 +801,7 @@ class ConfigTab(QWidget):
                 )
             first["subsets"] = subsets_list
         else:
-            logger.debug("_save_preset: no subsets to write")
+            logger.warning("_save_preset: no subsets to write (source_image_dir may be unset)")
 
         # Extra-args textarea: parse as TOML and merge in. Textarea overrides
         # the form for any duplicate key (it's the more explicit signal).
@@ -908,13 +919,18 @@ class ConfigTab(QWidget):
         self.new_variant_btn.setEnabled(False)
 
     def _resolve_cache_dir(self, variant: str) -> Path:
-        """Resolve the absolute lora_cache_dir for the given variant. Used by
-        the Train cache-exists branch and the auto-chain preprocess path."""
+        """Resolve the absolute cache directory for the given variant. Used by
+        the Train cache-exists branch and the auto-chain preprocess path.
+
+        Always uses tree-mode layout: ``post_image_dataset/<basename>/`` where
+        ``<basename>`` is the directory name of ``source_image_dir``."""
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-        cache_rel = merged.get("lora_cache_dir") or "post_image_dataset/lora"
-        cache_dir = Path(cache_rel)
-        if not cache_dir.is_absolute():
-            cache_dir = ROOT / cache_dir
+        source_image_dir = merged.get("source_image_dir", "")
+        if source_image_dir:
+            basename = Path(source_image_dir).name
+        else:
+            basename = "image_dataset"
+        cache_dir = ROOT / "post_image_dataset" / basename
         return cache_dir
 
     def _launch_preprocess(self, variant: str) -> None:
