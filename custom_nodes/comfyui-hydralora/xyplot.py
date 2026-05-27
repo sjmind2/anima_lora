@@ -354,7 +354,99 @@ class AnimaEfficientKSampler:
             decoded = decoded[:, 0]
         return decoded
 
-    def _apply_param(self, param_type, param_val, cur, deps, xyplot, axis):
+    @staticmethod
+    def _is_text_type(param_type):
+        return param_type in ("positive_prompt_sr", "negative_prompt_sr")
+
+    @staticmethod
+    def _is_model_type(param_type):
+        return param_type in (
+            "lora",
+            "anima_adapter",
+            "anima_adapter_strength",
+            "anima_reft_strength",
+            "checkpoint",
+        )
+
+    def _apply_text_mod(self, param_type, param_val, positive_text, negative_text):
+        if param_type == "positive_prompt_sr":
+            search_txt, replace_txt = param_val
+            if replace_txt is not None:
+                new_text = positive_text.replace(search_txt, replace_txt, 1)
+                logger.info(f"[Prompt S/R] Positive: replace '{search_txt}' -> '{replace_txt}'")
+                logger.info(f"[Prompt S/R] Result: '{new_text}'")
+                return new_text, negative_text
+            else:
+                logger.info("[Prompt S/R] Positive: no replacement (original)")
+                return positive_text, negative_text
+        elif param_type == "negative_prompt_sr":
+            search_txt, replace_txt = param_val
+            if replace_txt is not None:
+                new_text = negative_text.replace(search_txt, replace_txt, 1)
+                logger.info(f"[Prompt S/R] Negative: replace '{search_txt}' -> '{replace_txt}'")
+                logger.info(f"[Prompt S/R] Result: '{new_text}'")
+                return positive_text, new_text
+            else:
+                return positive_text, negative_text
+        return positive_text, negative_text
+
+    def _apply_model_mod(self, param_type, param_val, model, clip, deps):
+        if param_type == "anima_adapter":
+            adapter_name, lora_str, reft_str = param_val
+            adapter_path = folder_paths.get_full_path("loras", adapter_name)
+            new_model = model.clone()
+            ok = _try_apply_adapter(new_model, adapter_path, lora_str, reft_str)
+            if not ok:
+                raise RuntimeError(
+                    f"Failed to apply adapter '{adapter_name}' "
+                    f"(path: {adapter_path}). Check ComfyUI log for details."
+                )
+            logger.info(f"[Model Mod] Applied anima_adapter: {adapter_name}")
+            return new_model, clip
+        elif param_type == "anima_adapter_strength":
+            lora_name = deps[3]
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    model, clip, lora_sd, float(param_val), deps[5]
+                )
+                logger.info(f"[Model Mod] Applied adapter_strength: {param_val}")
+                return new_model, new_clip
+            return model, clip
+        elif param_type == "anima_reft_strength":
+            lora_name = deps[3]
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    model, clip, lora_sd, deps[4], float(param_val)
+                )
+                logger.info(f"[Model Mod] Applied reft_strength: {param_val}")
+                return new_model, new_clip
+            return model, clip
+        elif param_type == "lora":
+            lora_name, model_str, clip_str = param_val
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                new_model, new_clip = comfy.sd.load_lora_for_models(
+                    model, clip, lora_sd, model_str, clip_str
+                )
+                logger.info(f"[Model Mod] Applied lora: {lora_name}")
+                return new_model, new_clip
+            else:
+                new_model = model.clone()
+                logger.info("[Model Mod] No lora (None), cloned base model")
+                return new_model, clip
+        elif param_type == "checkpoint":
+            ckpt_path = _get_folder_path("diffusion_models", param_val, "unet")
+            new_model = comfy.sd.load_diffusion_model(ckpt_path)
+            logger.info(f"[Model Mod] Loaded checkpoint: {param_val}")
+            return new_model, clip
+        return model, clip
+
+    def _apply_simple_mod(self, param_type, param_val, cur):
         if param_type == "seeds":
             cur["seed"] = int(param_val)
         elif param_type == "steps":
@@ -366,90 +458,6 @@ class AnimaEfficientKSampler:
             cur["scheduler"] = param_val[1]
         elif param_type == "denoise":
             cur["denoise"] = float(param_val)
-        elif param_type == "positive_prompt_sr":
-            search_txt, replace_txt = param_val
-            positive_text = deps[6]
-            clip = deps[1]
-            if replace_txt is not None:
-                new_text = positive_text.replace(search_txt, replace_txt, 1)
-            else:
-                new_text = positive_text
-            cur["positive"] = CLIPTextEncode().encode(clip, new_text)[0]
-        elif param_type == "negative_prompt_sr":
-            search_txt, replace_txt = param_val
-            negative_text = deps[7]
-            clip = deps[1]
-            if replace_txt is not None:
-                new_text = negative_text.replace(search_txt, replace_txt, 1)
-            else:
-                new_text = negative_text
-            cur["negative"] = CLIPTextEncode().encode(clip, new_text)[0]
-        elif param_type == "anima_adapter":
-            adapter_name, lora_str, reft_str = param_val
-            adapter_path = folder_paths.get_full_path("loras", adapter_name)
-            base_model = deps[0]
-            new_model = base_model.clone()
-            ok = _try_apply_adapter(new_model, adapter_path, lora_str, reft_str)
-            if not ok:
-                raise RuntimeError(
-                    f"Failed to apply adapter '{adapter_name}' "
-                    f"(path: {adapter_path}). Check ComfyUI log for details."
-                )
-            cur["model"] = new_model
-        elif param_type == "anima_adapter_strength":
-            lora_name = deps[3]
-            if lora_name != "None":
-                lora_path = folder_paths.get_full_path("loras", lora_name)
-                base_model = deps[0]
-                clip = deps[1]
-                strength_clip = deps[5]
-                positive_text = deps[6]
-                negative_text = deps[7]
-                lora_sd = comfy.utils.load_torch_file(lora_path)
-                new_model, new_clip = comfy.sd.load_lora_for_models(
-                    base_model, clip, lora_sd, float(param_val), strength_clip
-                )
-                cur["model"] = new_model
-                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
-                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
-        elif param_type == "anima_reft_strength":
-            lora_name = deps[3]
-            if lora_name != "None":
-                lora_path = folder_paths.get_full_path("loras", lora_name)
-                base_model = deps[0]
-                clip = deps[1]
-                strength_model = deps[4]
-                positive_text = deps[6]
-                negative_text = deps[7]
-                lora_sd = comfy.utils.load_torch_file(lora_path)
-                new_model, new_clip = comfy.sd.load_lora_for_models(
-                    base_model, clip, lora_sd, strength_model, float(param_val)
-                )
-                cur["model"] = new_model
-                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
-                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
-        elif param_type == "lora":
-            lora_name, model_str, clip_str = param_val
-            base_model = deps[0]
-            clip = deps[1]
-            positive_text = deps[6]
-            negative_text = deps[7]
-            if lora_name != "None":
-                lora_path = folder_paths.get_full_path("loras", lora_name)
-                lora_sd = comfy.utils.load_torch_file(lora_path)
-                new_model, new_clip = comfy.sd.load_lora_for_models(
-                    base_model, clip, lora_sd, model_str, clip_str
-                )
-                cur["model"] = new_model
-                cur["positive"] = CLIPTextEncode().encode(new_clip, positive_text)[0]
-                cur["negative"] = CLIPTextEncode().encode(new_clip, negative_text)[0]
-            else:
-                cur["model"] = base_model.clone()
-                cur["positive"] = CLIPTextEncode().encode(clip, positive_text)[0]
-                cur["negative"] = CLIPTextEncode().encode(clip, negative_text)[0]
-        elif param_type == "checkpoint":
-            ckpt_path = _get_folder_path("diffusion_models", param_val, "unet")
-            cur["model"] = comfy.sd.load_diffusion_model(ckpt_path)
         elif param_type == "vae":
             vae_path = folder_paths.get_full_path("vae", param_val)
             sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
@@ -564,6 +572,8 @@ class AnimaEfficientKSampler:
             overall_pbar = comfy.utils.ProgressBar(total_images)
             completed = 0
 
+            deps = dependencies
+
             for y_val in y_values:
                 if y_type is not None and y_val is not None:
                     y_labels.append(self._make_label(y_type, y_val))
@@ -586,9 +596,42 @@ class AnimaEfficientKSampler:
                         "return_with_leftover_noise": return_with_leftover_noise,
                     }
 
-                    self._apply_param(x_type, x_val, cur, dependencies, xyplot, "x")
-                    if y_type is not None and y_val is not None:
-                        self._apply_param(y_type, y_val, cur, dependencies, xyplot, "y")
+                    # Phase 1: Text accumulation (X then Y)
+                    cur_pos_text = deps[6]
+                    cur_neg_text = deps[7]
+                    text_modified = False
+                    if self._is_text_type(x_type):
+                        cur_pos_text, cur_neg_text = self._apply_text_mod(x_type, x_val, cur_pos_text, cur_neg_text)
+                        text_modified = True
+                    if y_type is not None and y_val is not None and self._is_text_type(y_type):
+                        cur_pos_text, cur_neg_text = self._apply_text_mod(y_type, y_val, cur_pos_text, cur_neg_text)
+                        text_modified = True
+
+                    # Phase 2: Model/CLIP accumulation (X then Y)
+                    cur_model = deps[0].clone()
+                    cur_clip = deps[1]
+                    model_modified = False
+                    if self._is_model_type(x_type):
+                        cur_model, cur_clip = self._apply_model_mod(x_type, x_val, cur_model, cur_clip, deps)
+                        model_modified = True
+                    if y_type is not None and y_val is not None and self._is_model_type(y_type):
+                        cur_model, cur_clip = self._apply_model_mod(y_type, y_val, cur_model, cur_clip, deps)
+                        model_modified = True
+
+                    # Phase 3: Final encoding
+                    if text_modified or model_modified:
+                        logger.info(f"[Phase 3] Re-encoding: text_modified={text_modified}, model_modified={model_modified}")
+                        cur["positive"] = CLIPTextEncode().encode(cur_clip, cur_pos_text)[0]
+                        cur["negative"] = CLIPTextEncode().encode(cur_clip, cur_neg_text)[0]
+                        cur["model"] = cur_model
+                    else:
+                        cur["model"] = model
+
+                    # Phase 4: Simple values + VAE (X then Y)
+                    if not self._is_text_type(x_type) and not self._is_model_type(x_type):
+                        self._apply_simple_mod(x_type, x_val, cur)
+                    if y_type is not None and y_val is not None and not self._is_text_type(y_type) and not self._is_model_type(y_type):
+                        self._apply_simple_mod(y_type, y_val, cur)
 
                     img = self._do_sample(
                         cur["model"],

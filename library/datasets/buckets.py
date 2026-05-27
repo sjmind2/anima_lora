@@ -56,9 +56,7 @@ CONSTANT_TOKEN_BUCKETS = [
     (1920, 560),  #           ar 3.43
     # ---- 4096-token family (64*64) ----
     (1024, 1024),  # 64 x 64, ar 1.00 (exact square)
-    # ---- 6144-token family (96*64) ----
-    (1536, 1024),  # 96 x 64, ar 1.50
-    (1024, 1536),  # 64 x 96, ar 0.67
+
     # ---- 9216-token family (96*96) ----
     (1536, 1536),  # 96 x 96, ar 1.00 (large square)
     # ---- 1024-token family (32*32) ----
