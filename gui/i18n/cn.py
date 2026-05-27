@@ -354,4 +354,7 @@ STRINGS: dict[str, str] = {
     "loha_description": "低秩阿达马积。ΔW = (A@B)⊙(C@D)。有效秩 = dim²，参数量仅为 LoRA 的 2 倍。",
     "lokr_description": "低秩克罗内克积。通过因子分解实现结构化高秩近似。",
     "locon_description": "增强型 LoRA，支持 Conv2d 层的托克分解。线性层与标准 LoRA 相同。",
+    "bucket_stats": "统计",
+    "bucket_stats_tooltip": "扫描图片目录，按桶家族统计图片数量",
+    "bucket_stats_no_dir": "请先设置有效的图片目录",
 }

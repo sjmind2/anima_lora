@@ -39,6 +39,7 @@ path_pattern = "*"
 #   make preprocess ARGS="--drop_lowres"         # force the configured threshold
 drop_lowres_images = true
 min_pixels = 500000
+bucket_families = ["M", "L"]
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"

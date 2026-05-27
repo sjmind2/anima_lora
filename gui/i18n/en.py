@@ -366,4 +366,7 @@ STRINGS: dict[str, str] = {
     "loha_description": "Low-Rank Hadamard Product. ΔW = (A@B)⊙(C@D). Effective rank = dim² with only 2× params of LoRA.",
     "lokr_description": "Low-Rank Kronecker Product. Factorizes dimensions for structured high-rank approximation.",
     "locon_description": "Enhanced LoRA with Tucker decomposition for Conv2d layers. Same math as LoRA for Linear.",
+    "bucket_stats": "Stats",
+    "bucket_stats_tooltip": "Scan image directory and count images per bucket family",
+    "bucket_stats_no_dir": "Please set a valid image directory first",
 }

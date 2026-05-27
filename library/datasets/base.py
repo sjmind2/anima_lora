@@ -425,12 +425,15 @@ class BaseDataset(torch.utils.data.Dataset):
         self.image_data[info.image_key] = info
         self.image_to_subset[info.image_key] = subset
 
-    def make_buckets(self, constant_token_buckets: bool = False):
+    def make_buckets(self, constant_token_buckets: bool = False, enabled_families=None):
         """Assign every image to its nearest bucket resolution.
 
         With ``constant_token_buckets`` (the only training mode) buckets come
         from the fixed ``CONSTANT_TOKEN_BUCKETS`` table — native shapes, no
         padding.
+
+        When ``enabled_families`` is provided, only the named bucket families
+        are used (forwarded to ``BucketManager.make_buckets``).
         """
         logger.info("loading image sizes.")
         for info in tqdm(self.image_data.values()):
@@ -441,9 +444,12 @@ class BaseDataset(torch.utils.data.Dataset):
 
         if self.bucket_manager is None:
             self.bucket_manager = BucketManager()
-            self.bucket_manager.make_buckets(
-                constant_token_buckets=constant_token_buckets
-            )
+            if enabled_families:
+                self.bucket_manager.make_buckets(enabled_families=enabled_families)
+            else:
+                self.bucket_manager.make_buckets(
+                    constant_token_buckets=constant_token_buckets
+                )
 
         img_ar_errors = []
         for image_info in self.image_data.values():

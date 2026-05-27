@@ -56,12 +56,37 @@ CONSTANT_TOKEN_BUCKETS = [
     (1920, 560),  #           ar 3.43
     # ---- 4096-token family (64*64) ----
     (1024, 1024),  # 64 x 64, ar 1.00 (exact square)
-
-    # ---- 9216-token family (96*96) ----
-    (1536, 1536),  # 96 x 96, ar 1.00 (large square)
     # ---- 1024-token family (32*32) ----
     (512, 512),  # 32 x 32, ar 1.00 (small square)
 ]
+
+BUCKET_FAMILIES = {
+    'XL': {'tc': 5040, 'members': [(640,2016),(672,1920),(720,1792),(768,1680),(896,1440),(960,1344),(1008,1280),(1120,1152)]},
+    'L':  {'tc': 4032, 'members': [(512,2016),(576,1792),(672,1536),(768,1344),(896,1152),(1008,1024)]},
+    'M':  {'tc': 3600, 'members': [(480,1920),(576,1600),(640,1440),(720,1280),(768,1200),(800,1152),(960,960)]},
+    'S':  {'tc': 2160, 'members': [(384,1440),(432,1280),(480,1152),(576,960),(640,864),(720,768)]},
+    'XS': {'tc': 1680, 'members': [(336,1280),(384,1120),(448,960),(480,896),(560,768),(640,672)]},
+    'S1': {'tc': 1024, 'members': [(256,1024),(512,512)]},
+    'S2': {'tc': 4096, 'members': [(512,2048),(1024,1024)]},
+}
+
+
+def get_bucket_list(enabled_families=None):
+    if enabled_families is None:
+        enabled_families = list(BUCKET_FAMILIES.keys())
+    buckets = []
+    seen = set()
+    for name in enabled_families:
+        if name not in BUCKET_FAMILIES:
+            continue
+        for W, H in BUCKET_FAMILIES[name]['members']:
+            if (W, H) not in seen:
+                buckets.append((W, H))
+                seen.add((W, H))
+            if W != H and (H, W) not in seen:
+                buckets.append((H, W))
+                seen.add((H, W))
+    return buckets
 
 # DCW v4 calibration aspect-bucket set.
 #
@@ -167,19 +192,38 @@ class BucketManager:
         self.buckets = sorted_buckets
         self.reso_to_id = sorted_reso_to_id
 
-    def make_buckets(self, constant_token_buckets: bool = False):
-        if constant_token_buckets:
+    def make_buckets(self, constant_token_buckets: bool = False, enabled_families=None):
+        if enabled_families is not None:
+            resos = get_bucket_list(enabled_families)
+            family_groups = {}
+            for name in enabled_families:
+                if name not in BUCKET_FAMILIES:
+                    continue
+                members = []
+                for W, H in BUCKET_FAMILIES[name]['members']:
+                    members.append((W, H))
+                    if W != H:
+                        members.append((H, W))
+                family_groups[name] = members
+            self.set_predefined_resos(resos, family_groups=family_groups)
+        elif constant_token_buckets:
             resos = list(CONSTANT_TOKEN_BUCKETS)
+            self.set_predefined_resos(resos)
         else:
             resos = make_bucket_resolutions(
                 self.max_reso, self.min_size, self.max_size, self.reso_steps
             )
-        self.set_predefined_resos(resos)
+            self.set_predefined_resos(resos)
 
-    def set_predefined_resos(self, resos):
+    def set_predefined_resos(self, resos, family_groups=None):
         self.predefined_resos = resos.copy()
         self.predefined_resos_set = set(resos)
         self.predefined_aspect_ratios = np.array([w / h for w, h in resos])
+        self.family_groups = family_groups
+        if family_groups:
+            self.family_tc = {name: BUCKET_FAMILIES[name]['tc'] for name in family_groups if name in BUCKET_FAMILIES}
+        else:
+            self.family_tc = None
 
     def add_if_new_reso(self, reso):
         if reso not in self.reso_to_id:
@@ -190,25 +234,41 @@ class BucketManager:
 
     def select_bucket(self, image_width, image_height):
         aspect_ratio = image_width / image_height
-        reso = (image_width, image_height)
-        if reso in self.predefined_resos_set:
-            pass
-        else:
-            ar_errors = self.predefined_aspect_ratios - aspect_ratio
-            abs_ar_errors = np.abs(ar_errors)
-            min_ar_error = abs_ar_errors.min()
-            tied = np.where(abs_ar_errors == min_ar_error)[0]
+        image_area = image_width * image_height
+
+        if self.family_groups:
+            best_family = min(
+                self.family_tc.items(),
+                key=lambda kv: abs(kv[1] * 256 - image_area),
+            )[0]
+            family_resos = self.family_groups[best_family]
+            family_ars = np.array([w / h for w, h in family_resos])
+            ar_errors = np.abs(family_ars - aspect_ratio)
+            min_err = ar_errors.min()
+            tied = np.where(ar_errors == min_err)[0]
             if len(tied) > 1:
-                image_area = image_width * image_height
-                areas = np.array(
-                    [w * h for w, h in self.predefined_resos]
-                )[tied]
-                predefined_bucket_id = tied[
-                    np.abs(areas - image_area).argmin()
-                ]
+                areas = np.array([w * h for w, h in family_resos])[tied]
+                idx = tied[np.abs(areas - image_area).argmin()]
             else:
-                predefined_bucket_id = tied[0]
-            reso = self.predefined_resos[predefined_bucket_id]
+                idx = tied[0]
+            reso = family_resos[idx]
+        else:
+            reso = (image_width, image_height)
+            if reso not in self.predefined_resos_set:
+                ar_errors = self.predefined_aspect_ratios - aspect_ratio
+                abs_ar_errors = np.abs(ar_errors)
+                min_ar_error = abs_ar_errors.min()
+                tied = np.where(abs_ar_errors == min_ar_error)[0]
+                if len(tied) > 1:
+                    areas = np.array(
+                        [w * h for w, h in self.predefined_resos]
+                    )[tied]
+                    predefined_bucket_id = tied[
+                        np.abs(areas - image_area).argmin()
+                    ]
+                else:
+                    predefined_bucket_id = tied[0]
+                reso = self.predefined_resos[predefined_bucket_id]
 
         ar_reso = reso[0] / reso[1]
         if aspect_ratio > ar_reso:

@@ -412,6 +412,7 @@ def _count_training_image_paths(dataset_blueprint: "DatasetBlueprint") -> int:
 def generate_dataset_group_by_blueprint(
     dataset_group_blueprint: DatasetGroupBlueprint,
     constant_token_buckets: bool = False,
+    bucket_families=None,
 ) -> Tuple[DatasetGroup, Optional[DatasetGroup]]:
     datasets: List[DreamBoothDataset] = []
 
@@ -540,12 +541,18 @@ def generate_dataset_group_by_blueprint(
 
     for i, dataset in enumerate(datasets):
         logger.info(f"[Prepare dataset {i}]")
-        dataset.make_buckets(constant_token_buckets=constant_token_buckets)
+        if bucket_families:
+            dataset.make_buckets(enabled_families=bucket_families)
+        else:
+            dataset.make_buckets(constant_token_buckets=constant_token_buckets)
         dataset.set_seed(seed)
 
     for i, dataset in enumerate(val_datasets):
         logger.info(f"[Prepare validation dataset {i}]")
-        dataset.make_buckets(constant_token_buckets=constant_token_buckets)
+        if bucket_families:
+            dataset.make_buckets(enabled_families=bucket_families)
+        else:
+            dataset.make_buckets(constant_token_buckets=constant_token_buckets)
         dataset.set_seed(seed)
 
     return (

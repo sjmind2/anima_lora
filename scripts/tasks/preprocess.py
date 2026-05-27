@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -10,6 +11,35 @@ from pathlib import Path
 from ._common import PY, _load_subset_configs, _path, run
 
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff', '.tif', '.avif'}
+
+
+def _bucket_families_args() -> list[str]:
+    from ._common import _path_overrides
+
+    raw = _path_overrides().get("bucket_families")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        families = [str(f).strip() for f in raw if str(f).strip()]
+    else:
+        families = [f.strip() for f in str(raw).split(",") if f.strip()]
+    if not families:
+        return []
+    return ["--bucket_families", ",".join(families)]
+
+
+def _write_bucket_manifest(cache_dir: str | Path, enabled_families: list[str]) -> None:
+    from library.datasets.buckets import get_bucket_list
+
+    cache_dir = Path(cache_dir)
+    manifest = {
+        "version": 1,
+        "enabled_families": enabled_families,
+        "buckets": get_bucket_list(enabled_families),
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / ".bucket_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 # Subfolders under the source dir are walked by default — matches the
@@ -84,6 +114,7 @@ def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
 
 def cmd_preprocess_resize(extra):
     mp_args, extra = _resolve_lowres_filter(extra)
+    bf_args = _bucket_families_args()
     run(
         [
             PY,
@@ -95,6 +126,7 @@ def cmd_preprocess_resize(extra):
             "--no_copy_captions",
             "--recursive",
             *mp_args,
+            *bf_args,
             *extra,
         ]
     )
@@ -262,6 +294,7 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
     if not src.is_dir():
         print(f"  cmd_preprocess_subsets: source_dir {source_dir!r} does not exist", file=sys.stderr)
         return
+    bf_args = _bucket_families_args()
     run(
         [
             PY,
@@ -272,6 +305,7 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
             dst,
             "--tree",
             "--no_copy_captions",
+            *bf_args,
             *extra,
         ]
     )
@@ -367,6 +401,15 @@ def cmd_preprocess_subsets(extra, subsets=None):
         source_dir, dst, cache_dir = tree_paths
         _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra)
         print(f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed (tree mode)", file=sys.stderr)
+        bf_args = _bucket_families_args()
+        if bf_args:
+            from ._common import _path_overrides
+
+            families = [f.strip() for f in str(_path_overrides()["bucket_families"]).split(",") if f.strip()]
+            for subset in subsets:
+                cd = subset.get("cache_dir")
+                if cd:
+                    _write_bucket_manifest(cd, families)
         return
     print("  cmd_preprocess_subsets: could not derive common tree paths, falling back to per-subset mode", file=sys.stderr)
     for i, subset in enumerate(subsets):
@@ -402,6 +445,8 @@ def cmd_preprocess_subsets(extra, subsets=None):
         ]
         if not is_root:
             resize_cmd.append("--recursive")
+        bf_args = _bucket_families_args()
+        resize_cmd.extend(bf_args)
         resize_cmd.extend(extra)
         run(resize_cmd)
         run(
@@ -448,6 +493,16 @@ def cmd_preprocess_subsets(extra, subsets=None):
         te_cmd.extend(extra)
         run(te_cmd)
     print(f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed", file=sys.stderr)
+
+    bf_args = _bucket_families_args()
+    if bf_args:
+        from ._common import _path_overrides
+
+        families = [f.strip() for f in str(_path_overrides()["bucket_families"]).split(",") if f.strip()]
+        for subset in subsets:
+            cd = subset.get("cache_dir")
+            if cd:
+                _write_bucket_manifest(cd, families)
 
 
 def _auto_scan_subsets(source_dir: str) -> list[dict]:
@@ -627,6 +682,7 @@ def cmd_preprocess_config(extra):
                 "--bucket_reso_steps",
                 "64",
                 "--recursive",
+                *_bucket_families_args(),
                 *rest,
             ]
         )

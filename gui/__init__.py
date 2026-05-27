@@ -283,7 +283,7 @@ _GROUPS = {
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant"}
+_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant", "bucket_families"}
 
 # Virtual keys appear in the form like normal fields but don't round-trip as
 # flat TOML keys — they're derived from / written into structured sections
@@ -687,9 +687,9 @@ def confirm_train_using_cache(
     return box.exec() == QMessageBox.Yes
 
 
-def find_stale_latent_caches(cache_dir: Path) -> dict[str, int]:
+def find_stale_latent_caches(cache_dir: Path, enabled_families=None) -> dict[str, int]:
     """Return a ``{"WxH": count}`` map of VAE latent caches whose pixel
-    resolution is NOT in the live ``CONSTANT_TOKEN_BUCKETS`` table.
+    resolution is NOT in the live bucket table.
 
     Caches written under an older bucket layout (pre-4032/4200) sit at
     resolutions the current dataloader no longer buckets at, so they get
@@ -700,9 +700,10 @@ def find_stale_latent_caches(cache_dir: Path) -> dict[str, int]:
     """
     if not cache_dir.is_dir():
         return {}
-    from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
+    from library.datasets.buckets import get_bucket_list
 
-    valid = {f"{w}x{h}" for (w, h) in CONSTANT_TOKEN_BUCKETS}
+    families = enabled_families if enabled_families is not None else None
+    valid = {f"{w}x{h}" for (w, h) in get_bucket_list(families)}
     stale: dict[str, int] = {}
     for p in cache_dir.rglob("*"):
         if not p.is_file() or not p.name.endswith(_LATENT_SUFFIX):
@@ -721,15 +722,15 @@ def find_stale_latent_caches(cache_dir: Path) -> dict[str, int]:
     return stale
 
 
-def confirm_stale_caches(parent: QWidget | None, cache_dir: Path) -> bool:
+def confirm_stale_caches(parent: QWidget | None, cache_dir: Path, enabled_families=None) -> bool:
     """Warn if any VAE latent cache sits at a resolution outside the current
-    4032/4200 bucket table. Returns True to proceed (no stale caches found, or
+    bucket table. Returns True to proceed (no stale caches found, or
     the user chose to train anyway), False if the user cancelled.
 
     No-op (returns True without prompting) when there are no stale caches, so
     the call site can wrap every train launch in this.
     """
-    stale = find_stale_latent_caches(cache_dir)
+    stale = find_stale_latent_caches(cache_dir, enabled_families=enabled_families)
     if not stale:
         return True
     total = sum(stale.values())
@@ -745,6 +746,56 @@ def confirm_stale_caches(parent: QWidget | None, cache_dir: Path) -> bool:
     box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
     box.setDefaultButton(QMessageBox.Cancel)
     return box.exec() == QMessageBox.Yes
+
+
+def write_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> None:
+    from library.datasets.buckets import BUCKET_FAMILIES, get_bucket_list
+    manifest = {
+        "version": 1,
+        "enabled_families": enabled_families,
+        "buckets": get_bucket_list(enabled_families),
+    }
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / ".bucket_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def check_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> bool:
+    from library.datasets.buckets import get_bucket_list
+    manifest_path = cache_dir / ".bucket_manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    saved = set(tuple(b) for b in data.get("buckets", []))
+    current = set(tuple(b) for b in get_bucket_list(enabled_families))
+    return saved == current
+
+
+def confirm_bucket_mismatch(parent, cache_dir: Path, enabled_families: list[str]) -> str | None:
+    if check_bucket_manifest(cache_dir, enabled_families):
+        return "ok"
+    manifest_path = cache_dir / ".bucket_manifest.json"
+    if not manifest_path.exists():
+        return "missing"
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Icon.Warning)
+    msg.setWindowTitle("Bucket Configuration Mismatch")
+    msg.setText("The cached bucket configuration does not match the current selection.")
+    msg.setInformativeText("Choose an action:")
+    recalc = msg.addButton("Recalculate", QMessageBox.ButtonRole.AcceptRole)
+    skip = msg.addButton("Skip (use existing)", QMessageBox.ButtonRole.RejectRole)
+    cancel = msg.addButton("Cancel", QMessageBox.ButtonRole.DestructiveRole)
+    msg.exec()
+    clicked = msg.clickedButton()
+    if clicked == recalc:
+        return "recalc"
+    elif clicked == skip:
+        return "skip"
+    else:
+        return "cancel"
 
 
 def find_resumable_checkpoint(merged: dict) -> tuple[Path, int] | None:
@@ -993,6 +1044,51 @@ class ScaledImageLabel(QLabel):
                     self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
             )
+
+
+def load_bucket_families() -> list[str]:
+    from library.datasets.buckets import BUCKET_FAMILIES
+    settings_file = Path(__file__).resolve().parent / "gui_settings.json"
+    default = ["M", "L"]
+    if not settings_file.exists():
+        return default
+    try:
+        data = json.loads(settings_file.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    families = data.get("bucket_families", default)
+    return [f for f in families if f in BUCKET_FAMILIES]
+
+
+def scan_images_for_bucket_stats(source_dir: str, enabled_families: list[str]) -> dict[str, int]:
+    from library.datasets.buckets import BUCKET_FAMILIES
+
+    IMAGE_EXTS_SCAN = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
+    src = Path(source_dir)
+    if not src.is_dir():
+        return {}
+
+    family_tc = {}
+    for name in enabled_families:
+        if name not in BUCKET_FAMILIES:
+            continue
+        family_tc[name] = BUCKET_FAMILIES[name]['tc']
+
+    counts = {name: 0 for name in family_tc}
+    for p in src.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS_SCAN:
+            continue
+        try:
+            from PIL import Image
+            with Image.open(p) as img:
+                iw, ih = img.size
+        except Exception:
+            continue
+        img_area = iw * ih
+        best_family = min(family_tc.items(), key=lambda kv: abs(kv[1] * 256 - img_area))[0]
+        counts[best_family] += 1
+
+    return counts
 
 
 # ── Public entry point ─────────────────────────────────────────

@@ -1467,13 +1467,20 @@ class AnimaTrainer:
                 logger.info(f"Applied --sample_ratio={sample_ratio} to all subsets")
 
             blueprint = blueprint_generator.generate(user_config, args)
+
+            bucket_families = None
+            bf_arg = args.bucket_families if hasattr(args, "bucket_families") else None
+            if bf_arg:
+                if isinstance(bf_arg, list):
+                    bucket_families = [str(f).strip() for f in bf_arg if str(f).strip()]
+                else:
+                    bucket_families = [f.strip() for f in bf_arg.split(",")]
+
             train_dataset_group, val_dataset_group = (
                 config_util.generate_dataset_group_by_blueprint(
                     blueprint.dataset_group,
-                    # Native constant-token bucketing is the only mode: the sampler
-                    # buckets into CONSTANT_TOKEN_BUCKETS (the 4032/4200 families)
-                    # so compile_blocks' flatten keys on token count, not resolution.
                     constant_token_buckets=True,
+                    bucket_families=bucket_families,
                 )
             )
 
@@ -2554,6 +2561,12 @@ def setup_parser() -> argparse.ArgumentParser:
         dest="config_strict",
         action="store_true",
         help="Treat config-schema warnings (unknown keys, off-list choices) as errors.",
+    )
+    parser.add_argument(
+        "--bucket_families",
+        type=str,
+        default=None,
+        help="Comma-separated bucket family names",
     )
     return parser
 

@@ -243,13 +243,17 @@ def load_path_overrides(
     configs_dir = str(resolve_under_home(configs_dir))
     out: dict = {}
 
+    _FLAT_LIST_KEYS = {"bucket_families"}
+
     def _flat_scalars(d: dict) -> dict:
         """Pluck top-level non-container values, skipping non-flat sections
-        (``[general]`` / ``[[datasets]]`` / ``[variant]``)."""
+        (``[general]`` / ``[[datasets]]`` / ``[variant]``). Only scalar-list
+        keys listed in ``_FLAT_LIST_KEYS`` are allowed through."""
         return {
             k: v
             for k, v in d.items()
-            if k not in _NON_FLAT_SECTIONS and not isinstance(v, (dict, list))
+            if k not in _NON_FLAT_SECTIONS
+            and (not isinstance(v, (dict, list)) or (isinstance(v, list) and k in _FLAT_LIST_KEYS))
         }
 
     base_path = os.path.join(configs_dir, "base.toml")

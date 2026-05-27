@@ -57,6 +57,12 @@ def main() -> None:
         help="Disable constant-token buckets",
     )
     parser.add_argument(
+        "--bucket_families",
+        type=str,
+        default=None,
+        help="Comma-separated bucket family names (e.g., 'M,L')",
+    )
+    parser.add_argument(
         "--workers", type=int, default=4, help="Number of parallel workers (default: 4)"
     )
     parser.add_argument(
@@ -99,6 +105,10 @@ def main() -> None:
         args.constant_token_buckets and not args.no_constant_token_buckets
     )
 
+    enabled_families = None
+    if args.bucket_families:
+        enabled_families = [f.strip() for f in args.bucket_families.split(",") if f.strip()]
+
     resize_to_buckets(
         Path(args.src),
         Path(args.dst),
@@ -107,6 +117,7 @@ def main() -> None:
         max_bucket_reso=args.max_bucket_reso,
         bucket_reso_steps=args.bucket_reso_steps,
         constant_token_buckets=constant_token_buckets,
+        enabled_families=enabled_families,
         workers=args.workers,
         min_pixels=args.min_pixels,
         copy_captions=not args.no_copy_captions,

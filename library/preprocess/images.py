@@ -68,14 +68,17 @@ def process_image(
     the output mirrors it as ``out_dir / rel_dir / stem.png``. Empty ``rel_dir``
     collapses to the flat layout.
     """
-    max_reso, min_size, max_size, reso_steps, use_constant = bucket_args
+    max_reso, min_size, max_size, reso_steps, use_constant, enabled_families = bucket_args
     bucket_mgr = BucketManager(
         max_reso=max_reso,
         min_size=min_size,
         max_size=max_size,
         reso_steps=reso_steps,
     )
-    bucket_mgr.make_buckets(constant_token_buckets=use_constant)
+    if enabled_families is not None:
+        bucket_mgr.make_buckets(enabled_families=enabled_families)
+    else:
+        bucket_mgr.make_buckets(constant_token_buckets=use_constant)
 
     src_img = Image.open(image_path)
     save_kwargs = _collect_metadata(src_img)
@@ -126,6 +129,7 @@ def resize_to_buckets(
     max_bucket_reso: int = 2048,
     bucket_reso_steps: int = 64,
     constant_token_buckets: bool = True,
+    enabled_families: list[str] | None = None,
     workers: int = 4,
     min_pixels: int = 500_000,
     copy_captions: bool = True,
@@ -150,6 +154,7 @@ def resize_to_buckets(
             max_bucket_reso,
             bucket_reso_steps,
             constant_token_buckets,
+            enabled_families,
         )
 
         subsets = []
@@ -198,9 +203,14 @@ def resize_to_buckets(
                 continue
 
             if verbose:
+                label = (
+                    f"families {enabled_families}"
+                    if enabled_families
+                    else ("constant-token" if constant_token_buckets else "standard")
+                )
                 print(
                     f"[{name}] Resizing {len(image_files)} images to "
-                    f"{'constant-token' if constant_token_buckets else 'standard'} buckets"
+                    f"{label} buckets"
                 )
 
             subset_dst.mkdir(parents=True, exist_ok=True)
@@ -246,6 +256,7 @@ def resize_to_buckets(
         max_bucket_reso,
         bucket_reso_steps,
         constant_token_buckets,
+        enabled_families,
     )
 
     # walk_images enforces per-subfolder stem uniqueness (same-folder stem
@@ -279,9 +290,14 @@ def resize_to_buckets(
         image_files = kept
 
     if verbose:
+        label = (
+            f"families {enabled_families}"
+            if enabled_families
+            else ("constant-token" if constant_token_buckets else "standard")
+        )
         print(
             f"Resizing {len(image_files)} images to "
-            f"{'constant-token' if constant_token_buckets else 'standard'} buckets"
+            f"{label} buckets"
         )
 
     def _rel_for(p: Path) -> str:

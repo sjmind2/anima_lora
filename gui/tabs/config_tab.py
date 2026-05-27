@@ -17,6 +17,7 @@ from PySide6.QtCore import QProcess, Qt, QTimer, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -412,14 +413,19 @@ class ConfigTab(QWidget):
                     scan_btn = QPushButton(t("scan_subsets"))
                     scan_btn.setToolTip(t("scan_subsets_tooltip"))
                     scan_btn.clicked.connect(self._scan_subsets)
+                    stats_btn = QPushButton(t("bucket_stats"))
+                    stats_btn.setToolTip(t("bucket_stats_tooltip"))
+                    stats_btn.clicked.connect(self._bucket_stats)
                     row_widget = QWidget()
                     row_layout = QHBoxLayout(row_widget)
                     row_layout.setContentsMargins(0, 0, 0, 0)
                     row_layout.addWidget(w, 1)
                     row_layout.addWidget(scan_btn)
+                    row_layout.addWidget(stats_btn)
                     form.addRow(lbl, row_widget)
                     self._source_dir_widget = w
                     w.editingFinished.connect(self._on_source_dir_changed)
+                    self._build_bucket_family_ui(form)
                 else:
                     form.addRow(lbl, w)
             box.setLayout(form)
@@ -580,6 +586,72 @@ class ConfigTab(QWidget):
         if self._subsets:
             logger.info("_on_source_dir_changed: source_image_dir changed, re-scanning subsets")
             self._scan_subsets()
+
+    def _build_bucket_family_ui(self, form_layout):
+        from library.datasets.buckets import BUCKET_FAMILIES
+        from gui import load_bucket_families
+
+        self._family_checkboxes = {}
+        self._family_count_labels = {}
+
+        merged_families = None
+        if hasattr(self, '_origin'):
+            variant = self._current_variant()
+            merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+            bf = merged.get("bucket_families")
+            if isinstance(bf, list) and bf:
+                merged_families = bf
+        enabled = merged_families if merged_families else load_bucket_families()
+
+        for name, info in BUCKET_FAMILIES.items():
+            row = QWidget()
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+
+            cb = QCheckBox(f"{name}-family (TC={info['tc']})")
+            cb.setChecked(name in enabled)
+            cb.stateChanged.connect(lambda: self._on_family_changed())
+            layout.addWidget(cb)
+
+            count_label = QLabel("")
+            layout.addWidget(count_label)
+
+            res_text = "  ".join(f"{w}x{h}" for w, h in info['members'])
+            res_label = QLabel(res_text)
+            res_label.setStyleSheet("color: gray; font-size: 10px;")
+            layout.addWidget(res_label, 1)
+
+            form_layout.addRow("", row)
+            self._family_checkboxes[name] = cb
+            self._family_count_labels[name] = count_label
+
+    def _on_family_changed(self):
+        enabled = [n for n, cb in self._family_checkboxes.items() if cb.isChecked()]
+        if len(enabled) > 2:
+            logger.warning("More than 2 bucket families selected (%d), may impact performance", len(enabled))
+        self._mark_dirty()
+
+    def _bucket_stats(self):
+        from library.datasets.buckets import BUCKET_FAMILIES
+        from gui import scan_images_for_bucket_stats
+
+        src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+        if not src or not Path(src).is_dir():
+            QMessageBox.information(self, t("bucket_stats"), t("bucket_stats_no_dir"))
+            return
+
+        enabled = [n for n, cb in self._family_checkboxes.items() if cb.isChecked()]
+        stats = scan_images_for_bucket_stats(src, enabled)
+
+        for name in BUCKET_FAMILIES:
+            if name in self._family_count_labels:
+                count = stats.get(name, 0)
+                self._family_count_labels[name].setText(f"[{count}]" if count else "")
+
+    def get_enabled_families(self):
+        if hasattr(self, '_family_checkboxes'):
+            return [n for n, cb in self._family_checkboxes.items() if cb.isChecked()]
+        return ["M", "L"]
 
     def _build_subsets_box(self) -> QGroupBox:
         subsets_box = QGroupBox(t("subsets_section"))
@@ -825,8 +897,13 @@ class ConfigTab(QWidget):
             extras = {k: v for k, v in parsed.items() if not isinstance(v, dict)}
             out.update(extras)
 
+        out["bucket_families"] = self.get_enabled_families()
+
         path.parent.mkdir(parents=True, exist_ok=True)
         _save(path, out)
+
+        from gui.tabs.preprocess_tab import _save_settings
+        _save_settings({"bucket_families": self.get_enabled_families()})
 
         if extras:
             self.extra_args_edit.clear()
@@ -1029,7 +1106,7 @@ class ConfigTab(QWidget):
         # bucket layout (resolutions not in the 4032/4200 table) would be
         # silently skipped/mis-bucketed at train time. Only meaningful when a
         # cache is actually present (decision is True).
-        if decision is True and not confirm_stale_caches(self, cache_dir):
+        if decision is True and not confirm_stale_caches(self, cache_dir, enabled_families=self.get_enabled_families()):
             return
 
         # Resume prompt up-front (before any submit) for BOTH paths. The daemon

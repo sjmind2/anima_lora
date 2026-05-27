@@ -84,9 +84,11 @@ def _load_settings() -> dict:
     if not SETTINGS_FILE.exists():
         return {}
     try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    data.setdefault("bucket_families", ["M", "L"])
+    return data
 
 
 def _save_settings(updates: dict) -> None:

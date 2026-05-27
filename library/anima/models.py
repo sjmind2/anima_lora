@@ -1349,7 +1349,7 @@ class Anima(nn.Module):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-    def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None):
+    def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None, bucket_list=None):
         """Enable native-shape flattening and torch.compile each block's _forward.
 
         Two coupled effects, both owned by this one call:
@@ -1380,6 +1380,9 @@ class Anima(nn.Module):
 
         ``mode`` maps to torch.compile's inductor preset (e.g. ``reduce-overhead``
         to enable per-block CUDAGraphs). ``None`` leaves it unset (inductor default).
+
+        ``bucket_list`` overrides the bucket resolution list used for counting
+        token-count families. When ``None``, falls back to ``CONSTANT_TOKEN_BUCKETS``.
         """
         self._native_flatten = True
 
@@ -1389,10 +1392,11 @@ class Anima(nn.Module):
 
         from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
 
+        buckets = bucket_list if bucket_list is not None else CONSTANT_TOKEN_BUCKETS
         n = len(
             {
                 (h // self.patch_spatial) * (w // self.patch_spatial)
-                for h, w in CONSTANT_TOKEN_BUCKETS
+                for h, w in buckets
             }
         )
         _dynamo.config.cache_size_limit = max(
