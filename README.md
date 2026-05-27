@@ -17,18 +17,49 @@ Four things this repo aims to do well:
 
 ## How to start
 
-One line — installs [uv](https://astral.sh/uv) if missing, fetches the latest release, and runs `uv sync` (no git required):
+One line — installs [uv](https://astral.sh/uv) if missing, fetches the latest release, and runs `uv sync` (no git required). The installer is published as a signed-by-checksum release asset:
 
 ```bash
 # Linux / macOS
-curl -LsSf https://raw.githubusercontent.com/sorryhyun/anima_lora/main/install.sh | sh
+curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/sorryhyun/anima_lora/main/install.ps1 | iex
+irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
 ```
 
-Installs into `./anima_lora/` (override with `ANIMA_DIR`; pin a tag with `ANIMA_VERSION=v1.4.0`). On Windows it also drops an **"Anima LoRA GUI"** shortcut on your desktop. Then authenticate and pull models:
+Installs into `./anima_lora/` (override with `ANIMA_DIR`). On Windows it also drops an **"Anima LoRA GUI"** shortcut on your desktop.
+
+<details>
+<summary><b>Safer install</b> — inspect &amp; verify the script before running</summary>
+
+Every release ships a `checksums.txt` (SHA-256 of the installers + source archives). Download, verify, then run:
+
+```bash
+# Linux / macOS
+curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh
+curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt
+grep install.sh checksums.txt | sha256sum -c -    # must print "install.sh: OK"
+less install.sh                                    # read it
+sh install.sh
+```
+```powershell
+# Windows (PowerShell)
+iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 -OutFile install.ps1
+iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt -OutFile checksums.txt
+(Get-FileHash install.ps1 -Algorithm SHA256).Hash.ToLower()   # compare against checksums.txt
+notepad install.ps1                                            # read it
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+</details>
+
+**Reproducible / pinned install** — set `ANIMA_VERSION` to install a specific tag instead of latest (the recommended path when you need a known-good environment):
+
+```bash
+ANIMA_VERSION=v1.4.0 sh install.sh       # or: $env:ANIMA_VERSION='v1.4.0'; irm ... | iex
+```
+
+Then authenticate and pull models:
 
 ```bash
 cd anima_lora
@@ -146,6 +177,8 @@ make gui                  # recommended — config editor + dataset browser + tr
 ```
 
 `uv sync` resolves to **torch 2.12 + CUDA 13.2** .
+
+> **Anima ships as a uv-locked application environment, not a generic pip package.** `pyproject.toml` pins `python ==3.13.*`, specific torch / flash-attn wheel URLs, and `index-strategy = "unsafe-best-match"` — these are maintainer-chosen, known-good builds. Install with `uv sync` against the committed `uv.lock`; don't `pip install` from `pyproject.toml` (pip won't honor uv's index strategy or the prebuilt flash-attn wheels).
 
 CLI path:
 

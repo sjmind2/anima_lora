@@ -17,8 +17,9 @@ image = anima_lora.decode_to_pil(vae, latent, device)
 
 `anima_lora` is a thin lazy re-export of `library.inference` /
 `library.config.io` / `library.anima.weights` / `library.models.qwen_vae` (see
-`anima_lora/__init__.py` for the full map). Model/config paths are still
-resolved relative to the CWD, so run from the repo root. The high-level flows
+`anima_lora/__init__.py` for the full map). Repo-relative model/config paths
+resolve against the repo home, not the CWD — so `import anima_lora` works from
+any directory; set `ANIMA_HOME` to point at a relocated checkout. The high-level flows
 (`01`–`04`) import the curated entry points from `anima_lora`; the building-block
 scripts (`05`/`06`) reach into the `library.*` homes directly, since their point
 is to show the raw primitives. Either way each script keeps a `sys.path` shim so
@@ -69,6 +70,11 @@ python examples/07_frozen_dit_training_build.py             # build a trainable 
 
 ## Notes for embedders
 
+- **`anima_lora` is the stable API; `library.*` / `networks.* `/ `scripts.*` are internal.**
+  The curated `anima_lora` façade is the surface we keep stable across releases.
+  The underlying trees are installed and importable for advanced use (`05`/`06`
+  reach into `library.*` on purpose), but they may move or change signature
+  without a deprecation cycle — pin a tag (`ANIMA_VERSION`) if you depend on them.
 - **Inference is request-driven.** `01`/`02` build a typed
   `anima_lora.GenerationRequest` and call `.to_args()` — which feeds the request
   through `inference.parse_args` under the hood, so every optional knob the
