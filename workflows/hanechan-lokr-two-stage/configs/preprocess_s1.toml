@@ -1,0 +1,4 @@
+source_image_dir = "O:/LoRATraining/hanechan"
+bucket_families = ["S1"]
+drop_lowres_images = true
+min_pixels = 500000

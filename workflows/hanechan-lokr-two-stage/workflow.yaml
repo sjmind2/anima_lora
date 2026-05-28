@@ -1,0 +1,27 @@
+name: hanechan-lokr-two-stage
+description: "双阶段 LoKR 训练验证 (S1→Train1→S2→Train2)"
+
+infrastructure:
+  mixed_precision: "bf16"
+  attn_mode: "flex"
+
+stages:
+  - id: preprocess_s1
+    type: preprocess
+    config_file: preprocess_s1.toml
+    depends_on: []
+
+  - id: train_s1
+    type: train
+    config_file: train_s1.toml
+    depends_on: [preprocess_s1]
+
+  - id: preprocess_s2
+    type: preprocess
+    config_file: preprocess_s2.toml
+    depends_on: []
+
+  - id: train_s2
+    type: train
+    config_file: train_s2.toml
+    depends_on: [train_s1, preprocess_s2]
