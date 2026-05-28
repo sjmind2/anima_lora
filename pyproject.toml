@@ -63,6 +63,7 @@ dependencies = [
     "simpleeval>=1.0.7",
     "pytest>=9.0.3",
     "blake3>=1.0.8",
+    "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]
