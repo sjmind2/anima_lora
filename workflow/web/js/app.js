@@ -283,7 +283,12 @@
 
       function updateStageConfig(newVal) {
         if (selectedStageId.value) {
-          stageConfigs[selectedStageId.value] = newVal;
+          var existing = stageConfigs[selectedStageId.value];
+          if (existing) {
+            Object.keys(newVal).forEach(function(k) { existing[k] = newVal[k]; });
+          } else {
+            stageConfigs[selectedStageId.value] = newVal;
+          }
         }
       }
 

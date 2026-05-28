@@ -99,9 +99,8 @@
         return !!this.collapsedGroups[groupName];
       },
       updateField: function (key, value) {
-        var updated = Object.assign({}, this.modelValue);
-        updated[key] = value;
-        this.$emit("update:modelValue", updated);
+        this.modelValue[key] = value;
+        this.$emit("update:modelValue", this.modelValue);
       },
     },
     template: [
