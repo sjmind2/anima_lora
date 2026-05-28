@@ -1,0 +1,39 @@
+type: preprocess
+label: "预处理"
+description: "图像缩放 + VAE缓存 + 文本嵌入缓存"
+
+groups:
+  - name: data_source
+    label: "数据源"
+    fields:
+      - key: source_image_dir
+        type: path
+        required: true
+        label: "原始数据集路径"
+        help: "包含原始图片和 caption 文件的目录"
+        widget: directory
+
+  - name: bucket
+    label: "分辨率设置"
+    fields:
+      - key: bucket_families
+        type: "list[str]"
+        required: true
+        label: "Bucket Families"
+        choices: ["S1", "S2", "XS", "S", "M", "L", "XL"]
+        default: ["S1"]
+
+  - name: filter
+    label: "过滤选项"
+    fields:
+      - key: drop_lowres_images
+        type: bool
+        required: false
+        default: true
+        label: "过滤低分辨率图片"
+      - key: min_pixels
+        type: int
+        required: false
+        default: 500000
+        label: "最小像素数"
+        condition: "drop_lowres_images == true"

@@ -64,3 +64,14 @@ def resolve_placeholders(obj: Any, stage_outputs: dict[str, dict[str, str]]) -> 
     elif isinstance(obj, list):
         return [resolve_placeholders(item, stage_outputs) for item in obj]
     return obj
+
+
+_SCHEMA_DIR = Path(__file__).parent / "schemas"
+
+
+def load_schema(name: str) -> dict:
+    schema_file = _SCHEMA_DIR / f"{name}.yaml"
+    if not schema_file.exists():
+        raise FileNotFoundError(f"Schema not found: {schema_file}")
+    with open(schema_file, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)

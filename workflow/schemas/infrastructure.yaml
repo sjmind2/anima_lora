@@ -1,0 +1,44 @@
+type: infrastructure
+label: "基础设施配置"
+description: "所有阶段共享的模型路径和硬件设置"
+
+groups:
+  - name: models
+    label: "模型路径"
+    fields:
+      - key: pretrained_model_name_or_path
+        type: path
+        required: false
+        layer: infrastructure
+        label: "DiT 模型路径"
+        help: "留空使用默认路径 (models/diffusion_models/)"
+      - key: qwen3
+        type: path
+        required: false
+        layer: infrastructure
+        label: "文本编码器路径"
+        help: "留空使用默认路径"
+      - key: vae
+        type: path
+        required: false
+        layer: infrastructure
+        label: "VAE 模型路径"
+        help: "留空使用默认路径"
+
+  - name: hardware
+    label: "硬件设置"
+    fields:
+      - key: mixed_precision
+        type: enum
+        required: false
+        default: "bf16"
+        choices: ["no", "fp16", "bf16"]
+        layer: infrastructure
+        label: "混合精度"
+      - key: attn_mode
+        type: enum
+        required: false
+        default: "flex"
+        choices: ["flex", "flash"]
+        layer: infrastructure
+        label: "注意力模式"
