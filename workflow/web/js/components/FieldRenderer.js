@@ -6,6 +6,8 @@
       field: { type: Object, required: true },
       modelValue: { required: false },
       allValues: { type: Object, default: function () { return {}; } },
+      workflowStages: { type: Array, default: function () { return []; } },
+      currentStageId: { type: String, default: "" },
     },
     emits: ["update:modelValue"],
     computed: {
@@ -40,6 +42,18 @@
         if (this.field.conditional_required) return "conditional_required";
         if (this.field.required) return "required";
         return "";
+      },
+      upstreamPreprocessStages: function () {
+        var self = this;
+        return this.workflowStages.filter(function (s) {
+          return s.type === "preprocess" && s.id !== self.currentStageId;
+        });
+      },
+      upstreamTrainStages: function () {
+        var self = this;
+        return this.workflowStages.filter(function (s) {
+          return s.type === "train" && s.id !== self.currentStageId;
+        });
       },
     },
     methods: {
@@ -99,6 +113,24 @@
         }
         this.$emit("update:modelValue", list);
       },
+      isDatasetSelected: function (stageId) {
+        var val = this.currentValue;
+        if (!val || !Array.isArray(val)) return false;
+        return val.indexOf(stageId) >= 0;
+      },
+      toggleDatasetRef: function (stageId) {
+        var val = this.currentValue ? this.currentValue.slice() : [];
+        var idx = val.indexOf(stageId);
+        if (idx >= 0) {
+          val.splice(idx, 1);
+        } else {
+          val.push(stageId);
+        }
+        this.$emit("update:modelValue", val);
+      },
+      selectCheckpoint: function (val) {
+        this.$emit("update:modelValue", val);
+      },
     },
     template: [
       '<div class="form-group" :class="{ \'field-hidden\': isHidden || !conditionMet }">',
@@ -146,19 +178,37 @@
       '    @input="$emit(\'update:modelValue\', $event.target.value)"',
       '    :placeholder="field.help || \'路径\'" />',
 
-      '  <div v-if="field.type === \'dataset_ref\'"',
-      '    class="form-input"',
-      '    style="color: var(--text-dim); cursor: default; font-style: italic;">',
-      '    {{ currentValue || \'（将自动从上游阶段获取数据集）\' }}',
+      '  <div v-if="field.type === \'dataset_ref\'" class="dataset-ref-field">',
+      '    <div v-if="upstreamPreprocessStages.length === 0" class="form-input" style="color: var(--text-dim); font-style: italic;">',
+      '      无上游预处理阶段',
+      '    </div>',
+      '    <div v-else class="dataset-ref-list">',
+      '      <label v-for="ps in upstreamPreprocessStages" :key="ps.id" class="dataset-ref-item">',
+      '        <input type="checkbox"',
+      '          :checked="isDatasetSelected(ps.id)"',
+      '          @change="toggleDatasetRef(ps.id)" />',
+      '        <span class="dataset-ref-icon">📁</span>',
+      '        <span>{{ ps.id }}</span>',
+      '      </label>',
+      '    </div>',
       '  </div>',
 
-      '  <div v-if="field.type === \'checkpoint_ref\'"',
-      '    style="display: flex; align-items: center; gap: 8px;">',
-      '    <input type="text"',
-      '      class="form-input"',
+      '  <div v-if="field.type === \'checkpoint_ref\'" class="checkpoint-ref-field">',
+      '    <select v-if="upstreamTrainStages.length > 0"',
+      '      class="form-select"',
+      '      :value="currentValue || \'\'"',
+      '      @change="selectCheckpoint($event.target.value)">',
+      '      <option value="">不使用上游 checkpoint</option>',
+      '      <option v-for="ts in upstreamTrainStages" :key="ts.id"',
+      '        :value="\'${\' + ts.id + \'.safetensors_path}\'">',
+      '        🎯 {{ ts.id }}',
+      '      </option>',
+      '    </select>',
+      '    <input v-else type="text" class="form-input"',
       '      :value="currentValue"',
       '      @input="$emit(\'update:modelValue\', $event.target.value)"',
-      '      placeholder="留空不使用" />',
+      '      placeholder="无上游训练阶段" />',
+      '    <div v-if="currentValue" class="checkpoint-ref-preview">{{ currentValue }}</div>',
       '  </div>',
 
       '  <div v-if="field.type === \'list[str]\'"',

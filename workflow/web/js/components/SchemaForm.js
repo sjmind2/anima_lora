@@ -5,6 +5,8 @@
     props: {
       schemaNames: { type: Array, default: function () { return []; } },
       modelValue: { type: Object, default: function () { return {}; } },
+      workflowStages: { type: Array, default: function () { return []; } },
+      currentStageId: { type: String, default: "" },
     },
     emits: ["update:modelValue"],
     data: function () {
@@ -122,6 +124,8 @@
       '          :field="field"',
       '          :modelValue="modelValue[field.key]"',
       '          :allValues="modelValue"',
+      '          :workflowStages="workflowStages"',
+      '          :currentStageId="currentStageId"',
       '          @update:modelValue="updateField(field.key, $event)" />',
       '      </div>',
       '    </div>',

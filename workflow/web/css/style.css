@@ -1320,3 +1320,37 @@ body {
 .is-actions {
   padding-top: 8px;
 }
+
+.dataset-ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dataset-ref-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+.dataset-ref-item:hover {
+  background: var(--bg-hover);
+}
+.dataset-ref-item input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+.dataset-ref-icon {
+  font-size: 14px;
+}
+.checkpoint-ref-field select {
+  width: 100%;
+}
+.checkpoint-ref-preview {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 4px;
+  font-family: monospace;
+}

@@ -435,6 +435,8 @@
       '        <schema-form',
       '          :schemaNames="getStageSchemaNames(selectedStage)"',
       '          :modelValue="selectedStageConfig"',
+      '          :workflowStages="workflowData.stages"',
+      '          :currentStageId="selectedStageId"',
       '          @update:modelValue="updateStageConfig" />',
       '      </div>',
       '      <div v-if="!selectedStage && workflowName" class="config-panel-content">',
