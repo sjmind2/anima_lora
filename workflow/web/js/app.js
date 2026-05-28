@@ -460,6 +460,11 @@
     MethodSelector: "method-selector",
     StageCard: "stage-card",
     StageList: "stage-list",
+    DatasetSelector: "dataset-selector",
+    LogViewer: "log-viewer",
+    LossChart: "loss-chart",
+    RunControl: "run-control",
+    InfraSettings: "infra-settings",
   };
 
   var components = window.VueComponents || {};
