@@ -339,6 +339,19 @@
         onStageConfigTabChange: onStageConfigTabChange,
       };
     },
+    mounted: function() {
+      var self = this;
+      window.__wf = {
+        createNewWorkflow: function(n) { self.createNewWorkflow(n); },
+        loadWorkflow: function(n) { self.loadWorkflow(n); },
+        addStage: function(t) { self.addStage(t); },
+        removeStage: function(id) { self.removeStage(id); },
+        selectStage: function(id) { self.selectStage(id); },
+        saveWorkflow: function() { self.saveWorkflow(); },
+        startRun: function() { self.startRun(); },
+        stopRun: function() { self.stopRun(); },
+      };
+    },
     template: [
       '<div id="app-root" style="display:flex;flex-direction:column;height:100vh;">',
 
@@ -474,5 +487,15 @@
     }
   });
 
-  app.mount("#app");
+  var vm = app.mount("#app");
+
+  window.__workflowApp = {
+    createNewWorkflow: function(name) { window.__wf && window.__wf.createNewWorkflow(name); },
+    loadWorkflow: function(name) { window.__wf && window.__wf.loadWorkflow(name); },
+    addStage: function(type) { window.__wf && window.__wf.addStage(type); },
+    selectStage: function(id) { window.__wf && window.__wf.selectStage(id); },
+    saveWorkflow: function() { window.__wf && window.__wf.saveWorkflow(); },
+    startRun: function() { window.__wf && window.__wf.startRun(); },
+    stopRun: function() { window.__wf && window.__wf.stopRun(); },
+  };
 })();

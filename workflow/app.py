@@ -49,9 +49,18 @@ def create_app(workflows_root: Path | str | None = None) -> web.Application:
 
     web_dir = Path(__file__).parent / "web"
     if web_dir.exists():
-        app.router.add_static("/", str(web_dir), show_index=True)
+        app.router.add_get("/", _handle_index)
+        app.router.add_static("/static", str(web_dir))
 
     return app
+
+
+async def _handle_index(req: web.Request) -> web.Response:
+    web_dir = Path(__file__).parent / "web"
+    index_file = web_dir / "index.html"
+    if not index_file.exists():
+        return web.json_response({"error": "not found", "path": "/"}, status=404)
+    return web.FileResponse(index_file)
 
 
 async def _handle_list_workflows(req: web.Request) -> web.Response:
