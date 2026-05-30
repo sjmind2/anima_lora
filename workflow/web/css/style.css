@@ -1843,3 +1843,33 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.lang-switcher {
+  position: relative;
+  display: inline-block;
+}
+.lang-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: var(--bg-window);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  min-width: 100px;
+  z-index: 1000;
+}
+.lang-dropdown .dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  text-align: left;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+}
+.lang-dropdown .dropdown-item:hover {
+  background: var(--bg-hover);
+}
