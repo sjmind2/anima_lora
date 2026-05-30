@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from workflow.config import load_stage_toml, save_stage_toml, resolve_placeholders
+from workflow.i18n import t
 from workflow.logger import EventQueue, WorkflowLogger
 from workflow.models import WorkflowDefinition, WorkflowStage, StageOutput
 from workflow.stages.preprocess import PreprocessExecutor
@@ -90,7 +91,7 @@ class WorkflowScheduler:
             return PreprocessExecutor(stage.id, config, stage_dir, infra)
         elif stage.type == "train":
             return TrainExecutor(stage.id, config, stage_dir, infra)
-        raise ValueError(f"Unknown stage type: {stage.type}")
+        raise ValueError(t("backend.scheduler.unknownStageType", type=stage.type))
 
     def _write_status(
         self,
@@ -155,7 +156,7 @@ class WorkflowScheduler:
                 resolved = self._resolve_and_write_config(stage.id, run_dir, stage_outputs)
             except Exception as e:
                 stage_statuses[stage.id] = {"status": "config_error", "error": str(e)}
-                logger.stage_end(stage.id, f"config_error: {e}")
+                logger.stage_end(stage.id, t("backend.scheduler.configError", error=e))
                 self._write_status(run_dir, ordered, stage_statuses, stage.id, "error", started_at)
                 all_success = False
                 break
@@ -168,7 +169,7 @@ class WorkflowScheduler:
 
             config_path = run_dir / stage.id / "config.toml"
             if config_path.exists():
-                logger._log(stage.id, "INFO", f"config file: {config_path}")
+                logger._log(stage.id, "INFO", t("backend.scheduler.configFile", path=config_path))
                 try:
                     content = config_path.read_text(encoding="utf-8").strip()
                     for line in content.splitlines():

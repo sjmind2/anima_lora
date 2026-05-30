@@ -13,11 +13,13 @@ except ModuleNotFoundError:
 
 import tomli_w
 
+from workflow.i18n import t
+
 
 def load_workflow_yaml(path: Path) -> dict:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"Workflow file not found: {p}")
+        raise FileNotFoundError(t("backend.config.workflowNotFound", path=p))
     with open(p, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
@@ -32,7 +34,7 @@ def save_workflow_yaml(data: dict, path: Path) -> None:
 def load_stage_toml(path: Path) -> dict:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"TOML file not found: {p}")
+        raise FileNotFoundError(t("backend.config.tomlNotFound", path=p))
     with open(p, "rb") as f:
         return tomllib.load(f)
 
@@ -53,10 +55,10 @@ def resolve_placeholders(obj: Any, stage_outputs: dict[str, dict[str, str]]) -> 
             stage_id = m.group(1)
             key = m.group(2)
             if stage_id not in stage_outputs:
-                raise ValueError(f"unresolved placeholder: stage '{stage_id}' not found")
+                raise ValueError(t("backend.config.unresolvedPlaceholderStage", stage=stage_id))
             outputs = stage_outputs[stage_id]
             if key not in outputs:
-                raise ValueError(f"unresolved placeholder: '{key}' not in stage '{stage_id}' outputs")
+                raise ValueError(t("backend.config.unresolvedPlaceholderKey", key=key, stage=stage_id))
             return outputs[key]
         return _PLACEHOLDER_RE.sub(_replace, obj)
     elif isinstance(obj, dict):
@@ -72,6 +74,6 @@ _SCHEMA_DIR = Path(__file__).parent / "schemas"
 def load_schema(name: str) -> dict:
     schema_file = _SCHEMA_DIR / f"{name}.yaml"
     if not schema_file.exists():
-        raise FileNotFoundError(f"Schema not found: {schema_file}")
+        raise FileNotFoundError(t("backend.config.schemaNotFound", path=schema_file))
     with open(schema_file, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)

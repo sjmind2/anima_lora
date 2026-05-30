@@ -3,6 +3,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
+from workflow.i18n import t
+
 
 class WorkflowStage(BaseModel):
     id: str
@@ -15,7 +17,7 @@ class WorkflowStage(BaseModel):
     def validate_type(cls, v: str) -> str:
         allowed = {"preprocess", "train"}
         if v not in allowed:
-            raise ValueError(f"Invalid stage type: {v}. Must be one of {allowed}")
+            raise ValueError(t("backend.models.invalidStageType", v=v, allowed=allowed))
         return v
 
 
@@ -51,12 +53,12 @@ class WorkflowDefinition(BaseModel):
             if sid in visited:
                 return
             if sid in in_stack:
-                raise ValueError(f"circular dependency involving stage: {sid}")
+                raise ValueError(t("backend.models.circularDependency", sid=sid))
             in_stack.add(sid)
             stage = stage_map[sid]
             for dep in stage.depends_on:
                 if dep not in stage_map:
-                    raise ValueError(f"unknown dependency: {dep}")
+                    raise ValueError(t("backend.models.unknownDependency", dep=dep))
                 visit(dep)
             in_stack.remove(sid)
             visited.add(sid)
