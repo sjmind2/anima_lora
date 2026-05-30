@@ -5,6 +5,7 @@
   var _messages = Vue.reactive({});
   var _fallback = {};
   var _locale = "en";
+  var _localeVersion = Vue.ref(0);
 
   function _detectLocale() {
     var stored = null;
@@ -60,11 +61,11 @@
         .then(function (r) { return r.json(); })
         .then(function (data) { _fallback = data; })
         .then(function () {
-          if (_locale === "en") { _setMessages(_fallback); return; }
+          if (_locale === "en") { _setMessages(_fallback); _localeVersion.value++; return; }
           return fetch(localeUrl)
             .then(function (r) { return r.json(); })
-            .then(function (data) { _setMessages(data); })
-            .catch(function () { _setMessages(_fallback); });
+            .then(function (data) { _setMessages(data); _localeVersion.value++; })
+            .catch(function () { _setMessages(_fallback); _localeVersion.value++; });
         });
     },
     setLocale: function (locale) {
@@ -73,13 +74,15 @@
       try { localStorage.setItem(STORAGE_KEY, locale); } catch (e) {}
       if (locale === "en") {
         _setMessages(_fallback);
+        _localeVersion.value++;
         return Promise.resolve();
       }
       return fetch("/static/i18n/locales/" + locale + ".json")
         .then(function (r) { return r.json(); })
-        .then(function (data) { _setMessages(data); })
-        .catch(function () { _setMessages(_fallback); });
+        .then(function (data) { _setMessages(data); _localeVersion.value++; })
+        .catch(function () { _setMessages(_fallback); _localeVersion.value++; });
     },
-    getLocale: function () { return _locale; }
+    getLocale: function () { return _locale; },
+    localeVersion: _localeVersion
   };
 })();

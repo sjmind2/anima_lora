@@ -19,12 +19,18 @@
       };
     },
     watch: {
+      _localeVer: function () {
+        this._lastSchemaKey = null;
+        if (this.schemaNames && this.schemaNames.length > 0) {
+          this.loadSchemas(this.schemaNames);
+        }
+      },
       schemaNames: {
         immediate: true,
         deep: true,
         handler: function (names) {
           if (names && names.length > 0) {
-            var key = names.join(",");
+            var key = names.join(",") + ":" + this._localeVer;
             if (this._lastSchemaKey === key) return;
             this._lastSchemaKey = key;
             this.loadSchemas(names);
@@ -36,6 +42,9 @@
       groups: function () {
         return this.mergedGroups;
       },
+      _localeVer: function () {
+        return (typeof I18n !== "undefined" && I18n.localeVersion) ? I18n.localeVersion.value : 0;
+      }
     },
     methods: {
       loadSchemas: function (names) {
