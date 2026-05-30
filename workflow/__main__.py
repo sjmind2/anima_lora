@@ -1,6 +1,7 @@
 import argparse
 import sys
 import threading
+import webbrowser
 
 from workflow.app import create_app, start_server
 
@@ -16,6 +17,7 @@ def main():
     port = args.port
 
     if args.no_gui:
+        print(f"Starting server on http://localhost:{port}")
         start_server(app, port)
     else:
         try:
@@ -25,12 +27,25 @@ def main():
                 target=start_server, args=(app, port), daemon=True
             )
             server_thread.start()
+
+            import time
+            time.sleep(0.5)
+
+            print(f"Opening Anima Workflow on http://localhost:{port}")
             webview.create_window(
                 "Anima Workflow", f"http://localhost:{port}", width=1200, height=800
             )
+            webview.start()
         except ImportError:
-            print("pywebview not installed, falling back to browser mode")
-            start_server(app, port)
+            print("pywebview not installed, opening browser...")
+            server_thread = threading.Thread(
+                target=start_server, args=(app, port), daemon=True
+            )
+            server_thread.start()
+            import time
+            time.sleep(1)
+            webbrowser.open(f"http://localhost:{port}")
+            server_thread.join()
 
 
 if __name__ == "__main__":

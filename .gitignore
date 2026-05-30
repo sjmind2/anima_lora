@@ -42,3 +42,6 @@ _archive/
 origin_image/
 origin_dataset/
 gui/gui_settings.json
+node_modules/
+workflows/
+.anima_workflow/

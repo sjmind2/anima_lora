@@ -463,6 +463,10 @@ def create_network_from_weights(
             modules_dim[lora_name] = value.size(1)
         elif key.endswith(".hada_w1_a") and value.dim() == 1:
             modules_dim[lora_name] = value.size(0)
+        if key.endswith(".lokr_w1") and value.dim() == 2:
+            modules_dim[lora_name] = value.size(0)
+        elif key.endswith(".lokr_w2_a") and value.dim() == 2:
+            modules_dim[lora_name] = value.size(1)
 
     # Finalize the MoE shape now that the full scan is done. A module that
     # has only ``lora_up_weight`` (3-D) but no matching ``lora_down_weight``
@@ -602,7 +606,7 @@ def create_network_from_weights(
     elif has_ortho:
         spec = NETWORK_REGISTRY["ortho"]
         module_class = spec.module_class
-    else:
+    elif not has_lycoris_loha and not has_lycoris_lokr:
         spec = NETWORK_REGISTRY["lora"]
         module_class = spec.module_class
 

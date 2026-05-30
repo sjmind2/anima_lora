@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from pathlib import Path
-from typing import Any
 
 from aiohttp import web
 
@@ -14,16 +14,46 @@ from workflow.config import (
     load_stage_toml,
     save_stage_toml,
     load_schema,
-    resolve_placeholders,
 )
 from workflow.logger import EventQueue
-from workflow.models import WorkflowDefinition, WorkflowStage
+from workflow.models import WorkflowDefinition
 from workflow.scheduler import WorkflowScheduler
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _config_path() -> Path:
+    return _project_root() / ".anima_workflow_config.json"
+
+
+def _load_config() -> dict:
+    cp = _config_path()
+    if cp.exists():
+        try:
+            return json.loads(cp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_config(data: dict) -> None:
+    cp = _config_path()
+    cp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _resolve_workflows_root() -> Path:
+    cfg = _load_config()
+    custom = cfg.get("workflows_root")
+    if custom:
+        return Path(custom)
+    return _project_root() / ".anima_workflow"
 
 
 def create_app(workflows_root: Path | str | None = None) -> web.Application:
     if workflows_root is None:
-        workflows_root = Path.home() / ".anima_workflow"
+        workflows_root = _resolve_workflows_root()
     workflows_root = Path(workflows_root)
     workflows_root.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +68,13 @@ def create_app(workflows_root: Path | str | None = None) -> web.Application:
     app.router.add_get("/api/workflows/{name}", _handle_get_workflow)
     app.router.add_put("/api/workflows/{name}", _handle_update_workflow)
     app.router.add_delete("/api/workflows/{name}/runs", _handle_clear_runs)
+    app.router.add_get("/api/workflows/{name}/runs", _handle_list_runs)
+    app.router.add_post(
+        "/api/workflows/{name}/runs/{run_id}/open", _handle_open_run_dir
+    )
+    app.router.add_get(
+        "/api/workflows/{name}/runs/{run_id}/log", _handle_workflow_run_log
+    )
     app.router.add_get("/api/workflows/{name}/infrastructure", _handle_get_infra)
     app.router.add_put("/api/workflows/{name}/infrastructure", _handle_set_infra)
     app.router.add_post("/api/workflows/{name}/run", _handle_run)
@@ -46,6 +83,10 @@ def create_app(workflows_root: Path | str | None = None) -> web.Application:
     app.router.add_get("/api/runs/{run_id}/log", _handle_log)
     app.router.add_get("/api/schemas/{schema_name}", _handle_get_schema)
     app.router.add_get("/api/recent-workflows", _handle_recent)
+    app.router.add_post("/api/dataset/bucket-stats", _handle_bucket_stats)
+    app.router.add_get("/api/settings", _handle_get_settings)
+    app.router.add_put("/api/settings", _handle_set_settings)
+    app.router.add_post("/api/browse", _handle_browse)
 
     web_dir = Path(__file__).parent / "web"
     if web_dir.exists():
@@ -95,6 +136,21 @@ async def _handle_get_workflow(req: web.Request) -> web.Response:
     if not wf_file.exists():
         return web.json_response({"error": "not found"}, status=404)
     data = load_workflow_yaml(wf_file)
+    stage_configs = {}
+    configs_dir = root / name / "configs"
+    for stage in data.get("stages", []):
+        sid = stage.get("id")
+        cf = stage.get("config_file")
+        if sid and cf:
+            toml_path = configs_dir / cf
+            if toml_path.exists():
+                try:
+                    stage_configs[sid] = load_stage_toml(toml_path)
+                except Exception:
+                    stage_configs[sid] = {}
+            else:
+                stage_configs[sid] = {}
+    data["stage_configs"] = stage_configs
     return web.json_response(data)
 
 
@@ -103,7 +159,17 @@ async def _handle_update_workflow(req: web.Request) -> web.Response:
     root = req.app["workflows_root"]
     wf_file = root / name / "workflow.yaml"
     body = await req.json()
+    stage_configs = body.pop("stage_configs", None)
     save_workflow_yaml(body, wf_file)
+    if stage_configs and isinstance(stage_configs, dict):
+        configs_dir = root / name / "configs"
+        configs_dir.mkdir(parents=True, exist_ok=True)
+        stages = body.get("stages", [])
+        for stage in stages:
+            sid = stage.get("id")
+            cf = stage.get("config_file")
+            if sid and cf and sid in stage_configs:
+                save_stage_toml(stage_configs[sid], configs_dir / cf)
     return web.json_response(body)
 
 
@@ -113,8 +179,79 @@ async def _handle_clear_runs(req: web.Request) -> web.Response:
     runs_dir = root / name / "runs"
     if runs_dir.exists():
         import shutil
+
         shutil.rmtree(runs_dir)
     return web.json_response({"status": "ok"})
+
+
+async def _handle_list_runs(req: web.Request) -> web.Response:
+    name = req.match_info["name"]
+    root = req.app["workflows_root"]
+    runs_dir = root / name / "runs"
+    if not runs_dir.exists():
+        return web.json_response([])
+    import re as _re
+    _run_pattern = _re.compile(r"^\d{8}-\d{6}$")
+    runs = []
+    for d in sorted(runs_dir.iterdir(), key=lambda p: p.name, reverse=True):
+        if not d.is_dir() or not _run_pattern.match(d.name):
+            continue
+        status_file = d / "status.json"
+        status = "unknown"
+        stages = []
+        created_at = None
+        if status_file.exists():
+            try:
+                payload = json.loads(status_file.read_text(encoding="utf-8"))
+                status = payload.get("status", "unknown")
+                created_at = payload.get("started_at")
+                for s in payload.get("stages", []):
+                    stages.append({"id": s["id"], "status": s.get("status", "pending")})
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if not created_at:
+            from datetime import datetime as _dt
+            created_at = _dt.fromtimestamp(d.stat().st_ctime).isoformat()
+        runs.append(
+            {"id": d.name, "status": status, "stages": stages, "created_at": created_at}
+        )
+    return web.json_response(runs)
+
+
+async def _handle_open_run_dir(req: web.Request) -> web.Response:
+    import platform
+
+    name = req.match_info["name"]
+    run_id = req.match_info["run_id"]
+    root = req.app["workflows_root"]
+    run_dir = root / name / "runs" / run_id
+    if not run_dir.exists():
+        return web.json_response({"error": "not found"}, status=404)
+    path = str(run_dir.resolve())
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(path)
+    elif system == "Darwin":
+        import subprocess as _sp
+
+        _sp.Popen(["open", path])
+    else:
+        import subprocess as _sp
+
+        _sp.Popen(["xdg-open", path])
+    return web.json_response({"status": "opened"})
+
+
+async def _handle_workflow_run_log(req: web.Request) -> web.Response:
+    name = req.match_info["name"]
+    run_id = req.match_info["run_id"]
+    root = req.app["workflows_root"]
+    log_file = root / name / "runs" / run_id / "run.log"
+    if not log_file.exists():
+        return web.json_response({"lines": []})
+    text = log_file.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    return web.json_response({"lines": lines})
 
 
 async def _handle_get_infra(req: web.Request) -> web.Response:
@@ -151,7 +288,7 @@ async def _handle_run(req: web.Request) -> web.Response:
     req.app["active_scheduler"] = scheduler
 
     def _run_in_thread():
-        scheduler.run(log_file=wf_dir / "runs" / "latest" / "run.log")
+        scheduler.run()
 
     t = threading.Thread(target=_run_in_thread, daemon=True)
     t.start()
@@ -213,6 +350,62 @@ async def _handle_recent(req: web.Request) -> web.Response:
             data["dir"] = d.name
             recent.append(data)
     return web.json_response(recent)
+
+
+async def _handle_bucket_stats(req: web.Request) -> web.Response:
+    body = await req.json()
+    source_dir = body.get("source_dir", "")
+    enabled_families = body.get("enabled_families", [])
+    if not source_dir:
+        return web.json_response({"error": "source_dir is required"}, status=400)
+    from library.datasets.buckets import scan_dataset_bucket_distribution
+
+    result = scan_dataset_bucket_distribution(source_dir, enabled_families)
+    return web.json_response(result)
+
+
+async def _handle_get_settings(req: web.Request) -> web.Response:
+    cfg = _load_config()
+    cfg["workflows_root"] = cfg.get("workflows_root", str(req.app["workflows_root"]))
+    return web.json_response(cfg)
+
+
+async def _handle_set_settings(req: web.Request) -> web.Response:
+    body = await req.json()
+    cfg = _load_config()
+    cfg.update(body)
+    _save_config(cfg)
+    return web.json_response(cfg)
+
+
+async def _handle_browse(req: web.Request) -> web.Response:
+    body = await req.json()
+    browse_path = body.get("path", "")
+    browse_type = body.get("type", "directory")
+    if not browse_path:
+        return web.json_response({"entries": [], "error": "path is required"}, status=400)
+    p = Path(browse_path)
+    if browse_type == "file":
+        parent = p.parent if not p.is_dir() else p
+        name_filter = p.name if not p.is_dir() else ""
+    else:
+        parent = p if p.is_dir() else p.parent
+        name_filter = ""
+    if not parent.exists():
+        return web.json_response({"entries": [], "error": "path not found"}, status=404)
+    entries = []
+    try:
+        for child in sorted(parent.iterdir()):
+            if name_filter and not child.name.lower().startswith(name_filter.lower()):
+                continue
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "is_dir": child.is_dir(),
+            })
+    except PermissionError:
+        return web.json_response({"entries": [], "error": "permission denied"}, status=403)
+    return web.json_response({"entries": entries, "path": str(parent)})
 
 
 def start_server(app: web.Application, port: int = 8765) -> None:

@@ -3,6 +3,29 @@ label: "训练通用参数"
 description: "所有训练方法共享的参数，切换方法时保留"
 
 groups:
+  - name: advanced
+    label: "高级覆盖"
+    collapsed: true
+    fields:
+      - key: pretrained_model_name_or_path
+        type: path
+        required: false
+        layer: common
+        label: "DiT 模型覆盖"
+        help: "留空使用全局设置"
+      - key: qwen3
+        type: path
+        required: false
+        layer: common
+        label: "文本编码器覆盖"
+        help: "留空使用全局设置"
+      - key: vae
+        type: path
+        required: false
+        layer: common
+        label: "VAE 模型覆盖"
+        help: "留空使用全局设置"
+
   - name: training
     label: "训练超参"
     fields:
@@ -65,7 +88,7 @@ groups:
         required: false
         layer: common
         label: "优化器参数"
-        help: "如 weight_decay=0.01, betas=0.9,0.999,0.9999"
+        help: "多个参数用空格分隔，如: weight_decay=0.01 betas=0.9,0.999,0.9999"
       - key: gradient_accumulation_steps
         type: int
         required: false
@@ -78,6 +101,25 @@ groups:
         layer: common
         default: 1.0
         label: "最大梯度范数"
+      - key: timestep_sampling
+        type: enum
+        required: false
+        layer: common
+        default: "sigmoid"
+        choices: ["sigmoid", "uniform", "sigmoid_shifted"]
+        label: "时间步采样策略"
+      - key: discrete_flow_shift
+        type: float
+        required: false
+        layer: common
+        default: 1.0
+        label: "离散流移位"
+      - key: sigmoid_bias
+        type: float
+        required: false
+        layer: common
+        default: 0.0
+        label: "Sigmoid 偏置"
 
   - name: data
     label: "数据"
@@ -99,12 +141,31 @@ groups:
         layer: common
         default: 0.03
         label: "Caption Dropout 率"
+      - key: caption_extension
+        type: str
+        required: false
+        layer: common
+        default: ".txt"
+        label: "Caption 扩展名"
+      - key: keep_tokens
+        type: int
+        required: false
+        layer: common
+        default: 3
+        label: "保留 Token 数"
       - key: cache_llm_adapter_outputs
         type: bool
         required: false
         layer: common
         default: true
         label: "缓存 LLM Adapter 输出"
+      - key: network_train_unet_only
+        type: bool
+        required: false
+        layer: common
+        default: true
+        label: "仅训练 UNet"
+        help: "缓存 TE 输出时必须开启"
 
   - name: checkpoint
     label: "Checkpoint 衔接"
@@ -120,7 +181,7 @@ groups:
         type: bool
         required: false
         layer: common
-        default: true
+        default: false
         hidden: true
 
   - name: output
@@ -169,7 +230,7 @@ groups:
         type: bool
         required: false
         layer: common
-        default: false
+        default: true
         label: "torch.compile 加速"
       - key: seed
         type: int

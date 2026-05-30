@@ -1060,35 +1060,15 @@ def load_bucket_families() -> list[str]:
     return [f for f in families if f in BUCKET_FAMILIES]
 
 
-def scan_images_for_bucket_stats(source_dir: str, enabled_families: list[str]) -> dict[str, int]:
-    from library.datasets.buckets import BUCKET_FAMILIES
+def scan_images_for_bucket_stats(
+    source_dir: str, enabled_families: list[str]
+) -> dict[str, int]:
+    from library.datasets.buckets import scan_dataset_bucket_distribution
 
-    IMAGE_EXTS_SCAN = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif'}
-    src = Path(source_dir)
-    if not src.is_dir():
+    result = scan_dataset_bucket_distribution(source_dir, enabled_families)
+    if "error" in result:
         return {}
-
-    family_tc = {}
-    for name in enabled_families:
-        if name not in BUCKET_FAMILIES:
-            continue
-        family_tc[name] = BUCKET_FAMILIES[name]['tc']
-
-    counts = {name: 0 for name in family_tc}
-    for p in src.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS_SCAN:
-            continue
-        try:
-            from PIL import Image
-            with Image.open(p) as img:
-                iw, ih = img.size
-        except Exception:
-            continue
-        img_area = iw * ih
-        best_family = min(family_tc.items(), key=lambda kv: abs(kv[1] * 256 - img_area))[0]
-        counts[best_family] += 1
-
-    return counts
+    return {name: info["resized"] for name, info in result["families"].items()}
 
 
 # ── Public entry point ─────────────────────────────────────────

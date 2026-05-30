@@ -62,3 +62,12 @@ class WorkflowLogger:
 
     def info(self, stage_id: str, message: str) -> None:
         self._log(stage_id, "INFO", message)
+
+    def stage_stdout_batch(self, stage_id: str, lines: list[str]) -> None:
+        for line in lines:
+            self._log(stage_id, "STDOUT", line)
+        self._emit({
+            "ev": "stage_stdout_batch",
+            "stage_id": stage_id,
+            "lines": lines,
+        })

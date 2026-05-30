@@ -1,34 +1,74 @@
-# gui-methods/tlora.toml — T-LoRA + OrthoLoRA (default mergeable combo).
-#
-# Stacks timestep-dependent rank masking (T-LoRA) on top of orthogonal
-# parameterization (OrthoLoRA). Both save as plain LoRA at checkpoint time
-# (OrthoLoRA via thin SVD, T-LoRA mask is training-only), so the result is
-# fully bakeable into the base DiT via the Merge tab. Good general-purpose
-# choice when you want rank-by-σ scheduling with orthogonal regularization.
-
 network_dim = 32
 network_alpha = 32
-
-learning_rate = 2e-5
+learning_rate = 0.0002
 max_train_epochs = 4
 save_every_n_epochs = 2
 checkpointing_epochs = 2
-
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
-caption_dropout_rate = 0.1
-
+caption_dropout_rate = 0.03
 use_ortho = true
-
 use_timestep_mask = true
 min_rank = 8
 alpha_rank_scale = 1.0
-
 output_name = "anima_tlora_ortho"
-
 blocks_to_swap = 0
-
 use_cmmd = false
+source_image_dir = "O:/LoRATraining/hanechan"
+bucket_families = [ "S1",]
+optimizer_type = "CAME"
+optimizer_args = [ "weight_decay=0.01", "betas=0.9,0.999,0.9999",]
+[[datasets]]
+validation_split_num = 0
+validation_split = 0.0
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.resized"
+cache_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.lora"
+num_repeats = 1
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/1_hanechan_v8_upper/.resized"
+cache_dir = "post_image_dataset/hanechan/1_hanechan_v8_upper/.lora"
+num_repeats = 1
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/3_hanechan_v8_lying/.resized"
+cache_dir = "post_image_dataset/hanechan/3_hanechan_v8_lying/.lora"
+num_repeats = 3
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/3_hanechan_v8_other/.resized"
+cache_dir = "post_image_dataset/hanechan/3_hanechan_v8_other/.lora"
+num_repeats = 3
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/4_hanechan_v8_face/.resized"
+cache_dir = "post_image_dataset/hanechan/4_hanechan_v8_face/.lora"
+num_repeats = 4
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/5_hanechan_v8_above/.resized"
+cache_dir = "post_image_dataset/hanechan/5_hanechan_v8_above/.lora"
+num_repeats = 5
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/8_hanechan_v8_low/.resized"
+cache_dir = "post_image_dataset/hanechan/8_hanechan_v8_low/.lora"
+num_repeats = 8
+recursive = true
+
+[[datasets.subsets]]
+image_dir = "post_image_dataset/hanechan/8_hanechan_v8_wide/.resized"
+cache_dir = "post_image_dataset/hanechan/8_hanechan_v8_wide/.lora"
+num_repeats = 8
+recursive = true
+
 
 [variant]
 family = "tlora"

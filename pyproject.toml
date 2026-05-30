@@ -53,6 +53,7 @@ dependencies = [
     "spandrel>=0.4.2",
     "sqlalchemy>=2.1.0b2",
     "aiohttp>=3.13.5",
+    "pywebview>=5.0",
     "comfy-cli>=1.7.3",
     "comfy-aimdo>=0.2.14",
     "av>=17.0.1",
@@ -72,6 +73,7 @@ dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.6",
     "pytest-timeout>=2.3",
+    "pytest-asyncio>=1.0",
 ]
 
 [tool.uv]

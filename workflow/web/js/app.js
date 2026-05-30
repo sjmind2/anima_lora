@@ -31,9 +31,130 @@
       var activeTab = ref("config");
       var totalStages = ref(0);
       var completedStages = ref(0);
+      var scriptLogs = ref({});
+      var activeScriptStage = ref(null);
+      var showLogModal = ref(false);
+      var logModalLines = ref([]);
+      var logModalTitle = ref("");
+      var logModalLoading = ref(false);
+      var scriptProgress = reactive({
+        pct: 0, current: 0, total: 0,
+        elapsed: "", eta: "", rate: "",
+        metrics: {}, rawLine: "", active: false,
+      });
+      var activeLogTab = ref("system");
+      var _scriptId = 0;
+      var runHistory = ref([]);
+      var showModal = ref(false);
+      var modalTitle = ref("");
+      var modalInput = ref("");
+      var modalPlaceholder = ref("");
+      var _modalResolve = null;
+      var showSettingsModal = ref(false);
+      var settingsData = reactive({
+        workflows_root: "",
+        pretrained_model_name_or_path: "",
+        qwen3: "",
+        vae: "",
+        mixed_precision: "bf16",
+        attn_mode: "flex",
+      });
+      var settingsLoading = ref(false);
+      var settingsSaving = ref(false);
+
+      function modalPrompt(title, placeholder) {
+        return new Promise(function(resolve) {
+          modalTitle.value = title;
+          modalPlaceholder.value = placeholder || "";
+          modalInput.value = "";
+          showModal.value = true;
+          _modalResolve = resolve;
+        });
+      }
+
+      function modalConfirm() {
+        showModal.value = false;
+        if (_modalResolve) {
+          var val = modalInput.value.trim();
+          _modalResolve(val || null);
+          _modalResolve = null;
+        }
+      }
+
+      function modalCancel() {
+        showModal.value = false;
+        if (_modalResolve) {
+          _modalResolve(null);
+          _modalResolve = null;
+        }
+      }
+
+      function loadRunHistory() {
+        if (!workflowName.value) return;
+        AnimaAPI.listRuns(workflowName.value)
+          .then(function(runs) { runHistory.value = runs.sort(function(a, b) { return b.id.localeCompare(a.id); }); })
+          .catch(function() { runHistory.value = []; });
+      }
+
+      function openRunDir(runId) {
+        if (!workflowName.value) return;
+        AnimaAPI.openRunDir(workflowName.value, runId)
+          .catch(function(err) { showToast("打开失败: " + err, "error"); });
+      }
+
+      function viewRunLog(runId) {
+        if (!workflowName.value) return;
+        showLogModal.value = true;
+        logModalTitle.value = "运行日志 — " + runId;
+        logModalLines.value = [];
+        logModalLoading.value = true;
+        AnimaAPI.getWorkflowRunLog(workflowName.value, runId)
+          .then(function(data) {
+            logModalLines.value = data.lines || [];
+          })
+          .catch(function(err) {
+            logModalLines.value = ["加载日志失败: " + (err.error || err)];
+          })
+          .finally(function() {
+            logModalLoading.value = false;
+          });
+      }
+
+      function closeLogModal() {
+        showLogModal.value = false;
+        logModalLines.value = [];
+      }
       var overallProgress = computed(function () {
         if (totalStages.value === 0) return 0;
         return Math.round((completedStages.value / totalStages.value) * 100);
+      });
+
+      var flatScriptLogs = computed(function () {
+        var all = [];
+        var stageIds = Object.keys(scriptLogs.value).sort();
+        stageIds.forEach(function(sid) {
+          var lines = scriptLogs.value[sid] || [];
+          lines.forEach(function(l) { all.push(l); });
+        });
+        return all;
+      });
+
+      var scriptStageIds = computed(function () {
+        return Object.keys(scriptLogs.value).sort();
+      });
+
+      var filteredScriptLogs = computed(function () {
+        var stage = activeScriptStage.value;
+        if (!stage) return flatScriptLogs.value;
+        return scriptLogs.value[stage] || [];
+      });
+
+      var flatScriptLogCount = computed(function () {
+        var n = 0;
+        Object.keys(scriptLogs.value).forEach(function(sid) {
+          n += (scriptLogs.value[sid] || []).length;
+        });
+        return n;
       });
       var progressStatus = computed(function () {
         if (!isRunning.value && overallProgress.value === 100) return "done";
@@ -70,7 +191,34 @@
       }
 
       function generateId(type) {
-        return type + "_" + Date.now().toString(36);
+        var existing = workflowData.stages.filter(function(s) { return s.type === type; }).length;
+        return type + "_" + (existing + 1);
+      }
+
+      var TQDM_RE = /^(\S+):\s+(\d+)%\|[^|]*\|\s+(\d+)\/(\d+)\s+\[([^\]]+)\](?:\s+(.+))?/;
+      var TQDM_METRIC_RE = /(\w[\w_]*)=([^\s,]+)/g;
+
+      function parseTqdmLine(line) {
+        var m = line.match(TQDM_RE);
+        if (!m) return null;
+        var result = {
+          prefix: m[1], pct: parseInt(m[2]),
+          current: parseInt(m[3]), total: parseInt(m[4]),
+          timing: m[5], extra: m[6] || ""
+        };
+        var tm = result.timing.match(/^([^<]+)<([^,]+),\s*(.+)$/);
+        if (tm) {
+          result.elapsed = tm[1].trim();
+          result.eta = tm[2].trim();
+          result.rate = tm[3].trim();
+        }
+        result.metrics = {};
+        TQDM_METRIC_RE.lastIndex = 0;
+        var mm;
+        while ((mm = TQDM_METRIC_RE.exec(result.extra)) !== null) {
+          result.metrics[mm[1]] = mm[2];
+        }
+        return result;
       }
 
       function loadRecentWorkflows() {
@@ -85,11 +233,24 @@
         workflowName.value = name;
         AnimaAPI.getWorkflow(name)
           .then(function (data) {
+            var loadedConfigs = data.stage_configs || {};
+            delete data.stage_configs;
             Object.assign(workflowData, data);
             selectedStageId.value = null;
             logLines.value = [];
             resetRunState();
-            loadStageConfigs();
+            workflowData.stages.forEach(function (stage, idx) {
+              if (!stage.label) {
+                var typeCount = workflowData.stages.slice(0, idx + 1).filter(function(s) { return s.type === stage.type; }).length;
+                var typeLabel = stage.type === "train" ? "Train" : "Preprocess";
+                stage.label = typeLabel + " " + typeCount;
+              }
+              if (loadedConfigs[stage.id]) {
+                stageConfigs[stage.id] = loadedConfigs[stage.id];
+              } else if (!stageConfigs[stage.id]) {
+                stageConfigs[stage.id] = {};
+              }
+            });
           })
           .catch(function (err) {
             showToast("加载失败: " + (err.error || err), "error");
@@ -106,11 +267,19 @@
 
       function saveWorkflow() {
         if (!workflowName.value) return;
+        var configsCopy = {};
+        Object.keys(stageConfigs).forEach(function(k) {
+          var v = stageConfigs[k];
+          if (v && typeof v === "object") {
+            configsCopy[k] = JSON.parse(JSON.stringify(v));
+          }
+        });
         var data = {
           name: workflowData.name || workflowName.value,
           description: workflowData.description || "",
           stages: JSON.parse(JSON.stringify(workflowData.stages)),
           infrastructure: Object.assign({}, workflowData.infrastructure),
+          stage_configs: configsCopy,
         };
         AnimaAPI.updateWorkflow(workflowName.value, data)
           .then(function () {
@@ -122,10 +291,16 @@
       }
 
       function createNewWorkflow(name) {
-        var nm = name || prompt("输入工作流名称:");
-        if (!nm) return;
-        nm = nm.trim();
-        if (!nm) return;
+        if (name) {
+          _doCreate(name);
+        } else {
+          modalPrompt("新建工作流", "输入工作流名称").then(function(nm) {
+            if (nm) _doCreate(nm);
+          });
+        }
+      }
+
+      function _doCreate(nm) {
         AnimaAPI.createWorkflow(nm)
           .then(function (data) {
             showToast("工作流已创建: " + nm, "success");
@@ -140,11 +315,15 @@
       function addStage(type) {
         var id = generateId(type);
         var configFileName = id + ".toml";
+        var typeCount = workflowData.stages.filter(function(s) { return s.type === type; }).length + 1;
+        var typeLabel = type === "train" ? "Train" : "Preprocess";
+        var label = typeLabel + " " + typeCount;
         var stage = {
           id: id,
           type: type,
           config_file: configFileName,
           depends_on: [],
+          label: label,
         };
         workflowData.stages.push(stage);
         stageConfigs[stage.id] = {};
@@ -169,6 +348,12 @@
 
       function selectStage(stageId) {
         selectedStageId.value = stageId;
+        var stage = workflowData.stages.find(function(s) { return s.id === stageId; });
+        if (stage && stage.type === "train") {
+          var cfg = stageConfigs[stageId] || {};
+          var nt = cfg.network_type || "lora";
+          currentMethod.value = "train_" + nt;
+        }
       }
 
       function reorderStages(fromIdx, toIdx) {
@@ -233,11 +418,48 @@
           case "stage_start":
             runState[ev.stage_id] = { status: "running", progress: 0 };
             addLog("▶ 阶段开始: " + ev.stage_id + " (" + ev.stage_type + ")", "stage-start");
+            scriptProgress.active = false;
+            scriptProgress.rawLine = "";
+            scriptProgress.pct = 0;
+            scriptLogs.value[ev.stage_id] = [];
+            scriptLogs.value = Object.assign({}, scriptLogs.value);
             break;
           case "stage_progress":
             if (runState[ev.stage_id]) {
               runState[ev.stage_id].progress = ev.progress || 0;
             }
+            break;
+          case "stage_stdout_batch":
+            ev.lines.forEach(function(line) {
+              var parsed = parseTqdmLine(line);
+              if (parsed) {
+                Object.assign(scriptProgress, {
+                  pct: parsed.pct,
+                  current: parsed.current,
+                  total: parsed.total,
+                  elapsed: parsed.elapsed,
+                  eta: parsed.eta,
+                  rate: parsed.rate,
+                  metrics: parsed.metrics,
+                  rawLine: line,
+                  active: true,
+                });
+              } else {
+                if (!scriptLogs.value[ev.stage_id]) {
+                  scriptLogs.value[ev.stage_id] = [];
+                }
+                scriptLogs.value[ev.stage_id].push({
+                  _id: ++_scriptId,
+                  text: line,
+                  ts: new Date().toLocaleTimeString(),
+                  stage_id: ev.stage_id,
+                });
+                if (scriptLogs.value[ev.stage_id].length > 500) {
+                  scriptLogs.value[ev.stage_id] = scriptLogs.value[ev.stage_id].slice(-400);
+                }
+                scriptLogs.value = Object.assign({}, scriptLogs.value);
+              }
+            });
             break;
           case "stage_ckpt":
             addLog("💾 Checkpoint: " + ev.path + " (epoch " + ev.epoch + ")", "info");
@@ -261,10 +483,8 @@
               addLog("❌ 工作流失败", "error");
               showToast("工作流运行失败", "error");
             }
-            if (eventSource.value) {
-              eventSource.value.close();
-              eventSource.value = null;
-            }
+            if (eventSource.value) { eventSource.value.close(); eventSource.value = null; }
+            loadRunHistory();
             break;
           case "stream_error":
             isRunning.value = false;
@@ -275,10 +495,12 @@
 
       function addLog(text, cls) {
         logLines.value.push({ text: text, cls: cls || "", ts: new Date().toLocaleTimeString() });
-        nextTick(function () {
-          var el = document.querySelector(".log-viewer");
-          if (el) el.scrollTop = el.scrollHeight;
-        });
+        if (activeLogTab.value === "system") {
+          nextTick(function () {
+            var el = document.querySelector(".log-viewer");
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        }
       }
 
       function updateStageConfig(newVal) {
@@ -307,6 +529,62 @@
         activeTab.value = tab;
       }
 
+      function openSettings() {
+        showSettingsModal.value = true;
+        settingsLoading.value = true;
+        var infraPromise = workflowName.value
+          ? AnimaAPI.getInfra(workflowName.value).catch(function() { return {}; })
+          : Promise.resolve({});
+        var settingsPromise = AnimaAPI.getSettings().catch(function() { return {}; });
+        Promise.all([infraPromise, settingsPromise]).then(function(results) {
+          var infra = results[0] || {};
+          var settings = results[1] || {};
+          settingsData.workflows_root = settings.workflows_root || "";
+          settingsData.pretrained_model_name_or_path = infra.pretrained_model_name_or_path || "";
+          settingsData.qwen3 = infra.qwen3 || "";
+          settingsData.vae = infra.vae || "";
+          settingsData.mixed_precision = infra.mixed_precision || "bf16";
+          settingsData.attn_mode = infra.attn_mode || "flex";
+        }).finally(function() {
+          settingsLoading.value = false;
+        });
+      }
+
+      function saveSettings() {
+        settingsSaving.value = true;
+        var settingsPayload = { workflows_root: settingsData.workflows_root };
+        var infraPayload = {
+          pretrained_model_name_or_path: settingsData.pretrained_model_name_or_path,
+          qwen3: settingsData.qwen3,
+          vae: settingsData.vae,
+          mixed_precision: settingsData.mixed_precision,
+          attn_mode: settingsData.attn_mode,
+        };
+        var promises = [AnimaAPI.setSettings(settingsPayload)];
+        if (workflowName.value) {
+          promises.push(AnimaAPI.setInfra(workflowName.value, infraPayload));
+        }
+        Promise.all(promises).then(function() {
+          showToast("设置已保存", "success");
+          showSettingsModal.value = false;
+        }).catch(function(err) {
+          showToast("保存失败: " + (err.error || err), "error");
+        }).finally(function() {
+          settingsSaving.value = false;
+        });
+      }
+
+      function closeSettings() {
+        showSettingsModal.value = false;
+      }
+
+      watch(activeLogTab, function() {
+        nextTick(function () {
+          var el = document.querySelector(".log-viewer");
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      });
+
       return {
         workflowName: workflowName,
         workflowData: workflowData,
@@ -325,6 +603,36 @@
         completedStages: completedStages,
         overallProgress: overallProgress,
         progressStatus: progressStatus,
+        scriptLogs: scriptLogs,
+        activeScriptStage: activeScriptStage,
+        scriptStageIds: scriptStageIds,
+        filteredScriptLogs: filteredScriptLogs,
+        flatScriptLogs: flatScriptLogs,
+        flatScriptLogCount: flatScriptLogCount,
+        scriptProgress: scriptProgress,
+        activeLogTab: activeLogTab,
+        runHistory: runHistory,
+        loadRunHistory: loadRunHistory,
+        openRunDir: openRunDir,
+        viewRunLog: viewRunLog,
+        closeLogModal: closeLogModal,
+        showLogModal: showLogModal,
+        logModalLines: logModalLines,
+        logModalTitle: logModalTitle,
+        logModalLoading: logModalLoading,
+        showModal: showModal,
+        modalTitle: modalTitle,
+        modalInput: modalInput,
+        modalPlaceholder: modalPlaceholder,
+        modalConfirm: modalConfirm,
+        modalCancel: modalCancel,
+        showSettingsModal: showSettingsModal,
+        settingsData: settingsData,
+        settingsLoading: settingsLoading,
+        settingsSaving: settingsSaving,
+        openSettings: openSettings,
+        saveSettings: saveSettings,
+        closeSettings: closeSettings,
         selectedStage: selectedStage,
         selectedStageConfig: selectedStageConfig,
         getStageSchemaNames: getStageSchemaNames,
@@ -366,6 +674,7 @@
       '      <span v-if="workflowName" style="color:var(--text-dim);font-size:13px;">— {{ workflowName }}</span>',
       '    </div>',
       '    <div class="header-right">',
+      '      <button class="btn btn-ghost btn-sm" @click="openSettings" title="全局设置">⚙</button>',
       '      <div class="dropdown">',
       '        <button class="btn btn-ghost btn-sm" @click="toggleWorkflowMenu">',
       '          打开工作流 ▾',
@@ -420,8 +729,7 @@
       '        <div class="config-panel-header">',
       '          <span class="config-panel-title">',
       '            {{ selectedStage.type === "train" ? "🎯" : "📁" }}',
-      '            {{ selectedStage.type === "train" ? "Train" : "Preprocess" }}',
-      '            — {{ selectedStage.id }}',
+      '            {{ selectedStage.label || selectedStage.id }}',
       '          </span>',
       '          <div class="config-panel-actions">',
       '            <button class="btn btn-ghost btn-sm" @click="saveWorkflow">💾 保存配置</button>',
@@ -450,22 +758,178 @@
       '  <div v-if="workflowName" class="bottom-panel">',
       '    <div class="bottom-panel-header">',
       '      <span class="bottom-panel-title">日志</span>',
+      '      <div class="log-tab-bar">',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'system\' }" @click="activeLogTab = \'system\'">系统日志</button>',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'script\' }" @click="activeLogTab = \'script\'">脚本输出 <span v-if="flatScriptLogCount" style="opacity:0.6;">({{ flatScriptLogCount }})</span></button>',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'history\' }" @click="activeLogTab = \'history\'; loadRunHistory()">运行历史</button>',
+      '      </div>',
       '      <span style="font-size:11px;color:var(--text-dim);">{{ completedStages }}/{{ totalStages }} 阶段</span>',
       '    </div>',
-      '    <div v-if="isRunning || completedStages > 0" class="progress-bar-container">',
+      '    <div v-if="(isRunning || completedStages > 0) && activeLogTab !== \'history\'" class="progress-bar-container">',
       '      <div class="progress-bar-track">',
-      '        <div class="progress-bar-fill" :class="progressStatus" :style="{ width: overallProgress + \'%\' }"></div>',
+      '        <div class="progress-bar-fill stage-progress" :class="progressStatus" :style="{ width: overallProgress + \'%\' }"></div>',
       '      </div>',
-      '      <div class="progress-label">{{ overallProgress }}%</div>',
+      '      <div class="progress-label">阶段 {{ overallProgress }}%</div>',
+      '    </div>',
+      '    <div v-if="scriptProgress.active && activeLogTab === \'script\'" class="script-progress-section">',
+      '      <div class="progress-bar-track">',
+      '        <div class="progress-bar-fill script-progress" :style="{ width: scriptProgress.pct + \'%\' }"></div>',
+      '      </div>',
+      '      <div class="script-status-line">',
+      '        <span>{{ scriptProgress.current }}/{{ scriptProgress.total }}</span>',
+      '        <span v-if="scriptProgress.eta">[{{ scriptProgress.elapsed }}&lt;{{ scriptProgress.eta }}, {{ scriptProgress.rate }}]</span>',
+      '        <span v-for="(v, k) in scriptProgress.metrics" :key="k" class="metric-badge">{{ k }}={{ v }}</span>',
+      '      </div>',
       '    </div>',
       '    <div class="log-viewer">',
-      '      <div v-for="(line, i) in logLines" :key="i" class="log-line" :class="line.cls">',
-      '        [{{ line.ts }}] {{ line.text }}',
-      '      </div>',
-      '      <div v-if="logLines.length === 0" style="color:var(--text-dim);font-style:italic;">等待运行...</div>',
+      '      <template v-if="activeLogTab === \'system\'">',
+      '        <div v-for="(line, i) in logLines" :key="i" class="log-line" :class="line.cls">',
+      '          [{{ line.ts }}] {{ line.text }}',
+      '        </div>',
+      '        <div v-if="logLines.length === 0" style="color:var(--text-dim);font-style:italic;">等待运行...</div>',
+      '      </template>',
+      '      <template v-else-if="activeLogTab === \'script\'">',
+      '        <div v-if="scriptStageIds.length > 1" style="display:flex;align-items:center;gap:6px;padding-bottom:4px;">',
+      '          <select v-model="activeScriptStage" class="stage-select">',
+      '            <option :value="null">全部阶段</option>',
+      '            <option v-for="sid in scriptStageIds" :key="sid" :value="sid">{{ sid }}</option>',
+      '          </select>',
+      '          <span style="font-size:11px;color:var(--text-dim);">{{ filteredScriptLogs.length }} 行</span>',
+      '        </div>',
+      '        <div v-for="(line, i) in filteredScriptLogs" :key="line._id" class="log-line script">',
+      '          <span v-if="line.stage_id && activeScriptStage === null" class="log-stage-tag">[{{ line.stage_id }}]</span>',
+      '          <span v-if="line.ts" class="log-ts-tag">[{{ line.ts }}]</span>',
+      '          {{ line.text }}',
+      '        </div>',
+      '        <div v-if="filteredScriptLogs.length === 0 && !scriptProgress.active" style="color:var(--text-dim);font-style:italic;">暂无脚本输出</div>',
+      '        <div v-if="filteredScriptLogs.length === 0 && scriptProgress.active" class="log-line script" style="color:var(--text-dim);">{{ scriptProgress.rawLine }}</div>',
+      '      </template>',
+      '      <template v-if="activeLogTab === \'history\'">',
+      '        <div v-if="runHistory.length === 0" style="color:var(--text-dim);font-style:italic;padding:8px 0;">暂无运行记录</div>',
+      '        <div v-for="run in runHistory" :key="run.id" class="history-record">',
+      '          <div class="history-time">{{ run.created_at ? run.created_at.replace(\'T\', \' \').substring(0, 16) : run.id }}</div>',
+      '          <div class="history-status" :class="\'status-\' + run.status">',
+      '            <span>{{ run.status === \'ok\' ? \'✅ 完成\' : run.status === \'stopped\' ? \'⏹ 已停止\' : run.status === \'error\' ? \'❌ 失败\' : run.status === \'running\' ? \'🔄 运行中\' : \'❓ \' + run.status }}</span>',
+      '          </div>',
+      '          <div v-if="run.stages && run.stages.length" class="history-stage-chain">',
+      '            <template v-for="(s, si) in run.stages">',
+      '              <div class="chain-node" :class="\'chain-\' + (s.status === \'ok\' ? \'done\' : s.status === \'running\' ? \'running\' : s.status === \'error\' || s.status === \'config_error\' ? \'error\' : s.status === \'stopped\' ? \'stopped\' : \'pending\')" :title="s.id + \': \' + s.status">',
+      '                <span class="chain-icon">{{ s.status === \'ok\' ? \'●\' : s.status === \'running\' ? \'◑\' : s.status === \'error\' || s.status === \'config_error\' ? \'✕\' : s.status === \'stopped\' ? \'■\' : \'○\' }}</span>',
+      '                <span class="chain-label">{{ s.id }}</span>',
+      '              </div>',
+      '              <span v-if="si < run.stages.length - 1" class="chain-arrow">→</span>',
+      '            </template>',
+      '          </div>',
+      '          <div class="history-actions">',
+      '            <button class="btn btn-ghost btn-xs" @click="viewRunLog(run.id)" title="查看日志">📋 日志</button>',
+      '            <button class="btn btn-ghost btn-xs" @click="openRunDir(run.id)" title="在文件管理器中打开">📂</button>',
+      '          </div>',
+      '        </div>',
+      '      </template>',
       '    </div>',
       '  </div>',
 
+      '  <div v-if="showLogModal" class="modal-overlay" @click.self="closeLogModal">',
+      '    <div class="modal-content">',
+      '      <div class="modal-header">',
+      '        <span style="font-size:13px;font-weight:600;">{{ logModalTitle }}</span>',
+      '        <button class="modal-close" @click="closeLogModal">&times;</button>',
+      '      </div>',
+      '      <div class="modal-body">',
+      '        <div v-if="logModalLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">加载中...</div>',
+      '        <div v-else class="log-content">',
+      '          <div v-for="(line, i) in logModalLines" :key="i" class="log-line">{{ line }}</div>',
+      '          <div v-if="logModalLines.length === 0" style="color:var(--text-dim);font-style:italic;">日志为空</div>',
+      '        </div>',
+      '      </div>',
+      '    </div>',
+      '  </div>',
+      '',
+      '  <div v-if="showSettingsModal" class="modal-overlay" @click.self="closeSettings">',
+      '    <div class="modal-content" style="max-width:520px;">',
+      '      <div class="modal-header">',
+      '        <span style="font-size:13px;font-weight:600;">⚙ 全局设置</span>',
+      '        <button class="modal-close" @click="closeSettings">&times;</button>',
+      '      </div>',
+      '      <div class="modal-body">',
+      '        <div v-if="settingsLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">加载中...</div>',
+      '        <div v-if="!settingsLoading">',
+      '          <div class="schema-group">',
+      '            <div class="schema-group-header">',
+      '              <span class="schema-group-title">📁 工作流根目录</span>',
+      '            </div>',
+      '            <div class="schema-group-body">',
+      '              <div class="form-group">',
+      '                <label class="form-label">工作流根目录</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.workflows_root" placeholder="留空使用默认路径" />',
+      '              </div>',
+      '            </div>',
+      '          </div>',
+      '          <div class="schema-group">',
+      '            <div class="schema-group-header">',
+      '              <span class="schema-group-title">🗂 模型路径</span>',
+      '            </div>',
+      '            <div class="schema-group-body">',
+      '              <div class="form-group">',
+      '                <label class="form-label">DiT 模型</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.pretrained_model_name_or_path" placeholder="留空使用默认路径" />',
+      '              </div>',
+      '              <div class="form-group">',
+      '                <label class="form-label">文本编码器 (qwen3)</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.qwen3" placeholder="留空使用默认路径" />',
+      '              </div>',
+      '              <div class="form-group">',
+      '                <label class="form-label">VAE 模型</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.vae" placeholder="留空使用默认路径" />',
+      '              </div>',
+      '            </div>',
+      '          </div>',
+      '          <div class="schema-group">',
+      '            <div class="schema-group-header">',
+      '              <span class="schema-group-title">🔧 硬件设置</span>',
+      '            </div>',
+      '            <div class="schema-group-body">',
+      '              <div class="form-group">',
+      '                <label class="form-label">混合精度</label>',
+      '                <select class="form-select" v-model="settingsData.mixed_precision">',
+      '                  <option value="bf16">bf16</option>',
+      '                  <option value="fp16">fp16</option>',
+      '                  <option value="fp32">fp32</option>',
+      '                  <option value="no">no</option>',
+      '                </select>',
+      '              </div>',
+      '              <div class="form-group">',
+      '                <label class="form-label">注意力模式</label>',
+      '                <select class="form-select" v-model="settingsData.attn_mode">',
+      '                  <option value="flex">flex</option>',
+      '                  <option value="sdpa">sdpa</option>',
+      '                  <option value="flash">flash</option>',
+      '                  <option value="xformers">xformers</option>',
+      '                </select>',
+      '              </div>',
+      '            </div>',
+      '          </div>',
+      '          <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:12px;">',
+      '            <button class="btn btn-ghost btn-sm" @click="closeSettings">取消</button>',
+      '            <button class="btn btn-blue btn-sm" @click="saveSettings" :disabled="settingsSaving">',
+      '              {{ settingsSaving ? "保存中..." : "💾 保存设置" }}',
+      '            </button>',
+      '          </div>',
+      '        </div>',
+      '      </div>',
+      '    </div>',
+      '  </div>',
+      '',
+      '  <div v-if="showModal" class="modal-overlay">',
+      '    <div class="modal-dialog">',
+      '      <div class="modal-title">{{ modalTitle }}</div>',
+      '      <input class="modal-input form-input" v-model="modalInput" :placeholder="modalPlaceholder" @keydown.enter="modalConfirm" @keydown.escape="modalCancel" ref="modalInputEl" autofocus />',
+      '      <div class="modal-actions">',
+      '        <button class="btn btn-ghost btn-sm" @click="modalCancel">取消</button>',
+      '        <button class="btn btn-blue btn-sm" @click="modalConfirm">确定</button>',
+      '      </div>',
+      '    </div>',
+      '  </div>',
       '  <div v-for="toast in toasts" :key="toast.id" class="toast" :class="\'toast-\' + toast.type">',
       '    {{ toast.msg }}',
       '  </div>',

@@ -51,6 +51,7 @@
         return this.stage.depends_on ? this.stage.depends_on.length : 0;
       },
       stageLabel: function () {
+        if (this.stage.label) return this.stage.label;
         var typeLabel = this.stage.type === "train" ? "Train" : "Preprocess";
         return typeLabel + " " + (this.index + 1);
       },

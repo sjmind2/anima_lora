@@ -13,6 +13,7 @@
       return {
         showAddMenu: false,
         dragIndex: null,
+        menuStyle: {},
       };
     },
     methods: {
@@ -20,8 +21,18 @@
         this.showAddMenu = false;
         this.$emit("add", type);
       },
-      toggleAddMenu: function () {
+      toggleAddMenu: function (e) {
         this.showAddMenu = !this.showAddMenu;
+        if (this.showAddMenu && e && e.target) {
+          var rect = e.target.getBoundingClientRect();
+          this.menuStyle = {
+            position: "fixed",
+            top: rect.bottom + 4 + "px",
+            left: rect.left + "px",
+            width: rect.width + "px",
+            zIndex: 10000,
+          };
+        }
       },
       onDragStart: function (index, event) {
         this.dragIndex = index;
@@ -74,7 +85,7 @@
       '      <button class="btn btn-blue btn-sm" style="width:100%;" @click="toggleAddMenu">',
       '        + 添加阶段 ▾',
       '      </button>',
-      '      <div v-if="showAddMenu" class="dropdown-menu" style="width:100%;">',
+      '      <div v-if="showAddMenu" class="dropdown-menu" :style="menuStyle">',
       '        <button class="dropdown-item" @click="addStage(\'preprocess\')">📁 Preprocess</button>',
       '        <button class="dropdown-item" @click="addStage(\'train\')">🎯 Train</button>',
       '      </div>',

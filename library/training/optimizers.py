@@ -62,8 +62,18 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
             try:
                 value = ast.literal_eval(value)
             except (ValueError, SyntaxError):
-                logger.warning(f"Could not evaluate optimizer_arg value for '{key}': {value}")
-                continue
+                sub_parts = [s.strip() for s in value.split(",") if s.strip()]
+                if len(sub_parts) > 1:
+                    parsed = []
+                    for sp in sub_parts:
+                        try:
+                            parsed.append(ast.literal_eval(sp))
+                        except (ValueError, SyntaxError):
+                            parsed.append(sp)
+                    value = tuple(parsed) if len(parsed) > 1 else parsed[0]
+                else:
+                    logger.warning(f"Could not evaluate optimizer_arg value for '{key}': {value}")
+                    continue
             optimizer_kwargs[key] = value
 
     lr = args.learning_rate

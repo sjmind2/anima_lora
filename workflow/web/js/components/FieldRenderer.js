@@ -10,6 +10,13 @@
       currentStageId: { type: String, default: "" },
     },
     emits: ["update:modelValue"],
+    data: function () {
+      return {
+        bucketStats: null,
+        bucketStatsError: null,
+        bucketStatsLoading: false,
+      };
+    },
     computed: {
       isHidden: function () {
         return this.field.hidden === true;
@@ -113,6 +120,28 @@
         }
         this.$emit("update:modelValue", list);
       },
+      analyzeBucketStats: function () {
+        var self = this;
+        var allValues = this.allValues || {};
+        var sourceDir = allValues.source_image_dir || "";
+        if (!sourceDir) return;
+        var selected = this.currentValue || [];
+        self.bucketStatsLoading = true;
+        AnimaAPI.analyzeBucketStats(sourceDir, selected).then(function (result) {
+          self.bucketStatsLoading = false;
+          if (result.error) {
+            self.bucketStatsError = result.error;
+            self.bucketStats = null;
+          } else {
+            self.bucketStats = result;
+            self.bucketStatsError = null;
+          }
+        }).catch(function () {
+          self.bucketStatsLoading = false;
+          self.bucketStatsError = "Request failed";
+          self.bucketStats = null;
+        });
+      },
       isDatasetSelected: function (stageId) {
         var val = this.currentValue;
         if (!val || !Array.isArray(val)) return false;
@@ -161,7 +190,7 @@
       '    class="form-select"',
       '    :value="currentValue"',
       '    @change="$emit(\'update:modelValue\', $event.target.value)">',
-      '    <option v-for="opt in (field.choices || [])" :key="opt" :value="opt">{{ opt }}</option>',
+      '    <option v-for="opt in (field.choices || [])" :key="opt" :value="opt">{{ (field.choice_labels || {})[opt] || opt }}</option>',
       '  </select>',
 
       '  <input v-if="field.type === \'str\'"',
@@ -188,7 +217,7 @@
       '          :checked="isDatasetSelected(ps.id)"',
       '          @change="toggleDatasetRef(ps.id)" />',
       '        <span class="dataset-ref-icon">📁</span>',
-      '        <span>{{ ps.id }}</span>',
+      '        <span>{{ ps.label || ps.id }}</span>',
       '      </label>',
       '    </div>',
       '  </div>',
@@ -211,18 +240,60 @@
       '    <div v-if="currentValue" class="checkpoint-ref-preview">{{ currentValue }}</div>',
       '  </div>',
 
-      '  <div v-if="field.type === \'list[str]\'"',
+      '  <div v-if="field.type === \'list[str]\' && field.choice_details"',
+      '    class="bucket-options-area">',
+      '    <div v-if="field.help" style="display:flex;width:100%;margin-bottom:4px;align-items:center;">',
+      '      <span style="font-size:11px;color:var(--text-dim);">{{ field.help }}</span>',
+      '      <button class="bucket-analyze-btn"',
+      '        :disabled="!allValues.source_image_dir || bucketStatsLoading"',
+      '        @click="analyzeBucketStats">',
+      '        {{ bucketStatsLoading ? "分析中..." : "分析数据集" }}',
+      '      </button>',
+      '    </div>',
+      '    <div v-if="!field.help" style="display:flex;width:100%;margin-bottom:4px;justify-content:flex-end;">',
+      '      <button class="bucket-analyze-btn"',
+      '        :disabled="!allValues.source_image_dir || bucketStatsLoading"',
+      '        @click="analyzeBucketStats">',
+      '        {{ bucketStatsLoading ? "分析中..." : "分析数据集" }}',
+      '      </button>',
+      '    </div>',
+      '    <div v-for="opt in (field.choices || [])" :key="opt"',
+      '      class="bucket-option-item"',
+      '      :class="{ active: (currentValue || []).includes(opt) }"',
+      '      @click="toggleListItem(opt)">',
+      '      <input type="checkbox"',
+      '        :checked="(currentValue || []).includes(opt)"',
+      '        style="display: none;" />',
+      '      <div class="bucket-option-header">',
+      '        <span>{{ (field.choice_labels || {})[opt] || opt }}</span>',
+      '      </div>',
+      '      <div v-if="field.choice_details[opt]" class="bucket-detail-line">',
+      '        {{ field.choice_details[opt].resolutions.join("  ") }}',
+      '      </div>',
+      '      <div v-if="bucketStats && bucketStats.families[opt]" class="bucket-stats-line">',
+      '        <span class="stats-original">原始: {{ bucketStats.families[opt].original }}张</span>',
+      '        <span style="margin: 0 4px;">·</span>',
+      '        <span class="stats-resized" :class="{ dim: !bucketStats.families[opt].resized }">',
+      '          缩放后: {{ bucketStats.families[opt].resized }}张',
+      '        </span>',
+      '      </div>',
+      '    </div>',
+      '  </div>',
+      '',
+      '  <div v-if="field.type === \'list[str]\' && !field.choice_details"',
       '    style="display: flex; flex-wrap: wrap; gap: 6px;">',
       '    <label v-for="opt in (field.choices || [])" :key="opt"',
       '      class="combo-switch"',
       '      :class="{ active: (currentValue || []).includes(opt) }"',
-      '      style="cursor: pointer;">',
+      '      style="cursor: pointer; font-size: 11px;"',
+      '      :title="(field.choice_labels || {})[opt] || opt">',
       '      <input type="checkbox"',
       '        :checked="(currentValue || []).includes(opt)"',
       '        @change="toggleListItem(opt)"',
       '        style="display: none;" />',
-      '      {{ opt }}',
+      '      {{ (field.choice_labels || {})[opt] || opt }}',
       '    </label>',
+      '    <div v-if="field.help" style="font-size:11px;color:var(--text-dim);width:100%;margin-top:2px;">{{ field.help }}</div>',
       '  </div>',
       '</div>',
     ].join("\n"),

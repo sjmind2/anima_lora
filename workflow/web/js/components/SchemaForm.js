@@ -24,6 +24,9 @@
         deep: true,
         handler: function (names) {
           if (names && names.length > 0) {
+            var key = names.join(",");
+            if (this._lastSchemaKey === key) return;
+            this._lastSchemaKey = key;
             this.loadSchemas(names);
           }
         },

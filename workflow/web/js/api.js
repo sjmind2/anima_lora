@@ -101,6 +101,36 @@ var AnimaAPI = (function () {
     getRunLog: function (runId) {
       return get("/api/runs/" + encodeURIComponent(runId) + "/log");
     },
+    getWorkflowRunLog: function (name, runId) {
+      return get(
+        "/api/workflows/" +
+          encodeURIComponent(name) +
+          "/runs/" +
+          encodeURIComponent(runId) +
+          "/log"
+      );
+    },
+    listRuns: function (name) {
+      return get("/api/workflows/" + encodeURIComponent(name) + "/runs");
+    },
+    openRunDir: function (name, runId) {
+      return post("/api/workflows/" + encodeURIComponent(name) + "/runs/" + encodeURIComponent(runId) + "/open");
+    },
+    analyzeBucketStats: function (sourceDir, enabledFamilies) {
+      return post("/api/dataset/bucket-stats", {
+        source_dir: sourceDir,
+        enabled_families: enabledFamilies,
+      });
+    },
+    getSettings: function () {
+      return get("/api/settings");
+    },
+    setSettings: function (data) {
+      return put("/api/settings", data);
+    },
+    browse: function (path, type) {
+      return post("/api/browse", { path: path, type: type || "directory" });
+    },
     connectEventStream: connectEventStream,
   };
 })();

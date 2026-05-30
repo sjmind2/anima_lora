@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,21 @@ class StageBase(ABC):
         self.config = config
         self.stage_dir = stage_dir
         self.infrastructure = infrastructure
+        self._stop_flag = threading.Event()
+        self._current_proc = None
 
     @abstractmethod
     def prepare_config(self, stage_outputs: dict) -> dict: ...
 
     @abstractmethod
-    def execute(self, on_stdout, on_progress) -> StageResult: ...
+    def execute(self, on_stdout, on_progress, stage_outputs=None) -> StageResult: ...
+
+    def terminate(self) -> None:
+        self._stop_flag.set()
+        proc = self._current_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
+    @property
+    def should_stop(self) -> bool:
+        return self._stop_flag.is_set()

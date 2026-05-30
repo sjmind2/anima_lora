@@ -39,6 +39,6 @@ groups:
         type: enum
         required: false
         default: "flex"
-        choices: ["flex", "flash"]
+        choices: ["flex", "sdpa", "flash", "xformers"]
         layer: infrastructure
         label: "注意力模式"
