@@ -18,7 +18,9 @@ uv sync
 - `aiohttp >= 3.13.5` — HTTP 服务器和 REST API
 - `pywebview >= 5.0` — 桌面窗口模式（可选，回退到浏览器）
 
-### Node.js
+### Node.js（可选 — 仅开发时需要）
+
+> **正常使用无需安装。** Workflow 前端通过 CDN 加载 Vue 3，所有 JavaScript 已预打包在 `workflow/web/vendor/` 中。只有当你需要修改前端源码并使用本地开发服务器时才需要 Node.js。
 
 从 [nodejs.org](https://nodejs.org/) 安装 Node.js（推荐 LTS 版本）或通过包管理器安装：
 

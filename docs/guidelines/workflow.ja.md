@@ -18,7 +18,9 @@ uv sync
 - `aiohttp >= 3.13.5` — HTTP サーバーおよび REST API
 - `pywebview >= 5.0` — デスクトップウィンドウモード（任意、未導入時はブラウザにフォールバック）
 
-### Node.js
+### Node.js（任意 — 開発時のみ必要）
+
+> **通常の使用には不要です。** Workflow のフロントエンドは CDN 経由で Vue 3 を読み込みます。すべての JavaScript は `workflow/web/vendor/` にプリバンドルされています。Node.js はフロントエンドのソースファイルを変更し、ローカル開発サーバーを使用する場合にのみ必要です。
 
 [nodejs.org](https://nodejs.org/)（LTS 推奨）からインストールするか、パッケージマネージャーを使用してください：
 

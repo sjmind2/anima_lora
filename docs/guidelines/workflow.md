@@ -16,7 +16,9 @@ Key dependencies:
 - `aiohttp >= 3.13.5` — HTTP server and REST API
 - `pywebview >= 5.0` — Desktop window mode (optional, falls back to browser)
 
-### Node.js
+### Node.js (Optional — Development Only)
+
+> **Not required for normal use.** The Workflow frontend uses Vue 3 via CDN — all JavaScript is pre-bundled in `workflow/web/vendor/`. Node.js is only needed if you want to modify the frontend source files and use a local dev server.
 
 Install Node.js from [nodejs.org](https://nodejs.org/) (LTS recommended) or via package manager:
 
