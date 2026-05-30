@@ -8,6 +8,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from workflow.i18n import set_locale, get_locale
 from workflow.config import (
     load_workflow_yaml,
     save_workflow_yaml,
@@ -18,6 +19,18 @@ from workflow.config import (
 from workflow.logger import EventQueue
 from workflow.models import WorkflowDefinition
 from workflow.scheduler import WorkflowScheduler
+
+
+@web.middleware
+async def _locale_middleware(req, handler):
+    accept = req.headers.get("Accept-Language", "")
+    if accept.startswith("zh"):
+        set_locale("zh-CN")
+    elif accept.startswith("ja"):
+        set_locale("ja")
+    else:
+        set_locale("en")
+    return await handler(req)
 
 
 def _project_root() -> Path:
@@ -57,7 +70,7 @@ def create_app(workflows_root: Path | str | None = None) -> web.Application:
     workflows_root = Path(workflows_root)
     workflows_root.mkdir(parents=True, exist_ok=True)
 
-    app = web.Application()
+    app = web.Application(middlewares=[_locale_middleware])
     app["workflows_root"] = workflows_root
     app["event_queues"]: list[EventQueue] = []
     app["scheduler_thread"] = None
@@ -335,6 +348,8 @@ async def _handle_get_schema(req: web.Request) -> web.Response:
     schema_name = req.match_info["schema_name"]
     try:
         schema = load_schema(schema_name)
+        from workflow.i18n.schema_overlay import translate_schema
+        schema = translate_schema(schema, schema_name, get_locale())
         return web.json_response(schema)
     except FileNotFoundError:
         return web.json_response({"error": "schema not found"}, status=404)
