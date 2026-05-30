@@ -17,8 +17,6 @@ def _translate_value(locale_msgs: dict, en_msgs: dict, *key_parts: str) -> str |
 
 
 def translate_schema(schema: dict, schema_name: str, locale: str) -> dict:
-    if locale == "en":
-        return schema
     locale_msgs = _load_locale(locale)
     en_msgs = _load_locale("en")
     schema_section = _resolve(locale_msgs, ["schema", schema_name])
