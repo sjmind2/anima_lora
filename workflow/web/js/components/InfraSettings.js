@@ -57,7 +57,7 @@
             self.schema = schema;
           })
           .catch(function (err) {
-            self.error = "加载基础设施配置失败: " + (err.error || err);
+            self.error = self.t('infraSettings.loadFailed', {error: err.error || err});
           })
           .finally(function () {
             self.loading = false;
@@ -72,7 +72,7 @@
             self.$emit("update:modelValue", JSON.parse(JSON.stringify(self.editData)));
           })
           .catch(function (err) {
-            self.error = "保存失败: " + (err.error || err);
+            self.error = self.t('infraSettings.saveFailed', {error: err.error || err});
           })
           .finally(function () {
             self.saving = false;
@@ -92,7 +92,7 @@
     },
     template: [
       '<div class="infra-settings">',
-      '  <div v-if="loading" class="is-loading">加载中...</div>',
+      '  <div v-if="loading" class="is-loading">{{ t(\'infraSettings.loading\') }}</div>',
       '  <div v-if="error" class="is-error">{{ error }}</div>',
       '  <div v-if="!loading && !error" class="is-content">',
       '    <div v-if="modelFields.length > 0" class="schema-group">',
@@ -123,7 +123,7 @@
       '    </div>',
       '    <div class="is-actions">',
       '      <button class="btn btn-blue" @click="save" :disabled="saving">',
-      '        {{ saving ? "保存中..." : "💾 保存基础设施设置" }}',
+      '        {{ saving ? t(\'infraSettings.saving\') : t(\'infraSettings.save\') }}',
       '      </button>',
       '    </div>',
       '  </div>',

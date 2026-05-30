@@ -378,7 +378,7 @@
       '      </foreignObject>',
       '    </g>',
       '  </svg>',
-      '  <div v-if="lossData.length === 0" class="lc-empty">暂无训练数据</div>',
+      '  <div v-if="lossData.length === 0" class="lc-empty">{{ t(\'lossChart.noData\') }}</div>',
       '</div>',
     ].join("\n"),
   };

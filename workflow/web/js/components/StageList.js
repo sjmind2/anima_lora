@@ -60,7 +60,7 @@
     template: [
       '<div style="display:flex;flex-direction:column;height:100%;">',
       '  <div class="stage-panel-header">',
-      '    <span>阶段面板</span>',
+      '    <span>{{ t(\'stageList.stagePanel\') }}</span>',
       '  </div>',
       '  <div class="stage-list">',
       '    <stage-card',
@@ -94,7 +94,7 @@
       '  <div class="run-controls">',
       '    <div class="btn-row">',
       '      <button class="btn btn-green btn-sm" style="flex:1;" @click="handleRun" :disabled="isRunning">',
-      '        ▶ 运行',
+      '        {{ t(\'stageList.run\') }}',
       '      </button>',
       '      <button class="btn btn-red btn-sm" style="flex:1;" @click="handleStop" :disabled="!isRunning">',
       '        {{ t(\'stageList.stop\') }}',

@@ -106,6 +106,10 @@ def create_app(workflows_root: Path | str | None = None) -> web.Application:
         app.router.add_get("/", _handle_index)
         app.router.add_static("/static", str(web_dir))
 
+    i18n_dir = Path(__file__).parent / "i18n"
+    if i18n_dir.exists():
+        app.router.add_static("/static/i18n", str(i18n_dir))
+
     return app
 
 

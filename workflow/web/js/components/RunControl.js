@@ -67,7 +67,7 @@
       '<div class="run-control">',
       '  <div class="rc-btn-row">',
       '    <button class="btn btn-green" @click="handleRun" :disabled="isRunning">',
-      '      ▶ 运行',
+      '      {{ t(\'runControl.run\') }}',
       '    </button>',
       '    <button class="btn btn-red" @click="handleStop" :disabled="!isRunning">',
       '      {{ t(\'runControl.stop\') }}',
