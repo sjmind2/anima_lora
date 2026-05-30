@@ -52,7 +52,7 @@
     },
     template: [
       '<div class="method-selector">',
-      '  <div class="method-selector-header">训练方法</div>',
+      '  <div class="method-selector-header">{{ t(\'methodSelector.trainingMethod\') }}</div>',
       '  <div class="method-base-select">',
       '    <select class="form-select" :value="modelValue" @change="onMethodChange">',
       '      <option v-for="m in methods" :key="m.value" :value="m.value">{{ m.label }}</option>',

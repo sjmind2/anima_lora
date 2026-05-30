@@ -85,7 +85,7 @@
       '          <span class="ds-subset-name">{{ subset.name || subset.dir || "unnamed" }}</span>',
       '        </label>',
       '        <label class="ds-repeat-control">',
-      '          <span class="ds-repeat-label">重复:</span>',
+      '          <span class="ds-repeat-label">{{ t(\'datasetSelector.repeat\') }}</span>',
       '          <input type="number" class="form-input ds-repeat-input"',
       '            :value="getNumRepeats(subset.name || subset.dir || \'\')"',
       '            @input="setNumRepeats((subset.name || subset.dir || \'\'), $event.target.value)"',

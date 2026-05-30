@@ -209,7 +209,7 @@
 
       '  <div v-if="field.type === \'dataset_ref\'" class="dataset-ref-field">',
       '    <div v-if="upstreamPreprocessStages.length === 0" class="form-input" style="color: var(--text-dim); font-style: italic;">',
-      '      无上游预处理阶段',
+      '      {{ t(\'fieldRenderer.noUpstreamPreprocess\') }}',
       '    </div>',
       '    <div v-else class="dataset-ref-list">',
       '      <label v-for="ps in upstreamPreprocessStages" :key="ps.id" class="dataset-ref-item">',
@@ -271,7 +271,7 @@
       '        {{ field.choice_details[opt].resolutions.join("  ") }}',
       '      </div>',
       '      <div v-if="bucketStats && bucketStats.families[opt]" class="bucket-stats-line">',
-      '        <span class="stats-original">原始: {{ bucketStats.families[opt].original }}张</span>',
+      '        <span class="stats-original">{{ t(\'fieldRenderer.original\', {n: bucketStats.families[opt].original}) }}</span>',
       '        <span style="margin: 0 4px;">·</span>',
       '        <span class="stats-resized" :class="{ dim: !bucketStats.families[opt].resized }">',
       '          缩放后: {{ bucketStats.families[opt].resized }}张',

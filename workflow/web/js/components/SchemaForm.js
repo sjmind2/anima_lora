@@ -110,7 +110,7 @@
     },
     template: [
       '<div class="schema-form">',
-      '  <div v-if="loading" class="empty-state">加载 Schema...</div>',
+      '  <div v-if="loading" class="empty-state">{{ t(\'schemaForm.loadingSchema\') }}</div>',
       '  <div v-if="error" class="empty-state" style="color: var(--red);">{{ error }}</div>',
       '  <div v-if="!loading && !error && groups.length > 0">',
       '    <div v-for="group in groups" :key="group.name" class="schema-group">',

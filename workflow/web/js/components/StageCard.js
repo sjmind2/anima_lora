@@ -74,7 +74,7 @@
       '  @dragover.prevent="$emit(\'dragover\', index, $event)"',
       '  @drop="$emit(\'drop\', index, $event)"',
       '  @dragend="$emit(\'dragend\')">',
-      '  <span class="drag-handle" title="拖拽排序">⠿</span>',
+      '  <span class="drag-handle" :title="t(\'stageCard.dragToReorder\')">⠿</span>',
       '  <span class="stage-icon">{{ typeIcons[stage.type] || "📄" }}</span>',
       '  <div class="stage-info">',
       '    <div class="stage-name">{{ stageLabel }}</div>',

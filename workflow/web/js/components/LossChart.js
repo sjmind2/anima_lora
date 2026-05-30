@@ -372,7 +372,7 @@
       '      <foreignObject :x="crosshairData.cx + 10" :y="crosshairData.cy - 30" width="180" height="50">',
       '        <div class="lc-tooltip" xmlns="http://www.w3.org/1999/xhtml">',
       '          <div>Step: {{ crosshairData.step }} | Loss: {{ crosshairData.loss.toFixed(6) }}</div>',
-      '          <div v-if="crosshairData.lr">LR: {{ crosshairData.lr }}</div>',
+      '          <div v-if="crosshairData.lr">{{ t(\'lossChart.lr\') + \': \' + crosshairData.lr }}</div>',
       '          <div v-if="crosshairData.stageId" class="lc-tooltip-stage">{{ crosshairData.stageId }}</div>',
       '        </div>',
       '      </foreignObject>',
