@@ -45,3 +45,4 @@ gui/gui_settings.json
 node_modules/
 workflows/
 .anima_workflow/
+.worktrees/
