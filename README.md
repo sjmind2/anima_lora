@@ -1,6 +1,6 @@
 # anima_lora
 
-[한국어](README.ko.md) · 📖 [가이드북 (Windows 초보자용 한국어 종합 가이드)](docs/guidelines/가이드북.md)
+**English** | [中文](README.zh.md) | [日本語](README.ja.md) · 📖 [가이드북 (Windows 초보자용 한국어 종합 가이드)](docs/guidelines/가이드북.md)
 
 LoRA / T-LoRA training and inference engine for the [Anima](https://huggingface.co/circlestone-labs/Anima) diffusion model (DiT-based, flow-matching).
 
@@ -12,6 +12,16 @@ Four things this repo aims to do well:
 4. **A broad experimental surface** — SPD, ChimeraHydra, Soft Tokens, Turbo distillation, ReFT, IP-Adapter, EasyControl, DirectEdit, embedding inversion.
 
 > **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, ReFT, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
+
+## What's new
+
+| Feature | Description | Guide |
+|---------|-------------|-------|
+| **LoKR** | Low-rank Kronecker product adaptation — structured high-rank with adaptive parameter count | [docs/guidelines/lokr.md](docs/guidelines/lokr.md) |
+| **LoHA** | Low-rank Hadamard product adaptation — effective rank r² with only 2× LoRA parameters | [docs/guidelines/loha.md](docs/guidelines/loha.md) |
+| **CAME optimizer** | Factorized optimizer replacing full-matrix second moments — significant memory savings | [docs/guidelines/came.md](docs/guidelines/came.md) |
+| **Bucket Families** | Resolution bucketing by area → AR matching to token-count groups for compile performance | [docs/guidelines/bucket-families.md](docs/guidelines/bucket-families.md) |
+| **Workflow engine** | WebUI + CLI multi-stage training pipeline with real-time progress and schema-driven forms | [docs/guidelines/workflow.md](docs/guidelines/workflow.md) |
 
 ---
 
