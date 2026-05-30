@@ -13,7 +13,8 @@
 
   var currentLangLabel = computed(function () {
     var locale = currentLang.value;
-    return t("langSwitcher." + locale, locale);
+    var shortCode = locale === "zh-CN" ? "zh" : locale;
+    return t("langSwitcher." + shortCode, locale);
   });
 
   function toggleLangMenu() {
