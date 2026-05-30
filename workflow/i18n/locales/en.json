@@ -1,0 +1,332 @@
+{
+  "app": {
+    "openFailed": "Open failed: {error}",
+    "runLogTitle": "Run log — {id}",
+    "loadLogFailed": "Failed to load log: {error}",
+    "loadFailed": "Load failed: {error}",
+    "workflowSaved": "Workflow saved",
+    "saveFailed": "Save failed: {error}",
+    "newWorkflow": "New Workflow",
+    "enterWorkflowName": "Enter workflow name",
+    "workflowCreated": "Workflow created: {name}",
+    "createFailed": "Create failed: {error}",
+    "runFailed": "Run failed: {error}",
+    "stopping": "Stopping...",
+    "stopFailed": "Stop failed: {error}",
+    "workflowStart": "▶ Workflow started ({n} stages)",
+    "stageStart": "▶ Stage started: {id} ({type})",
+    "checkpoint": "💾 Checkpoint: {path} (epoch {epoch})",
+    "stageDone": "✅ Stage completed: {id}",
+    "stageFailed": "❌ Stage failed: {id} — {status}",
+    "workflowDone": "✅ Workflow completed",
+    "workflowRunDone": "Workflow run completed",
+    "workflowFail": "❌ Workflow failed",
+    "workflowRunFail": "Workflow run failed",
+    "connectionLost": "⚠ Connection lost",
+    "settingsSaved": "Settings saved",
+    "openWorkflow": "Open Workflow ▾",
+    "noWorkflows": "No workflows",
+    "save": "💾 Save",
+    "saveConfig": "💾 Save Config",
+    "welcomeTitle": "Anima Workflow",
+    "welcomeDesc1": "Create or open a workflow to manage your LoRA training pipeline.",
+    "welcomeDesc2": "Supports preprocessing and training stages with drag-and-drop ordering and dependency management.",
+    "selectStage": "Select a stage on the left to edit its configuration",
+    "log": "Logs",
+    "systemLog": "System Log",
+    "scriptOutput": "Script Output",
+    "runHistory": "Run History",
+    "stages": "stages",
+    "stageProgress": "Stage {pct}%",
+    "allStages": "All Stages",
+    "lines": "lines",
+    "waitingToRun": "Waiting to run...",
+    "noScriptOutput": "No script output",
+    "noRunHistory": "No run history",
+    "done": "✅ Done",
+    "stopped": "⏹ Stopped",
+    "failed": "❌ Failed",
+    "running": "🔄 Running",
+    "viewLog": "📋 Log",
+    "loading": "Loading...",
+    "logEmpty": "Log is empty",
+    "settings": "⚙ Settings",
+    "settingsTitle": "⚙ Global Settings",
+    "workflowsRoot": "📁 Workflow Root Directory",
+    "workflowsRootLabel": "Workflow root directory",
+    "workflowsRootPlaceholder": "Leave empty to use default path",
+    "modelPaths": "🗂 Model Paths",
+    "ditModel": "DiT Model",
+    "textEncoder": "Text Encoder (qwen3)",
+    "vaeModel": "VAE Model",
+    "hardwareSettings": "🔧 Hardware Settings",
+    "mixedPrecision": "Mixed Precision",
+    "attnMode": "Attention Mode",
+    "cancel": "Cancel",
+    "saving": "Saving...",
+    "saveSettings": "💾 Save Settings",
+    "ok": "OK"
+  },
+  "fieldRenderer": {
+    "required": "Required",
+    "conditionalRequired": "Conditionally required",
+    "autoSet": "Auto-set",
+    "path": "Path",
+    "noUpstreamPreprocess": "No upstream preprocessing stage",
+    "noUpstreamCheckpoint": "Do not use upstream checkpoint",
+    "noUpstreamTrain": "No upstream training stage",
+    "analyzing": "Analyzing...",
+    "analyzeDataset": "Analyze Dataset",
+    "original": "Original: {n} images",
+    "resized": "Resized: {n} images"
+  },
+  "schemaForm": {
+    "loadingSchema": "Loading Schema..."
+  },
+  "methodSelector": {
+    "trainingMethod": "Training Method"
+  },
+  "stageCard": {
+    "dragToReorder": "Drag to reorder",
+    "dependencies": "Dependencies",
+    "deleteStage": "Delete stage"
+  },
+  "stageList": {
+    "stagePanel": "Stages",
+    "noStages": "No stages yet. Click below to add",
+    "addStage": "+ Add Stage ▾",
+    "run": "▶ Run",
+    "stop": "■ Stop"
+  },
+  "datasetSelector": {
+    "noDatasets": "No datasets available",
+    "subsets": "subsets",
+    "repeat": "Repeat:"
+  },
+  "runControl": {
+    "run": "▶ Run",
+    "stop": "■ Stop",
+    "stagesLabel": "stages"
+  },
+  "infraSettings": {
+    "loading": "Loading...",
+    "loadFailed": "Failed to load infrastructure config: {error}",
+    "saveFailed": "Save failed: {error}",
+    "modelPaths": "📁 Model Paths",
+    "hardwareSettings": "⚙ Hardware Settings",
+    "saving": "Saving...",
+    "save": "💾 Save Infrastructure Settings"
+  },
+  "logViewer": {
+    "searchPlaceholder": "Search logs...",
+    "allStages": "All Stages",
+    "resume": "▼ Resume",
+    "paused": "Paused",
+    "noLogs": "No logs"
+  },
+  "lossChart": {
+    "noData": "No training data",
+    "step": "Step",
+    "loss": "Loss",
+    "lr": "LR"
+  },
+  "langSwitcher": {
+    "zh": "中文",
+    "en": "English",
+    "ja": "日本語"
+  },
+  "schema": {
+    "infrastructure": {
+      "root": { "label": "Infrastructure Configuration", "description": "Model paths and hardware settings shared by all stages" },
+      "group": { "models": "Model Paths", "hardware": "Hardware Settings" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT Model Path",
+        "qwen3": "Text Encoder Path",
+        "vae": "VAE Model Path",
+        "mixed_precision": "Mixed Precision",
+        "attn_mode": "Attention Mode"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "Leave empty to use default path (models/diffusion_models/)",
+        "qwen3": "Leave empty to use default path",
+        "vae": "Leave empty to use default path"
+      }
+    },
+    "preprocess": {
+      "root": { "label": "Preprocessing", "description": "Image resizing + VAE caching + text embedding caching" },
+      "group": { "advanced": "Advanced Overrides", "data_source": "Data Source", "bucket": "Resolution Settings", "filter": "Filter Options" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT Model Override",
+        "qwen3": "Text Encoder Override",
+        "vae": "VAE Model Override",
+        "source_image_dir": "Raw Dataset Path",
+        "bucket_families": "Resolution Groups",
+        "drop_lowres_images": "Filter Low-Resolution Images",
+        "min_pixels": "Minimum Pixels"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "Leave empty to use global settings",
+        "qwen3": "Leave empty to use global settings",
+        "vae": "Leave empty to use global settings",
+        "source_image_dir": "Directory containing raw images and caption files",
+        "bucket_families": "Select target resolution groups for training images. S1/S2 are fixed-ratio, XS~XL are natural distributions. Multiple can be combined."
+      },
+      "choice_labels": {
+        "bucket_families": {
+          "S1": "S1 — TC1024 — 256×1024, 512×512",
+          "S2": "S2 — TC4096 — 512×2048, 1024×1024",
+          "XS": "XS — TC1680 — 336~640 portrait/landscape",
+          "S": "S — TC2160 — 384~720 portrait/landscape",
+          "M": "M — TC3600 — 480~960 portrait/landscape",
+          "L": "L — TC4032 — 512~1008 portrait/landscape",
+          "XL": "XL — TC5040 — 640~1120 portrait/landscape"
+        }
+      }
+    },
+    "train_common": {
+      "root": { "label": "Common Training Parameters", "description": "Parameters shared by all training methods, preserved when switching methods" },
+      "group": { "advanced": "Advanced Overrides", "training": "Training Hyperparameters", "data": "Data", "checkpoint": "Checkpoint Linking", "output": "Output", "performance": "Performance" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT Model Override",
+        "qwen3": "Text Encoder Override",
+        "vae": "VAE Model Override",
+        "learning_rate": "Learning Rate",
+        "lr_scheduler": "LR Scheduler",
+        "lr_warmup_steps": "Warmup Steps",
+        "max_train_epochs": "Max Epochs",
+        "stop_epoch": "Stop Epoch",
+        "optimizer_type": "Optimizer",
+        "optimizer_args": "Optimizer Arguments",
+        "gradient_accumulation_steps": "Gradient Accumulation Steps",
+        "max_grad_norm": "Max Gradient Norm",
+        "timestep_sampling": "Timestep Sampling Strategy",
+        "discrete_flow_shift": "Discrete Flow Shift",
+        "sigmoid_bias": "Sigmoid Bias",
+        "datasets": "Input Datasets",
+        "use_shuffled_caption_variants": "Use Shuffled Caption Variants",
+        "caption_dropout_rate": "Caption Dropout Rate",
+        "caption_extension": "Caption Extension",
+        "keep_tokens": "Keep Tokens Count",
+        "cache_llm_adapter_outputs": "Cache LLM Adapter Outputs",
+        "network_train_unet_only": "Train UNet Only",
+        "network_weights": "Weight Initialization",
+        "output_name": "Output Name",
+        "save_every_n_epochs": "Save Every N Epochs",
+        "checkpointing_epochs": "Checkpointable Resume Interval",
+        "gradient_checkpointing": "Gradient Checkpointing",
+        "unsloth_offload_checkpointing": "Unsloth Offload Checkpointing",
+        "blocks_to_swap": "Block Swap Count",
+        "torch_compile": "torch.compile Acceleration",
+        "seed": "Random Seed"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "Leave empty to use global settings",
+        "qwen3": "Leave empty to use global settings",
+        "vae": "Leave empty to use global settings",
+        "stop_epoch": "Stop after saving at this epoch",
+        "optimizer_args": "Separate multiple arguments with spaces, e.g.: weight_decay=0.01 betas=0.9,0.999,0.9999",
+        "network_train_unet_only": "Must be enabled when caching TE outputs"
+      }
+    },
+    "train_lora": {
+      "root": { "label": "LoRA", "description": "Classic LoRA, supports Ortho/Hydra/ReFT/T-LoRA combinations" },
+      "combo_switch": {
+        "use_ortho": { "label": "OrthoLoRA", "description": "Cayley/SVD orthogonal parameterization" },
+        "use_moe_style": { "label": "HydraLoRA MoE", "description": "Multi-expert routing" },
+        "use_timestep_mask": { "label": "T-LoRA", "description": "Timestep masking" },
+        "add_reft": { "label": "ReFT", "description": "Representation fine-tuning" }
+      },
+      "group": { "architecture": "Architecture" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "network_dropout": "Dropout",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "scale_weight_norms": "Weight norm regularization, leave empty to disable"
+      }
+    },
+    "train_locon": {
+      "root": { "label": "LoCON", "description": "Low-Rank Convolution" },
+      "group": { "architecture": "Architecture" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)"
+      }
+    },
+    "train_loha": {
+      "root": { "label": "LoHA", "description": "Low-Rank Hadamard Product" },
+      "group": { "architecture": "Architecture" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "scale_weight_norms": "Weight norm regularization. Auto-enabled at 1.0 for LoHA/LoKR"
+      }
+    },
+    "train_lokr": {
+      "root": { "label": "LoKR", "description": "Low-Rank Kronecker Product" },
+      "group": { "architecture": "Architecture" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "lokr_factor": "LoKr Factor",
+        "decompose_both": "Decompose Both",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)",
+        "full_matrix": "Full Matrix",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "lokr_factor": "Kronecker decomposition factor, -1 for auto",
+        "scale_weight_norms": "Weight norm regularization. Auto-enabled at 1.0 for LoHA/LoKR"
+      }
+    }
+  },
+  "backend": {
+    "models": {
+      "invalidStageType": "Invalid stage type: {v}. Must be one of {allowed}",
+      "circularDependency": "Circular dependency involving stage: {sid}",
+      "unknownDependency": "Unknown dependency: {dep}"
+    },
+    "config": {
+      "workflowNotFound": "Workflow file not found: {path}",
+      "tomlNotFound": "TOML file not found: {path}",
+      "unresolvedPlaceholderStage": "Unresolved placeholder: stage '{stage}' not found",
+      "unresolvedPlaceholderKey": "Unresolved placeholder: '{key}' not in stage '{stage}' outputs",
+      "schemaNotFound": "Schema not found: {path}"
+    },
+    "scheduler": {
+      "unknownStageType": "Unknown stage type: {type}",
+      "configError": "config_error: {error}",
+      "configFile": "config file: {path}"
+    },
+    "stages": {
+      "command": "[COMMAND:{step}] {cmd}",
+      "stopped": "stopped",
+      "stepFailed": "{step} failed with exit code {code}",
+      "trainDatasetRefNotFound": "Dataset reference '{ds}' not found in stage outputs",
+      "commandLabel": "[COMMAND] {cmd}",
+      "trainFailed": "train.py failed with exit code {code}"
+    },
+    "logger": {
+      "checkpointSaved": "checkpoint saved: {path} (epoch {epoch})"
+    }
+  }
+}
