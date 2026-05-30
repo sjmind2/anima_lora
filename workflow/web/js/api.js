@@ -9,6 +9,9 @@ var AnimaAPI = (function () {
     if (body !== undefined) {
       opts.body = JSON.stringify(body);
     }
+    if (typeof I18n !== "undefined") {
+      opts.headers["Accept-Language"] = I18n.getLocale();
+    }
     return fetch(BASE + path, opts).then(function (r) {
       if (!r.ok) {
         return r.json().then(
