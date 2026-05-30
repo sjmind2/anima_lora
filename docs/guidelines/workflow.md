@@ -16,9 +16,7 @@ Key dependencies:
 - `aiohttp >= 3.13.5` — HTTP server and REST API
 - `pywebview >= 5.0` — Desktop window mode (optional, falls back to browser)
 
-### Node.js (Development Only)
-
-The Workflow frontend uses Vue 3 via CDN (no build step required for production use). **Node.js is only needed if you want to modify the frontend JavaScript.**
+### Node.js
 
 Install Node.js from [nodejs.org](https://nodejs.org/) (LTS recommended) or via package manager:
 
@@ -32,13 +30,6 @@ brew install node
 # Linux (nvm - recommended)
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
 nvm install --lts
-```
-
-For frontend development, you may want a local dev server with hot reload:
-
-```bash
-cd workflow/web
-npx serve .    # or: python -m http.server 3000
 ```
 
 ### pywebview System Dependency
@@ -156,8 +147,6 @@ Multi-stage workflows enable advanced training strategies like [low-resolution p
 
 ### How Multi-Stage Orchestration Works
 
-Stages are executed in **topological order** based on `depends_on` declarations. The scheduler detects circular dependencies and reports an error.
-
 Each stage's outputs are available to subsequent stages via:
 - **Automatic references** — the system auto-fills `network_weights` and `datasets` from upstream outputs
 - **Placeholder syntax** — `${stage_id.output_key}` in config values, resolved at runtime
@@ -239,10 +228,6 @@ Lists all previous runs in reverse chronological order. Each entry shows:
 
 Alternatively, `runs/latest` is always a junction/symlink to the most recent run directory.
 
-### Search and Highlight
-
-The log viewer supports text search with highlight matching across all visible log lines.
-
 ## Settings
 
 ### Language
@@ -273,7 +258,7 @@ Paths resolve against the repository root (`ANIMA_HOME`). Set `ANIMA_DIT`, `ANIM
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Mixed precision** | `bf16` | Training precision |
-| **Attention mode** | `flex` | Attention implementation |
+| **Attention mode** | `flash` | Attention implementation |
 
 ### Override Priority
 

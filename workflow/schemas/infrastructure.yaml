@@ -38,7 +38,7 @@ groups:
       - key: attn_mode
         type: enum
         required: false
-        default: "flex"
+        default: "flash"
         choices: ["flex", "sdpa", "flash", "xformers"]
         layer: infrastructure
         label: "注意力模式"

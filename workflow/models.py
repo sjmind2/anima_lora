@@ -74,4 +74,4 @@ class InfrastructureConfig(BaseModel):
     qwen3: str = ""
     vae: str = ""
     mixed_precision: str = "bf16"
-    attn_mode: str = "flex"
+    attn_mode: str = "flash"

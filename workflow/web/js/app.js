@@ -77,7 +77,7 @@
         qwen3: "",
         vae: "",
         mixed_precision: "bf16",
-        attn_mode: "flex",
+        attn_mode: "flash",
       });
       var settingsLoading = ref(false);
       var settingsSaving = ref(false);
@@ -564,7 +564,7 @@
           settingsData.qwen3 = infra.qwen3 || "";
           settingsData.vae = infra.vae || "";
           settingsData.mixed_precision = infra.mixed_precision || "bf16";
-          settingsData.attn_mode = infra.attn_mode || "flex";
+          settingsData.attn_mode = infra.attn_mode || "flash";
         }).finally(function() {
           settingsLoading.value = false;
         });

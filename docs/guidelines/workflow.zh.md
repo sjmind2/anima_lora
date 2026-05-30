@@ -18,9 +18,7 @@ uv sync
 - `aiohttp >= 3.13.5` — HTTP 服务器和 REST API
 - `pywebview >= 5.0` — 桌面窗口模式（可选，回退到浏览器）
 
-### Node.js（仅开发时需要）
-
-Workflow 前端通过 CDN 使用 Vue 3（生产环境无需构建步骤）。**只有在需要修改前端 JavaScript 时才需要安装 Node.js。**
+### Node.js
 
 从 [nodejs.org](https://nodejs.org/) 安装 Node.js（推荐 LTS 版本）或通过包管理器安装：
 
@@ -34,13 +32,6 @@ brew install node
 # Linux (nvm - 推荐)
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
 nvm install --lts
-```
-
-前端开发时，可能需要带热重载的本地开发服务器：
-
-```bash
-cd workflow/web
-npx serve .    # 或: python -m http.server 3000
 ```
 
 ### pywebview 系统依赖
@@ -158,8 +149,6 @@ python -m workflow
 
 ### 多阶段编排的工作原理
 
-阶段按 **拓扑顺序** 执行，顺序由 `depends_on` 声明决定。调度器会检测循环依赖并报告错误。
-
 每个阶段的输出可通过以下方式供后续阶段使用：
 - **自动引用** — 系统自动从上游输出填充 `network_weights` 和 `datasets`
 - **占位符语法** — 配置值中的 `${stage_id.output_key}`，在运行时解析
@@ -241,10 +230,6 @@ Preprocess S1 → Train S1 (stop at epoch 6) → Preprocess L → Train L (from 
 
 或者，`runs/latest` 始终是指向最近运行目录的 junction/symlink。
 
-### 搜索和高亮
-
-日志查看器支持文本搜索，可在所有可见日志行中高亮匹配内容。
-
 ## 设置
 
 ### 语言
@@ -275,7 +260,7 @@ UI 会自动检测你的浏览器语言，支持三种语言：
 | 设置 | 默认值 | 说明 |
 |------|--------|------|
 | **Mixed precision** | `bf16` | 训练精度 |
-| **Attention mode** | `flex` | Attention 实现方式 |
+| **Attention mode** | `flash` | Attention 实现方式 |
 
 ### 覆盖优先级
 
