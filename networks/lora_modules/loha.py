@@ -141,7 +141,7 @@ class LohaModule(BaseLoRAModule):
             ratio = desired.cpu() / norm.cpu()
             scaled = norm != desired
             if scaled:
-                self.scalar *= ratio
+                self.scalar.data.mul_(ratio.item())
             return scaled, (orig_norm * ratio).item()
 
     def forward(self, x):

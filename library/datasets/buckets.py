@@ -1,5 +1,6 @@
 import math
 import random
+from pathlib import Path
 from typing import NamedTuple, Tuple
 
 import numpy as np
@@ -61,13 +62,66 @@ CONSTANT_TOKEN_BUCKETS = [
 ]
 
 BUCKET_FAMILIES = {
-    'XL': {'tc': 5040, 'members': [(640,2016),(672,1920),(720,1792),(768,1680),(896,1440),(960,1344),(1008,1280),(1120,1152)]},
-    'L':  {'tc': 4032, 'members': [(512,2016),(576,1792),(672,1536),(768,1344),(896,1152),(1008,1024)]},
-    'M':  {'tc': 3600, 'members': [(480,1920),(576,1600),(640,1440),(720,1280),(768,1200),(800,1152),(960,960)]},
-    'S':  {'tc': 2160, 'members': [(384,1440),(432,1280),(480,1152),(576,960),(640,864),(720,768)]},
-    'XS': {'tc': 1680, 'members': [(336,1280),(384,1120),(448,960),(480,896),(560,768),(640,672)]},
-    'S1': {'tc': 1024, 'members': [(256,1024),(512,512)]},
-    'S2': {'tc': 4096, 'members': [(512,2048),(1024,1024)]},
+    "XL": {
+        "tc": 5040,
+        "members": [
+            (640, 2016),
+            (672, 1920),
+            (720, 1792),
+            (768, 1680),
+            (896, 1440),
+            (960, 1344),
+            (1008, 1280),
+            (1120, 1152),
+        ],
+    },
+    "L": {
+        "tc": 4032,
+        "members": [
+            (512, 2016),
+            (576, 1792),
+            (672, 1536),
+            (768, 1344),
+            (896, 1152),
+            (1008, 1024),
+        ],
+    },
+    "M": {
+        "tc": 3600,
+        "members": [
+            (480, 1920),
+            (576, 1600),
+            (640, 1440),
+            (720, 1280),
+            (768, 1200),
+            (800, 1152),
+            (960, 960),
+        ],
+    },
+    "S": {
+        "tc": 2160,
+        "members": [
+            (384, 1440),
+            (432, 1280),
+            (480, 1152),
+            (576, 960),
+            (640, 864),
+            (720, 768),
+        ],
+    },
+    "XS": {
+        "tc": 1680,
+        "members": [
+            (336, 1280),
+            (384, 1120),
+            (448, 960),
+            (480, 896),
+            (560, 768),
+            (640, 672),
+        ],
+    },
+    "S1": {"tc": 1024, "members": [(256, 1024), (512, 512)]},
+    "S2": {"tc": 4096, "members": [(512, 2048), (1024, 1024)]},
 }
 
 
@@ -79,7 +133,7 @@ def get_bucket_list(enabled_families=None):
     for name in enabled_families:
         if name not in BUCKET_FAMILIES:
             continue
-        for W, H in BUCKET_FAMILIES[name]['members']:
+        for W, H in BUCKET_FAMILIES[name]["members"]:
             if (W, H) not in seen:
                 buckets.append((W, H))
                 seen.add((W, H))
@@ -87,6 +141,7 @@ def get_bucket_list(enabled_families=None):
                 buckets.append((H, W))
                 seen.add((H, W))
     return buckets
+
 
 # DCW v4 calibration aspect-bucket set.
 #
@@ -200,7 +255,7 @@ class BucketManager:
                 if name not in BUCKET_FAMILIES:
                     continue
                 members = []
-                for W, H in BUCKET_FAMILIES[name]['members']:
+                for W, H in BUCKET_FAMILIES[name]["members"]:
                     members.append((W, H))
                     if W != H:
                         members.append((H, W))
@@ -221,7 +276,11 @@ class BucketManager:
         self.predefined_aspect_ratios = np.array([w / h for w, h in resos])
         self.family_groups = family_groups
         if family_groups:
-            self.family_tc = {name: BUCKET_FAMILIES[name]['tc'] for name in family_groups if name in BUCKET_FAMILIES}
+            self.family_tc = {
+                name: BUCKET_FAMILIES[name]["tc"]
+                for name in family_groups
+                if name in BUCKET_FAMILIES
+            }
         else:
             self.family_tc = None
 
@@ -260,12 +319,8 @@ class BucketManager:
                 min_ar_error = abs_ar_errors.min()
                 tied = np.where(abs_ar_errors == min_ar_error)[0]
                 if len(tied) > 1:
-                    areas = np.array(
-                        [w * h for w, h in self.predefined_resos]
-                    )[tied]
-                    predefined_bucket_id = tied[
-                        np.abs(areas - image_area).argmin()
-                    ]
+                    areas = np.array([w * h for w, h in self.predefined_resos])[tied]
+                    predefined_bucket_id = tied[np.abs(areas - image_area).argmin()]
                 else:
                     predefined_bucket_id = tied[0]
                 reso = self.predefined_resos[predefined_bucket_id]
@@ -309,3 +364,56 @@ class BucketBatchIndex(NamedTuple):
     bucket_index: int
     bucket_batch_size: int
     batch_index: int
+
+
+IMAGE_EXTS_SCAN = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"})
+
+
+def scan_dataset_bucket_distribution(
+    source_dir: str, enabled_families: list[str]
+) -> dict:
+    src = Path(source_dir)
+    if not src.is_dir():
+        return {"error": "Directory not found"}
+
+    all_tc = {name: info["tc"] for name, info in BUCKET_FAMILIES.items()}
+    enabled_tc = {name: all_tc[name] for name in enabled_families if name in all_tc}
+
+    original_counts: dict[str, int] = {name: 0 for name in all_tc}
+    resized_counts: dict[str, int] = {name: 0 for name in all_tc}
+
+    total = 0
+    for p in src.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS_SCAN:
+            continue
+        try:
+            from PIL import Image
+
+            with Image.open(p) as img:
+                iw, ih = img.size
+        except Exception:
+            continue
+        total += 1
+        img_area = iw * ih
+
+        best_all = min(all_tc.items(), key=lambda kv: abs(kv[1] * 256 - img_area))[0]
+        original_counts[best_all] += 1
+
+        if enabled_tc:
+            best_enabled = min(
+                enabled_tc.items(), key=lambda kv: abs(kv[1] * 256 - img_area)
+            )[0]
+            resized_counts[best_enabled] += 1
+        else:
+            resized_counts[best_all] += 1
+
+    return {
+        "total_images": total,
+        "families": {
+            name: {
+                "original": original_counts[name],
+                "resized": resized_counts[name],
+            }
+            for name in BUCKET_FAMILIES
+        },
+    }

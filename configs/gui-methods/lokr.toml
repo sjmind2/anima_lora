@@ -22,6 +22,7 @@ source_image_dir = "O:/LoRATraining/hanechan"
 lr_scheduler = "cosine"
 optimizer_args = "[\"weight_decay=0.01\", \"betas=0.9,0.999,0.9999\"]"
 optimizer_type = "CAME"
+bucket_families = [ "S1",]
 [[datasets]]
 validation_split_num = 0
 validation_split = 0.0

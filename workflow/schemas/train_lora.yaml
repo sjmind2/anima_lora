@@ -1,0 +1,58 @@
+type: train_method
+method: lora
+label: "LoRA"
+description: "经典 LoRA，支持 Ortho/Hydra/ReFT/T-LoRA 组合"
+base_type: lora
+supports_combos: true
+
+combo_switches:
+  - key: use_ortho
+    label: "OrthoLoRA"
+    description: "Cayley/SVD 正交参数化"
+    schema_file: "combo_ortho.yaml"
+  - key: use_moe_style
+    label: "HydraLoRA MoE"
+    description: "多专家路由"
+    schema_file: "combo_hydra.yaml"
+    value: "shared_A"
+  - key: use_timestep_mask
+    label: "T-LoRA"
+    description: "时间步掩码"
+    schema_file: "combo_tlora.yaml"
+  - key: add_reft
+    label: "ReFT"
+    description: "表示微调"
+    schema_file: "combo_reft.yaml"
+
+groups:
+  - name: architecture
+    label: "架构"
+    fields:
+      - key: network_type
+        type: str
+        layer: method
+        required: false
+        hidden: true
+      - key: network_dim
+        type: int
+        layer: method
+        required: true
+        default: 32
+        label: "Network Dim"
+      - key: network_alpha
+        type: int
+        layer: method
+        required: true
+        default: 32
+        label: "Network Alpha"
+      - key: network_dropout
+        type: float
+        layer: method
+        required: false
+        label: "Dropout"
+      - key: scale_weight_norms
+        type: float
+        layer: method
+        required: false
+        label: "Scale Weight Norms"
+        help: "权重范数正则化，留空不启用"

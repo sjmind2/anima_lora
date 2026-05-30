@@ -1,0 +1,90 @@
+type: preprocess
+label: "预处理"
+description: "图像缩放 + VAE缓存 + 文本嵌入缓存"
+
+groups:
+  - name: advanced
+    label: "高级覆盖"
+    collapsed: true
+    fields:
+      - key: pretrained_model_name_or_path
+        type: path
+        required: false
+        label: "DiT 模型覆盖"
+        help: "留空使用全局设置"
+      - key: qwen3
+        type: path
+        required: false
+        label: "文本编码器覆盖"
+        help: "留空使用全局设置"
+      - key: vae
+        type: path
+        required: false
+        label: "VAE 模型覆盖"
+        help: "留空使用全局设置"
+
+  - name: data_source
+    label: "数据源"
+    fields:
+      - key: source_image_dir
+        type: path
+        required: true
+        label: "原始数据集路径"
+        help: "包含原始图片和 caption 文件的目录"
+        widget: directory
+
+  - name: bucket
+    label: "分辨率设置"
+    fields:
+      - key: bucket_families
+        type: "list[str]"
+        required: true
+        label: "分辨率分组"
+        choices: ["S1", "S2", "XS", "S", "M", "L", "XL"]
+        choice_labels:
+          S1: "S1 — TC1024 — 256×1024, 512×512"
+          S2: "S2 — TC4096 — 512×2048, 1024×1024"
+          XS: "XS — TC1680 — 336~640 竖/横"
+          S: "S — TC2160 — 384~720 竖/横"
+          M: "M — TC3600 — 480~960 竖/横"
+          L: "L — TC4032 — 512~1008 竖/横"
+          XL: "XL — TC5040 — 640~1120 竖/横"
+        choice_details:
+          S1:
+            tc: 1024
+            resolutions: ["256x1024", "512x512"]
+          S2:
+            tc: 4096
+            resolutions: ["512x2048", "1024x1024"]
+          XS:
+            tc: 1680
+            resolutions: ["336x1280", "384x1120", "448x960", "480x896", "560x768", "640x672"]
+          S:
+            tc: 2160
+            resolutions: ["384x1440", "432x1280", "480x1152", "576x960", "640x864", "720x768"]
+          M:
+            tc: 3600
+            resolutions: ["480x1920", "576x1600", "640x1440", "720x1280", "768x1200", "800x1152", "960x960"]
+          L:
+            tc: 4032
+            resolutions: ["512x2016", "576x1792", "672x1536", "768x1344", "896x1152", "1008x1024"]
+          XL:
+            tc: 5040
+            resolutions: ["640x2016", "672x1920", "720x1792", "768x1680", "896x1440", "960x1344", "1008x1280", "1120x1152"]
+        default: ["S1"]
+        help: "选择训练图片的目标分辨率分组。S1/S2 为固定比例，XS~XL 为自然分布。可多选组合。"
+
+  - name: filter
+    label: "过滤选项"
+    fields:
+      - key: drop_lowres_images
+        type: bool
+        required: false
+        default: true
+        label: "过滤低分辨率图片"
+      - key: min_pixels
+        type: int
+        required: false
+        default: 500000
+        label: "最小像素数"
+        condition: "drop_lowres_images == true"

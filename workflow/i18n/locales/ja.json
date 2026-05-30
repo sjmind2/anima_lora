@@ -1,0 +1,332 @@
+{
+  "app": {
+    "openFailed": "開けませんでした: {error}",
+    "runLogTitle": "実行ログ — {id}",
+    "loadLogFailed": "ログの読み込みに失敗しました: {error}",
+    "loadFailed": "読み込みに失敗しました: {error}",
+    "workflowSaved": "ワークフローを保存しました",
+    "saveFailed": "保存に失敗しました: {error}",
+    "newWorkflow": "新規ワークフロー",
+    "enterWorkflowName": "ワークフロー名を入力",
+    "workflowCreated": "ワークフローを作成しました: {name}",
+    "createFailed": "作成に失敗しました: {error}",
+    "runFailed": "実行に失敗しました: {error}",
+    "stopping": "停止中...",
+    "stopFailed": "停止に失敗しました: {error}",
+    "workflowStart": "▶ ワークフロー開始 ({n} ステージ)",
+    "stageStart": "▶ ステージ開始: {id} ({type})",
+    "checkpoint": "💾 チェックポイント: {path} (epoch {epoch})",
+    "stageDone": "✅ ステージ完了: {id}",
+    "stageFailed": "❌ ステージ失敗: {id} — {status}",
+    "workflowDone": "✅ ワークフロー完了",
+    "workflowRunDone": "ワークフロー実行完了",
+    "workflowFail": "❌ ワークフロー失敗",
+    "workflowRunFail": "ワークフロー実行失敗",
+    "connectionLost": "⚠ 接続が切断されました",
+    "settingsSaved": "設定を保存しました",
+    "openWorkflow": "ワークフローを開く ▾",
+    "noWorkflows": "ワークフローなし",
+    "save": "💾 保存",
+    "saveConfig": "💾 設定を保存",
+    "welcomeTitle": "Anima Workflow",
+    "welcomeDesc1": "ワークフローを作成または開いて、LoRA学習パイプラインを管理しましょう。",
+    "welcomeDesc2": "前処理・学習ステージのドラッグ＆ドロップによる並べ替えと依存関係管理をサポートします。",
+    "selectStage": "左側のステージを選択して設定を編集",
+    "log": "ログ",
+    "systemLog": "システムログ",
+    "scriptOutput": "スクリプト出力",
+    "runHistory": "実行履歴",
+    "stages": "ステージ",
+    "stageProgress": "ステージ {pct}%",
+    "allStages": "全ステージ",
+    "lines": "行",
+    "waitingToRun": "実行待ち...",
+    "noScriptOutput": "スクリプト出力なし",
+    "noRunHistory": "実行履歴なし",
+    "done": "✅ 完了",
+    "stopped": "⏹ 停止済み",
+    "failed": "❌ 失敗",
+    "running": "🔄 実行中",
+    "viewLog": "📋 ログ",
+    "loading": "読み込み中...",
+    "logEmpty": "ログは空です",
+    "settings": "⚙ 設定",
+    "settingsTitle": "⚙ グローバル設定",
+    "workflowsRoot": "📁 ワークフロールートディレクトリ",
+    "workflowsRootLabel": "ワークフロールートディレクトリ",
+    "workflowsRootPlaceholder": "デフォルトパスを使用する場合は空欄",
+    "modelPaths": "🗂 モデルパス",
+    "ditModel": "DiT モデル",
+    "textEncoder": "テキストエンコーダ (qwen3)",
+    "vaeModel": "VAE モデル",
+    "hardwareSettings": "🔧 ハードウェア設定",
+    "mixedPrecision": "混合精度",
+    "attnMode": "アテンションモード",
+    "cancel": "キャンセル",
+    "saving": "保存中...",
+    "saveSettings": "💾 設定を保存",
+    "ok": "OK"
+  },
+  "fieldRenderer": {
+    "required": "必須",
+    "conditionalRequired": "条件付き必須",
+    "autoSet": "自動設定",
+    "path": "パス",
+    "noUpstreamPreprocess": "上流の前処理ステージなし",
+    "noUpstreamCheckpoint": "上流チェックポイントを使用しない",
+    "noUpstreamTrain": "上流の学習ステージなし",
+    "analyzing": "分析中...",
+    "analyzeDataset": "データセットを分析",
+    "original": "元画像: {n} 枚",
+    "resized": "リサイズ後: {n} 枚"
+  },
+  "schemaForm": {
+    "loadingSchema": "スキーマを読み込み中..."
+  },
+  "methodSelector": {
+    "trainingMethod": "学習方法"
+  },
+  "stageCard": {
+    "dragToReorder": "ドラッグで並べ替え",
+    "dependencies": "依存関係",
+    "deleteStage": "ステージを削除"
+  },
+  "stageList": {
+    "stagePanel": "ステージ",
+    "noStages": "ステージがありません。下のボタンで追加",
+    "addStage": "+ ステージ追加 ▾",
+    "run": "▶ 実行",
+    "stop": "■ 停止"
+  },
+  "datasetSelector": {
+    "noDatasets": "利用可能なデータセットなし",
+    "subsets": "サブセット",
+    "repeat": "繰り返し:"
+  },
+  "runControl": {
+    "run": "▶ 実行",
+    "stop": "■ 停止",
+    "stagesLabel": "ステージ"
+  },
+  "infraSettings": {
+    "loading": "読み込み中...",
+    "loadFailed": "インフラ設定の読み込みに失敗しました: {error}",
+    "saveFailed": "保存に失敗しました: {error}",
+    "modelPaths": "📁 モデルパス",
+    "hardwareSettings": "⚙ ハードウェア設定",
+    "saving": "保存中...",
+    "save": "💾 インフラ設定を保存"
+  },
+  "logViewer": {
+    "searchPlaceholder": "ログを検索...",
+    "allStages": "全ステージ",
+    "resume": "▼ 再開",
+    "paused": "一時停止",
+    "noLogs": "ログなし"
+  },
+  "lossChart": {
+    "noData": "学習データなし",
+    "step": "ステップ",
+    "loss": "Loss",
+    "lr": "LR"
+  },
+  "langSwitcher": {
+    "zh": "中文",
+    "en": "English",
+    "ja": "日本語"
+  },
+  "schema": {
+    "infrastructure": {
+      "root": { "label": "インフラ設定", "description": "全ステージ共通のモデルパスとハードウェア設定" },
+      "group": { "models": "モデルパス", "hardware": "ハードウェア設定" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT モデルパス",
+        "qwen3": "テキストエンコーダパス",
+        "vae": "VAE モデルパス",
+        "mixed_precision": "混合精度",
+        "attn_mode": "アテンションモード"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "デフォルトパスを使用する場合は空欄 (models/diffusion_models/)",
+        "qwen3": "デフォルトパスを使用する場合は空欄",
+        "vae": "デフォルトパスを使用する場合は空欄"
+      }
+    },
+    "preprocess": {
+      "root": { "label": "前処理", "description": "画像リサイズ + VAEキャッシュ + テキスト埋め込みキャッシュ" },
+      "group": { "advanced": "高度な上書き", "data_source": "データソース", "bucket": "解像度設定", "filter": "フィルターオプション" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT モデル上書き",
+        "qwen3": "テキストエンコーダ上書き",
+        "vae": "VAE モデル上書き",
+        "source_image_dir": "元データセットパス",
+        "bucket_families": "解像度グループ",
+        "drop_lowres_images": "低解像度画像をフィルタ",
+        "min_pixels": "最小ピクセル数"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "グローバル設定を使用する場合は空欄",
+        "qwen3": "グローバル設定を使用する場合は空欄",
+        "vae": "グローバル設定を使用する場合は空欄",
+        "source_image_dir": "元画像とキャプションファイルを含むディレクトリ",
+        "bucket_families": "学習画像のターゲット解像度グループを選択。S1/S2は固定比率、XS~XLは自然分布。複数選択可能。"
+      },
+      "choice_labels": {
+        "bucket_families": {
+          "S1": "S1 — TC1024 — 256×1024, 512×512",
+          "S2": "S2 — TC4096 — 512×2048, 1024×1024",
+          "XS": "XS — TC1680 — 336~640 縦/横",
+          "S": "S — TC2160 — 384~720 縦/横",
+          "M": "M — TC3600 — 480~960 縦/横",
+          "L": "L — TC4032 — 512~1008 縦/横",
+          "XL": "XL — TC5040 — 640~1120 縦/横"
+        }
+      }
+    },
+    "train_common": {
+      "root": { "label": "共通学習パラメータ", "description": "全学習方法共通のパラメータ。方法切り替え時に保持" },
+      "group": { "advanced": "高度な上書き", "training": "学習ハイパーパラメータ", "data": "データ", "checkpoint": "チェックポイント連携", "output": "出力", "performance": "パフォーマンス" },
+      "field": {
+        "pretrained_model_name_or_path": "DiT モデル上書き",
+        "qwen3": "テキストエンコーダ上書き",
+        "vae": "VAE モデル上書き",
+        "learning_rate": "学習率",
+        "lr_scheduler": "LR スケジューラ",
+        "lr_warmup_steps": "ウォームアップステップ数",
+        "max_train_epochs": "最大エポック数",
+        "stop_epoch": "停止エポック",
+        "optimizer_type": "オプティマイザ",
+        "optimizer_args": "オプティマイザ引数",
+        "gradient_accumulation_steps": "勾配蓄積ステップ数",
+        "max_grad_norm": "最大勾配ノルム",
+        "timestep_sampling": "タイムステップサンプリング戦略",
+        "discrete_flow_shift": "離散フローシフト",
+        "sigmoid_bias": "Sigmoid バイアス",
+        "datasets": "入力データセット",
+        "use_shuffled_caption_variants": "シャッフル済みCaption変体を使用",
+        "caption_dropout_rate": "Caption Dropout率",
+        "caption_extension": "Caption拡張子",
+        "keep_tokens": "保持トークン数",
+        "cache_llm_adapter_outputs": "LLM Adapter出力をキャッシュ",
+        "network_train_unet_only": "UNetのみ学習",
+        "network_weights": "重み初期化",
+        "output_name": "出力名",
+        "save_every_n_epochs": "Nエポックごとに保存",
+        "checkpointing_epochs": "再開可能チェックポイント間隔",
+        "gradient_checkpointing": "勾配チェックポイント",
+        "unsloth_offload_checkpointing": "Unslothオフロードチェックポイント",
+        "blocks_to_swap": "Block Swap数",
+        "torch_compile": "torch.compile高速化",
+        "seed": "乱数シード"
+      },
+      "help": {
+        "pretrained_model_name_or_path": "グローバル設定を使用する場合は空欄",
+        "qwen3": "グローバル設定を使用する場合は空欄",
+        "vae": "グローバル設定を使用する場合は空欄",
+        "stop_epoch": "このエポックで保存後に停止",
+        "optimizer_args": "複数の引数をスペース区切りで指定。例: weight_decay=0.01 betas=0.9,0.999,0.9999",
+        "network_train_unet_only": "TE出力をキャッシュする場合は有効にする必要があります"
+      }
+    },
+    "train_lora": {
+      "root": { "label": "LoRA", "description": "古典的LoRA。Ortho/Hydra/ReFT/T-LoRAの組み合わせをサポート" },
+      "combo_switch": {
+        "use_ortho": { "label": "OrthoLoRA", "description": "Cayley/SVD直交パラメータ化" },
+        "use_moe_style": { "label": "HydraLoRA MoE", "description": "マルチエキスパートルーティング" },
+        "use_timestep_mask": { "label": "T-LoRA", "description": "タイムステップマスキング" },
+        "add_reft": { "label": "ReFT", "description": "表現ファインチューニング" }
+      },
+      "group": { "architecture": "アーキテクチャ" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "network_dropout": "Dropout",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "scale_weight_norms": "重みノルム正則化。無効にする場合は空欄"
+      }
+    },
+    "train_locon": {
+      "root": { "label": "LoCON", "description": "Low-Rank Convolution" },
+      "group": { "architecture": "アーキテクチャ" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)"
+      }
+    },
+    "train_loha": {
+      "root": { "label": "LoHA", "description": "Low-Rank Hadamard Product" },
+      "group": { "architecture": "アーキテクチャ" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "scale_weight_norms": "重みノルム正則化。LoHA/LoKRでは自動的に1.0で有効化"
+      }
+    },
+    "train_lokr": {
+      "root": { "label": "LoKR", "description": "Low-Rank Kronecker Product" },
+      "group": { "architecture": "アーキテクチャ" },
+      "field": {
+        "network_dim": "Network Dim",
+        "network_alpha": "Network Alpha",
+        "conv_dim": "Conv Dim",
+        "conv_alpha": "Conv Alpha",
+        "lokr_factor": "LoKr Factor",
+        "decompose_both": "Decompose Both",
+        "use_tucker": "Use Tucker",
+        "use_scalar": "Use Scalar",
+        "weight_decompose": "Weight Decompose (DoRA)",
+        "full_matrix": "Full Matrix",
+        "scale_weight_norms": "Scale Weight Norms"
+      },
+      "help": {
+        "lokr_factor": "Kronecker分解係数。-1で自動",
+        "scale_weight_norms": "重みノルム正則化。LoHA/LoKRでは自動的に1.0で有効化"
+      }
+    }
+  },
+  "backend": {
+    "models": {
+      "invalidStageType": "無効なステージタイプ: {v}。次のいずれかである必要があります: {allowed}",
+      "circularDependency": "ステージに関する循環依存: {sid}",
+      "unknownDependency": "不明な依存関係: {dep}"
+    },
+    "config": {
+      "workflowNotFound": "ワークフローファイルが見つかりません: {path}",
+      "tomlNotFound": "TOMLファイルが見つかりません: {path}",
+      "unresolvedPlaceholderStage": "未解決のプレースホルダ: ステージ '{stage}' が見つかりません",
+      "unresolvedPlaceholderKey": "未解決のプレースホルダ: '{key}' はステージ '{stage}' の出力にありません",
+      "schemaNotFound": "スキーマが見つかりません: {path}"
+    },
+    "scheduler": {
+      "unknownStageType": "不明なステージタイプ: {type}",
+      "configError": "設定エラー: {error}",
+      "configFile": "設定ファイル: {path}"
+    },
+    "stages": {
+      "command": "[コマンド:{step}] {cmd}",
+      "stopped": "停止済み",
+      "stepFailed": "{step} が終了コード {code} で失敗",
+      "trainDatasetRefNotFound": "ステージ出力にデータセット参照 '{ds}' が見つかりません",
+      "commandLabel": "[コマンド] {cmd}",
+      "trainFailed": "train.py が終了コード {code} で失敗"
+    },
+    "logger": {
+      "checkpointSaved": "チェックポイント保存: {path} (epoch {epoch})"
+    }
+  }
+}

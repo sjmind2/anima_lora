@@ -3247,11 +3247,11 @@ class LoRANetwork(torch.nn.Module):
             norm = updown.norm().clamp(min=max_norm_value / 2)
             desired = torch.clamp(norm, max=max_norm_value)
             ratio = desired.cpu() / norm.cpu()
-            sqrt_ratio = ratio**0.5
+            sqrt_ratio_val = (ratio**0.5).item()
             if ratio != 1:
                 keys_scaled += 1
-                state_dict[upkeys[i]] *= sqrt_ratio
-                state_dict[downkeys[i]] *= sqrt_ratio
+                state_dict[upkeys[i]].data.mul_(sqrt_ratio_val)
+                state_dict[downkeys[i]].data.mul_(sqrt_ratio_val)
             scalednorm = updown.norm() * ratio
             norms.append(scalednorm.item())
 

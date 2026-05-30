@@ -380,19 +380,19 @@ class LokrModule(BaseLoRAModule):
                 modules = (
                     4 - self.use_w1 - self.use_w2 + (not self.use_w2 and self.tucker)
                 )
-                r = ratio ** (1 / modules)
+                r = (ratio ** (1 / modules)).item()
                 if self.use_w1:
-                    self.lokr_w1 *= r
+                    self.lokr_w1.data.mul_(r)
                 else:
-                    self.lokr_w1_a *= r
-                    self.lokr_w1_b *= r
+                    self.lokr_w1_a.data.mul_(r)
+                    self.lokr_w1_b.data.mul_(r)
                 if self.use_w2:
-                    self.lokr_w2 *= r
+                    self.lokr_w2.data.mul_(r)
                 else:
                     if self.tucker:
-                        self.lokr_t2 *= r
-                    self.lokr_w2_a *= r
-                    self.lokr_w2_b *= r
+                        self.lokr_t2.data.mul_(r)
+                    self.lokr_w2_a.data.mul_(r)
+                    self.lokr_w2_b.data.mul_(r)
             return scaled, (orig_norm * ratio).item()
 
     def apply_weight_decompose(self, weight, multiplier=None):

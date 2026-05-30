@@ -1,0 +1,66 @@
+type: train_method
+method: loha
+label: "LoHA"
+description: "Low-Rank Hadamard Product"
+base_type: lycoris
+
+groups:
+  - name: architecture
+    label: "架构"
+    fields:
+      - key: network_type
+        type: str
+        layer: method
+        required: true
+        default: "loha"
+        hidden: true
+      - key: network_dim
+        type: int
+        layer: method
+        required: true
+        default: 16
+        label: "Network Dim"
+      - key: network_alpha
+        type: int
+        layer: method
+        required: true
+        default: 8
+        label: "Network Alpha"
+      - key: conv_dim
+        type: int
+        layer: method
+        required: false
+        default: 1
+        label: "Conv Dim"
+      - key: conv_alpha
+        type: int
+        layer: method
+        required: false
+        default: 4
+        label: "Conv Alpha"
+      - key: use_tucker
+        type: bool
+        layer: method
+        required: false
+        default: true
+        label: "Use Tucker"
+      - key: use_scalar
+        type: bool
+        layer: method
+        required: false
+        default: false
+        label: "Use Scalar"
+      - key: weight_decompose
+        type: bool
+        layer: method
+        required: false
+        default: false
+        label: "Weight Decompose (DoRA)"
+      - key: scale_weight_norms
+        type: float
+        layer: method
+        required: false
+        default: 1.0
+        auto_set: "network_type in ('loha', 'lokr') → 1.0"
+        label: "Scale Weight Norms"
+        help: "权重范数正则化。LoHA/LoKR 自动启用为 1.0"
