@@ -8,6 +8,25 @@
   var onMounted = Vue.onMounted;
   var nextTick = Vue.nextTick;
 
+  var currentLang = ref("en");
+  var showLangMenu = ref(false);
+
+  var currentLangLabel = computed(function () {
+    var locale = currentLang.value;
+    return t("langSwitcher." + locale, locale);
+  });
+
+  function toggleLangMenu() {
+    showLangMenu.value = !showLangMenu.value;
+  }
+
+  function switchLang(locale) {
+    I18n.setLocale(locale);
+    currentLang.value = locale;
+    showLangMenu.value = false;
+    document.documentElement.lang = locale;
+  }
+
   var app = createApp({
     setup: function () {
       var workflowName = ref("");
@@ -99,13 +118,13 @@
       function openRunDir(runId) {
         if (!workflowName.value) return;
         AnimaAPI.openRunDir(workflowName.value, runId)
-          .catch(function(err) { showToast("打开失败: " + err, "error"); });
+          .catch(function(err) { showToast(t("app.openFailed", {error: err}), "error"); });
       }
 
       function viewRunLog(runId) {
         if (!workflowName.value) return;
         showLogModal.value = true;
-        logModalTitle.value = "运行日志 — " + runId;
+        logModalTitle.value = t("app.runLogTitle", {id: runId});
         logModalLines.value = [];
         logModalLoading.value = true;
         AnimaAPI.getWorkflowRunLog(workflowName.value, runId)
@@ -113,7 +132,7 @@
             logModalLines.value = data.lines || [];
           })
           .catch(function(err) {
-            logModalLines.value = ["加载日志失败: " + (err.error || err)];
+            logModalLines.value = [t("app.loadLogFailed", {error: err.error || err})];
           })
           .finally(function() {
             logModalLoading.value = false;
@@ -253,7 +272,7 @@
             });
           })
           .catch(function (err) {
-            showToast("加载失败: " + (err.error || err), "error");
+            showToast(t("app.loadFailed", {error: err.error || err}), "error");
           });
       }
 
@@ -283,10 +302,10 @@
         };
         AnimaAPI.updateWorkflow(workflowName.value, data)
           .then(function () {
-            showToast("工作流已保存", "success");
+            showToast(t("app.workflowSaved"), "success");
           })
           .catch(function (err) {
-            showToast("保存失败: " + (err.error || err), "error");
+            showToast(t("app.saveFailed", {error: err.error || err}), "error");
           });
       }
 
@@ -294,7 +313,7 @@
         if (name) {
           _doCreate(name);
         } else {
-          modalPrompt("新建工作流", "输入工作流名称").then(function(nm) {
+          modalPrompt(t("app.newWorkflow"), t("app.enterWorkflowName")).then(function(nm) {
             if (nm) _doCreate(nm);
           });
         }
@@ -303,12 +322,12 @@
       function _doCreate(nm) {
         AnimaAPI.createWorkflow(nm)
           .then(function (data) {
-            showToast("工作流已创建: " + nm, "success");
+            showToast(t("app.workflowCreated", {name: nm}), "success");
             loadWorkflow(nm);
             loadRecentWorkflows();
           })
           .catch(function (err) {
-            showToast("创建失败: " + (err.error || err), "error");
+            showToast(t("app.createFailed", {error: err.error || err}), "error");
           });
       }
 
@@ -383,7 +402,7 @@
           })
           .catch(function (err) {
             isRunning.value = false;
-            showToast("运行失败: " + (err.error || err), "error");
+            showToast(t("app.runFailed", {error: err.error || err}), "error");
           });
       }
 
@@ -391,10 +410,10 @@
         if (!workflowName.value) return;
         AnimaAPI.stopWorkflow(workflowName.value)
           .then(function () {
-            showToast("正在停止...", "info");
+            showToast(t("app.stopping"), "info");
           })
           .catch(function (err) {
-            showToast("停止失败: " + (err.error || err), "error");
+            showToast(t("app.stopFailed", {error: err.error || err}), "error");
           });
       }
 
@@ -413,11 +432,11 @@
           case "workflow_start":
             totalStages.value = ev.total_stages || 0;
             completedStages.value = 0;
-            addLog("▶ 工作流开始 (" + (ev.total_stages || 0) + " 个阶段)", "info");
+            addLog(t("app.workflowStart", {n: ev.total_stages || 0}), "info");
             break;
           case "stage_start":
             runState[ev.stage_id] = { status: "running", progress: 0 };
-            addLog("▶ 阶段开始: " + ev.stage_id + " (" + ev.stage_type + ")", "stage-start");
+            addLog(t("app.stageStart", {id: ev.stage_id, type: ev.stage_type}), "stage-start");
             scriptProgress.active = false;
             scriptProgress.rawLine = "";
             scriptProgress.pct = 0;
@@ -462,33 +481,33 @@
             });
             break;
           case "stage_ckpt":
-            addLog("💾 Checkpoint: " + ev.path + " (epoch " + ev.epoch + ")", "info");
+            addLog(t("app.checkpoint", {path: ev.path, epoch: ev.epoch}), "info");
             break;
           case "stage_end":
             if (ev.status === "ok") {
               runState[ev.stage_id] = { status: "done", progress: 100 };
               completedStages.value++;
-              addLog("✅ 阶段完成: " + ev.stage_id, "success");
+              addLog(t("app.stageDone", {id: ev.stage_id}), "success");
             } else {
               runState[ev.stage_id] = { status: "failed", progress: 0 };
-              addLog("❌ 阶段失败: " + ev.stage_id + " — " + ev.status, "error");
+              addLog(t("app.stageFailed", {id: ev.stage_id, status: ev.status}), "error");
             }
             break;
           case "workflow_end":
             isRunning.value = false;
             if (ev.status === "ok") {
-              addLog("✅ 工作流完成", "success");
-              showToast("工作流运行完成", "success");
+              addLog(t("app.workflowDone"), "success");
+              showToast(t("app.workflowRunDone"), "success");
             } else {
-              addLog("❌ 工作流失败", "error");
-              showToast("工作流运行失败", "error");
+              addLog(t("app.workflowFail"), "error");
+              showToast(t("app.workflowRunFail"), "error");
             }
             if (eventSource.value) { eventSource.value.close(); eventSource.value = null; }
             loadRunHistory();
             break;
           case "stream_error":
             isRunning.value = false;
-            addLog("⚠ 连接断开", "error");
+            addLog(t("app.connectionLost"), "error");
             break;
         }
       }
@@ -565,10 +584,10 @@
           promises.push(AnimaAPI.setInfra(workflowName.value, infraPayload));
         }
         Promise.all(promises).then(function() {
-          showToast("设置已保存", "success");
+          showToast(t("app.settingsSaved"), "success");
           showSettingsModal.value = false;
         }).catch(function(err) {
-          showToast("保存失败: " + (err.error || err), "error");
+          showToast(t("app.saveFailed", {error: err.error || err}), "error");
         }).finally(function() {
           settingsSaving.value = false;
         });
@@ -650,6 +669,11 @@
         toggleWorkflowMenu: toggleWorkflowMenu,
         loadRecentWorkflows: loadRecentWorkflows,
         onStageConfigTabChange: onStageConfigTabChange,
+        currentLang: currentLang,
+        showLangMenu: showLangMenu,
+        currentLangLabel: currentLangLabel,
+        toggleLangMenu: toggleLangMenu,
+        switchLang: switchLang,
       };
     },
     mounted: function() {
@@ -674,10 +698,20 @@
       '      <span v-if="workflowName" style="color:var(--text-dim);font-size:13px;">— {{ workflowName }}</span>',
       '    </div>',
       '    <div class="header-right">',
-      '      <button class="btn btn-ghost btn-sm" @click="openSettings" title="全局设置">⚙</button>',
+      '      <div class="lang-switcher">',
+      '        <button class="btn btn-ghost btn-sm" @click="toggleLangMenu">',
+      '          🌐 {{ currentLangLabel }}',
+      '        </button>',
+      '        <div v-if="showLangMenu" class="lang-dropdown">',
+      '          <button class="dropdown-item" @click="switchLang(\'zh-CN\')">中文</button>',
+      '          <button class="dropdown-item" @click="switchLang(\'en\')">English</button>',
+      '          <button class="dropdown-item" @click="switchLang(\'ja\')">日本語</button>',
+      '        </div>',
+      '      </div>',
+      '      <button class="btn btn-ghost btn-sm" @click="openSettings" :title="t(\'app.settings\')">⚙</button>',
       '      <div class="dropdown">',
       '        <button class="btn btn-ghost btn-sm" @click="toggleWorkflowMenu">',
-      '          打开工作流 ▾',
+      '          {{ t(\'app.openWorkflow\') }} ▾',
       '        </button>',
       '        <div v-if="showWorkflowMenu" class="dropdown-menu">',
       '          <button class="dropdown-item"',
@@ -686,26 +720,26 @@
       '            {{ wf.name || wf.dir }}',
       '          </button>',
       '          <div v-if="recentWorkflows.length === 0" style="padding:8px 14px;color:var(--text-dim);font-size:12px;">',
-      '            暂无工作流',
+      '            {{ t(\'app.noWorkflows\') }}',
       '          </div>',
       '        </div>',
       '      </div>',
-      '      <button class="btn btn-blue btn-sm" @click="createNewWorkflow()">新建工作流</button>',
-      '      <button v-if="workflowName" class="btn btn-ghost btn-sm" @click="saveWorkflow">💾 保存</button>',
+      '      <button class="btn btn-blue btn-sm" @click="createNewWorkflow()">{{ t(\'app.newWorkflow\') }}</button>',
+      '      <button v-if="workflowName" class="btn btn-ghost btn-sm" @click="saveWorkflow">💾 {{ t(\'app.save\') }}</button>',
       '    </div>',
       '  </header>',
 
       '  <div v-if="!workflowName" class="main-content">',
       '    <div class="welcome-screen">',
       '      <div class="welcome-icon">🔄</div>',
-      '      <div class="welcome-title">Anima Workflow</div>',
+      '      <div class="welcome-title">{{ t(\'app.welcomeTitle\') }}</div>',
       '      <div class="welcome-desc">',
-      '        创建或打开一个工作流来开始管理你的 LoRA 训练流水线。',
-      '        支持预处理、训练阶段的拖拽排序和依赖管理。',
+      '        {{ t(\'app.welcomeDesc1\') }}',
+      '        {{ t(\'app.welcomeDesc2\') }}',
       '      </div>',
       '      <div class="welcome-actions">',
-      '        <button class="btn btn-blue" @click="createNewWorkflow()">新建工作流</button>',
-      '        <button class="btn btn-ghost" @click="toggleWorkflowMenu(); loadRecentWorkflows();">打开工作流</button>',
+      '        <button class="btn btn-blue" @click="createNewWorkflow()">{{ t(\'app.newWorkflow\') }}</button>',
+      '        <button class="btn btn-ghost" @click="toggleWorkflowMenu(); loadRecentWorkflows();">{{ t(\'app.openWorkflow\') }}</button>',
       '      </div>',
       '    </div>',
       '  </div>',
@@ -732,7 +766,7 @@
       '            {{ selectedStage.label || selectedStage.id }}',
       '          </span>',
       '          <div class="config-panel-actions">',
-      '            <button class="btn btn-ghost btn-sm" @click="saveWorkflow">💾 保存配置</button>',
+      '            <button class="btn btn-ghost btn-sm" @click="saveWorkflow">💾 {{ t(\'app.saveConfig\') }}</button>',
       '          </div>',
       '        </div>',
       '        <method-selector',
@@ -749,7 +783,7 @@
       '      </div>',
       '      <div v-if="!selectedStage && workflowName" class="config-panel-content">',
       '        <div class="empty-state" style="margin-top:80px;">',
-      '          选择左侧的阶段来编辑配置',
+      '          {{ t(\'app.selectStage\') }}',
       '        </div>',
       '      </div>',
       '    </div>',
@@ -757,19 +791,19 @@
 
       '  <div v-if="workflowName" class="bottom-panel">',
       '    <div class="bottom-panel-header">',
-      '      <span class="bottom-panel-title">日志</span>',
+      '      <span class="bottom-panel-title">{{ t(\'app.log\') }}</span>',
       '      <div class="log-tab-bar">',
-      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'system\' }" @click="activeLogTab = \'system\'">系统日志</button>',
-      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'script\' }" @click="activeLogTab = \'script\'">脚本输出 <span v-if="flatScriptLogCount" style="opacity:0.6;">({{ flatScriptLogCount }})</span></button>',
-      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'history\' }" @click="activeLogTab = \'history\'; loadRunHistory()">运行历史</button>',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'system\' }" @click="activeLogTab = \'system\'">{{ t(\'app.systemLog\') }}</button>',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'script\' }" @click="activeLogTab = \'script\'">{{ t(\'app.scriptOutput\') }} <span v-if="flatScriptLogCount" style="opacity:0.6;">({{ flatScriptLogCount }})</span></button>',
+      '        <button class="log-tab-btn" :class="{ active: activeLogTab === \'history\' }" @click="activeLogTab = \'history\'; loadRunHistory()">{{ t(\'app.runHistory\') }}</button>',
       '      </div>',
-      '      <span style="font-size:11px;color:var(--text-dim);">{{ completedStages }}/{{ totalStages }} 阶段</span>',
+      '      <span style="font-size:11px;color:var(--text-dim);">{{ completedStages }}/{{ totalStages }} {{ t(\'app.stages\') }}</span>',
       '    </div>',
       '    <div v-if="(isRunning || completedStages > 0) && activeLogTab !== \'history\'" class="progress-bar-container">',
       '      <div class="progress-bar-track">',
       '        <div class="progress-bar-fill stage-progress" :class="progressStatus" :style="{ width: overallProgress + \'%\' }"></div>',
       '      </div>',
-      '      <div class="progress-label">阶段 {{ overallProgress }}%</div>',
+      '      <div class="progress-label">{{ t(\'app.stages\') }} {{ overallProgress }}%</div>',
       '    </div>',
       '    <div v-if="scriptProgress.active && activeLogTab === \'script\'" class="script-progress-section">',
       '      <div class="progress-bar-track">',
@@ -786,30 +820,30 @@
       '        <div v-for="(line, i) in logLines" :key="i" class="log-line" :class="line.cls">',
       '          [{{ line.ts }}] {{ line.text }}',
       '        </div>',
-      '        <div v-if="logLines.length === 0" style="color:var(--text-dim);font-style:italic;">等待运行...</div>',
+      '        <div v-if="logLines.length === 0" style="color:var(--text-dim);font-style:italic;">{{ t(\'app.waitingToRun\') }}</div>',
       '      </template>',
       '      <template v-else-if="activeLogTab === \'script\'">',
       '        <div v-if="scriptStageIds.length > 1" style="display:flex;align-items:center;gap:6px;padding-bottom:4px;">',
       '          <select v-model="activeScriptStage" class="stage-select">',
-      '            <option :value="null">全部阶段</option>',
+      '            <option :value="null">{{ t(\'app.allStages\') }}</option>',
       '            <option v-for="sid in scriptStageIds" :key="sid" :value="sid">{{ sid }}</option>',
       '          </select>',
-      '          <span style="font-size:11px;color:var(--text-dim);">{{ filteredScriptLogs.length }} 行</span>',
+      '          <span style="font-size:11px;color:var(--text-dim);">{{ filteredScriptLogs.length }} {{ t(\'app.lines\') }}</span>',
       '        </div>',
       '        <div v-for="(line, i) in filteredScriptLogs" :key="line._id" class="log-line script">',
       '          <span v-if="line.stage_id && activeScriptStage === null" class="log-stage-tag">[{{ line.stage_id }}]</span>',
       '          <span v-if="line.ts" class="log-ts-tag">[{{ line.ts }}]</span>',
       '          {{ line.text }}',
       '        </div>',
-      '        <div v-if="filteredScriptLogs.length === 0 && !scriptProgress.active" style="color:var(--text-dim);font-style:italic;">暂无脚本输出</div>',
+      '        <div v-if="filteredScriptLogs.length === 0 && !scriptProgress.active" style="color:var(--text-dim);font-style:italic;">{{ t(\'app.noScriptOutput\') }}</div>',
       '        <div v-if="filteredScriptLogs.length === 0 && scriptProgress.active" class="log-line script" style="color:var(--text-dim);">{{ scriptProgress.rawLine }}</div>',
       '      </template>',
       '      <template v-if="activeLogTab === \'history\'">',
-      '        <div v-if="runHistory.length === 0" style="color:var(--text-dim);font-style:italic;padding:8px 0;">暂无运行记录</div>',
+      '        <div v-if="runHistory.length === 0" style="color:var(--text-dim);font-style:italic;padding:8px 0;">{{ t(\'app.noRunHistory\') }}</div>',
       '        <div v-for="run in runHistory" :key="run.id" class="history-record">',
       '          <div class="history-time">{{ run.created_at ? run.created_at.replace(\'T\', \' \').substring(0, 16) : run.id }}</div>',
       '          <div class="history-status" :class="\'status-\' + run.status">',
-      '            <span>{{ run.status === \'ok\' ? \'✅ 完成\' : run.status === \'stopped\' ? \'⏹ 已停止\' : run.status === \'error\' ? \'❌ 失败\' : run.status === \'running\' ? \'🔄 运行中\' : \'❓ \' + run.status }}</span>',
+      '            <span>{{ run.status === \'ok\' ? t(\'app.done\') : run.status === \'stopped\' ? t(\'app.stopped\') : run.status === \'error\' ? t(\'app.failed\') : run.status === \'running\' ? t(\'app.running\') : \'❓ \' + run.status }}</span>',
       '          </div>',
       '          <div v-if="run.stages && run.stages.length" class="history-stage-chain">',
       '            <template v-for="(s, si) in run.stages">',
@@ -821,8 +855,8 @@
       '            </template>',
       '          </div>',
       '          <div class="history-actions">',
-      '            <button class="btn btn-ghost btn-xs" @click="viewRunLog(run.id)" title="查看日志">📋 日志</button>',
-      '            <button class="btn btn-ghost btn-xs" @click="openRunDir(run.id)" title="在文件管理器中打开">📂</button>',
+      '            <button class="btn btn-ghost btn-xs" @click="viewRunLog(run.id)" :title="t(\'app.viewLog\')">{{ t(\'app.viewLog\') }}</button>',
+      '            <button class="btn btn-ghost btn-xs" @click="openRunDir(run.id)" :title="t(\'app.openInFileManager\')">📂</button>',
       '          </div>',
       '        </div>',
       '      </template>',
@@ -836,10 +870,10 @@
       '        <button class="modal-close" @click="closeLogModal">&times;</button>',
       '      </div>',
       '      <div class="modal-body">',
-      '        <div v-if="logModalLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">加载中...</div>',
+      '        <div v-if="logModalLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">{{ t(\'app.loading\') }}</div>',
       '        <div v-else class="log-content">',
       '          <div v-for="(line, i) in logModalLines" :key="i" class="log-line">{{ line }}</div>',
-      '          <div v-if="logModalLines.length === 0" style="color:var(--text-dim);font-style:italic;">日志为空</div>',
+      '          <div v-if="logModalLines.length === 0" style="color:var(--text-dim);font-style:italic;">{{ t(\'app.logEmpty\') }}</div>',
       '        </div>',
       '      </div>',
       '    </div>',
@@ -848,49 +882,49 @@
       '  <div v-if="showSettingsModal" class="modal-overlay" @click.self="closeSettings">',
       '    <div class="modal-content" style="max-width:520px;">',
       '      <div class="modal-header">',
-      '        <span style="font-size:13px;font-weight:600;">⚙ 全局设置</span>',
+      '        <span style="font-size:13px;font-weight:600;">{{ t(\'app.settingsTitle\') }}</span>',
       '        <button class="modal-close" @click="closeSettings">&times;</button>',
       '      </div>',
       '      <div class="modal-body">',
-      '        <div v-if="settingsLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">加载中...</div>',
+      '        <div v-if="settingsLoading" style="color:var(--text-dim);font-style:italic;padding:12px 0;">{{ t(\'app.loading\') }}</div>',
       '        <div v-if="!settingsLoading">',
       '          <div class="schema-group">',
       '            <div class="schema-group-header">',
-      '              <span class="schema-group-title">📁 工作流根目录</span>',
+      '              <span class="schema-group-title">{{ t(\'app.workflowsRoot\') }}</span>',
       '            </div>',
       '            <div class="schema-group-body">',
       '              <div class="form-group">',
-      '                <label class="form-label">工作流根目录</label>',
-      '                <input class="form-input" type="text" v-model="settingsData.workflows_root" placeholder="留空使用默认路径" />',
+      '                <label class="form-label">{{ t(\'app.workflowsRootLabel\') }}</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.workflows_root" :placeholder="t(\'app.workflowsRootPlaceholder\')" />',
       '              </div>',
       '            </div>',
       '          </div>',
       '          <div class="schema-group">',
       '            <div class="schema-group-header">',
-      '              <span class="schema-group-title">🗂 模型路径</span>',
+      '              <span class="schema-group-title">{{ t(\'app.modelPaths\') }}</span>',
       '            </div>',
       '            <div class="schema-group-body">',
       '              <div class="form-group">',
-      '                <label class="form-label">DiT 模型</label>',
-      '                <input class="form-input" type="text" v-model="settingsData.pretrained_model_name_or_path" placeholder="留空使用默认路径" />',
+      '                <label class="form-label">{{ t(\'app.ditModel\') }}</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.pretrained_model_name_or_path" :placeholder="t(\'app.workflowsRootPlaceholder\')" />',
       '              </div>',
       '              <div class="form-group">',
-      '                <label class="form-label">文本编码器 (qwen3)</label>',
-      '                <input class="form-input" type="text" v-model="settingsData.qwen3" placeholder="留空使用默认路径" />',
+      '                <label class="form-label">{{ t(\'app.textEncoder\') }}</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.qwen3" :placeholder="t(\'app.workflowsRootPlaceholder\')" />',
       '              </div>',
       '              <div class="form-group">',
-      '                <label class="form-label">VAE 模型</label>',
-      '                <input class="form-input" type="text" v-model="settingsData.vae" placeholder="留空使用默认路径" />',
+      '                <label class="form-label">{{ t(\'app.vaeModel\') }}</label>',
+      '                <input class="form-input" type="text" v-model="settingsData.vae" :placeholder="t(\'app.workflowsRootPlaceholder\')" />',
       '              </div>',
       '            </div>',
       '          </div>',
       '          <div class="schema-group">',
       '            <div class="schema-group-header">',
-      '              <span class="schema-group-title">🔧 硬件设置</span>',
+      '              <span class="schema-group-title">{{ t(\'app.hardwareSettings\') }}</span>',
       '            </div>',
       '            <div class="schema-group-body">',
       '              <div class="form-group">',
-      '                <label class="form-label">混合精度</label>',
+      '                <label class="form-label">{{ t(\'app.mixedPrecision\') }}</label>',
       '                <select class="form-select" v-model="settingsData.mixed_precision">',
       '                  <option value="bf16">bf16</option>',
       '                  <option value="fp16">fp16</option>',
@@ -899,7 +933,7 @@
       '                </select>',
       '              </div>',
       '              <div class="form-group">',
-      '                <label class="form-label">注意力模式</label>',
+      '                <label class="form-label">{{ t(\'app.attnMode\') }}</label>',
       '                <select class="form-select" v-model="settingsData.attn_mode">',
       '                  <option value="flex">flex</option>',
       '                  <option value="sdpa">sdpa</option>',
@@ -910,9 +944,9 @@
       '            </div>',
       '          </div>',
       '          <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:12px;">',
-      '            <button class="btn btn-ghost btn-sm" @click="closeSettings">取消</button>',
+      '            <button class="btn btn-ghost btn-sm" @click="closeSettings">{{ t(\'app.cancel\') }}</button>',
       '            <button class="btn btn-blue btn-sm" @click="saveSettings" :disabled="settingsSaving">',
-      '              {{ settingsSaving ? "保存中..." : "💾 保存设置" }}',
+      '              {{ settingsSaving ? t(\'app.saving\') : t(\'app.saveSettings\') }}',
       '            </button>',
       '          </div>',
       '        </div>',
@@ -925,8 +959,8 @@
       '      <div class="modal-title">{{ modalTitle }}</div>',
       '      <input class="modal-input form-input" v-model="modalInput" :placeholder="modalPlaceholder" @keydown.enter="modalConfirm" @keydown.escape="modalCancel" ref="modalInputEl" autofocus />',
       '      <div class="modal-actions">',
-      '        <button class="btn btn-ghost btn-sm" @click="modalCancel">取消</button>',
-      '        <button class="btn btn-blue btn-sm" @click="modalConfirm">确定</button>',
+      '        <button class="btn btn-ghost btn-sm" @click="modalCancel">{{ t(\'app.cancel\') }}</button>',
+      '        <button class="btn btn-blue btn-sm" @click="modalConfirm">{{ t(\'app.ok\') }}</button>',
       '      </div>',
       '    </div>',
       '  </div>',
@@ -937,6 +971,8 @@
       '</div>',
     ].join("\n"),
   });
+
+  app.config.globalProperties.t = window.t;
 
   var COMPONENT_MAP = {
     FieldRenderer: "field-renderer",
@@ -958,7 +994,11 @@
     }
   });
 
-  var vm = app.mount("#app");
+  I18n.init().then(function () {
+    document.documentElement.lang = I18n.getLocale();
+    currentLang.value = I18n.getLocale();
+    app.mount("#app");
+  });
 
   window.__workflowApp = {
     createNewWorkflow: function(name) { window.__wf && window.__wf.createNewWorkflow(name); },
