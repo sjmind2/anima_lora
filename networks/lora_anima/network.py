@@ -44,6 +44,31 @@ logger = logging.getLogger(__name__)
 
 _BLOCK_IDX_RE = re.compile(r"blocks\.(\d+)\.")
 
+
+def _classify_layer(original_name: str) -> str | None:
+    """Classify a DiT module path as self_attn / cross_attn / mlp / adaln / None.
+
+    Used by ``create_modules`` to skip layer types the user has disabled via
+    ``train_self_attn`` / ``train_cross_attn`` / ``train_mlp`` / ``train_adaln``.
+
+    Boundary rules:
+      * ``.self_attn.`` (dot on both sides) avoids matching ``adaln_modulation_self_attn``
+        where the suffix uses underscore (``_self_attn``).
+      * Same for ``.cross_attn.`` and ``.mlp.``.
+      * ``adaln_modulation_`` (underscore suffix) matches all three modulation
+        projections (self_attn / cross_attn / mlp).
+    """
+    if ".self_attn." in original_name:
+        return "self_attn"
+    if ".cross_attn." in original_name:
+        return "cross_attn"
+    if ".mlp." in original_name:
+        return "mlp"
+    if "adaln_modulation_" in original_name:
+        return "adaln"
+    return None
+
+
 # Post-LLM-adapter crossattn_emb width. Fixed by the Anima DiT
 # (``crossattn_emb_channels = 1024`` in ``library/anima/models.py``) — the
 # T5-compatible cross-attention input dim. Threaded into ContentRouter as
