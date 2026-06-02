@@ -35,3 +35,57 @@ from networks.lora_anima.network import _classify_layer
 ])
 def test_classify_layer(name, expected):
     assert _classify_layer(name) == expected
+
+
+from networks.lora_anima.config import LoRANetworkCfg
+from networks.lora_modules import LoRAModule
+
+
+def _make_cfg(**overrides):
+    """Build a LoRANetworkCfg from kwargs with sensible defaults."""
+    kwargs = {}
+    for k, v in overrides.items():
+        kwargs[k] = v
+    return LoRANetworkCfg.from_kwargs(
+        kwargs,
+        network_dim=16,
+        network_alpha=16,
+        neuron_dropout=None,
+        module_class=LoRAModule,
+    )
+
+
+def test_layer_targeting_defaults():
+    """Default cfg has train_self_attn=True, train_cross_attn=True,
+    train_mlp=True, train_adaln=False."""
+    cfg = _make_cfg()
+    assert cfg.train_self_attn is True
+    assert cfg.train_cross_attn is True
+    assert cfg.train_mlp is True
+    assert cfg.train_adaln is False
+
+
+def test_layer_targeting_string_bool_parsing():
+    """String 'true'/'false' from TOML/CLI are parsed correctly."""
+    cfg = _make_cfg(
+        train_self_attn="false",
+        train_cross_attn="false",
+        train_mlp="true",
+        train_adaln="true",
+    )
+    assert cfg.train_self_attn is False
+    assert cfg.train_cross_attn is False
+    assert cfg.train_mlp is True
+    assert cfg.train_adaln is True
+
+
+def test_default_exclude_no_longer_contains_modulation():
+    """_DEFAULT_EXCLUDE no longer matches _modulation — train_adaln=false
+    has taken over that responsibility."""
+    cfg = _make_cfg()
+    # _DEFAULT_EXCLUDE is appended to exclude_patterns
+    for pattern in cfg.exclude_patterns:
+        assert "_modulation" not in pattern, (
+            f"_modulation should be removed from _DEFAULT_EXCLUDE; "
+            f"found in pattern: {pattern}"
+        )
