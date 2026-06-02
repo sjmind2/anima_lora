@@ -614,3 +614,41 @@ def test_output_filter_train_true_output_false_strips_at_save():
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
     assert removed["adaln"] == 2
     assert not any("adaln_modulation" in k for k in sd)
+
+
+def test_metadata_silent_for_default_config():
+    """Default save (train_adaln=False, output_adaln=False) emits NO
+    ss_output_gated metadata because nothing was actually removed."""
+    cfg = _make_cfg()  # train_adaln=False default; adaln never trained
+    loras = [l for l in _make_stub_loras() if "adaln" not in l.lora_name]
+    sd = {k: v for k, v in _make_full_state_dict().items() if "adaln" not in k}
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    # Production: metadata is written only if any(_removed_counts.values())
+    assert not any(removed.values()), "Default config should remove nothing"
+
+
+def test_metadata_emitted_when_adaln_actually_gated():
+    """train_adaln=true + output_adaln=false emits ss_output_gated=true
+    and ss_output_gated_layers=adaln."""
+    cfg = _make_cfg(train_adaln="true")  # output_adaln=False default
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    # Production: metadata would be {"ss_output_gated": "true",
+    # "ss_output_gated_layers": "adaln"}
+    assert removed["adaln"] > 0
+    expected_layers = ",".join(k for k, n in removed.items() if n > 0)
+    assert expected_layers == "adaln"
+
+
+def test_metadata_emitted_for_multiple_gated_families():
+    """output_self_attn=false + output_adaln=false emits both in metadata."""
+    cfg = _make_cfg(
+        output_self_attn="false",
+        train_adaln="true",  # so adaln modules exist
+    )
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    expected_layers = set(k for k, n in removed.items() if n > 0)
+    assert expected_layers == {"self_attn", "adaln"}
