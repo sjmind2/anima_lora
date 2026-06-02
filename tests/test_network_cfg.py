@@ -36,9 +36,9 @@ def test_defaults_when_all_kwargs_absent():
     assert cfg.use_moe_style is False
     assert cfg.route_per_layer is False
     assert cfg.router_source == "none"
-    # _modulation is in _DEFAULT_EXCLUDE -- AdaLN modulation layers are
-    # always excluded by the default exclude regex.
-    assert any("_modulation" in p for p in cfg.exclude_patterns)
+    # _modulation removed from _DEFAULT_EXCLUDE -- train_adaln=false
+    # (the default) now handles AdaLN modulation exclusion.
+    assert not any("_modulation" in p for p in cfg.exclude_patterns)
     assert cfg.include_patterns is None
     assert cfg.dropout is None
     assert cfg.rank_dropout is None

@@ -83,14 +83,16 @@ def test_layer_targeting_string_bool_parsing():
     assert cfg.train_adaln is True
 
 
-def test_default_exclude_contains_modulation():
-    """_DEFAULT_EXCLUDE matches _modulation -- AdaLN modulation is always
-    excluded by the default exclude regex regardless of train_adaln flag."""
+def test_default_exclude_no_longer_contains_modulation():
+    """_DEFAULT_EXCLUDE no longer matches _modulation -- train_adaln=false
+    has taken over that responsibility."""
     cfg = _make_cfg()
     # _DEFAULT_EXCLUDE is appended to exclude_patterns
-    assert any("_modulation" in p for p in cfg.exclude_patterns), (
-        "_modulation should be present in _DEFAULT_EXCLUDE"
-    )
+    for pattern in cfg.exclude_patterns:
+        assert "_modulation" not in pattern, (
+            f"_modulation should be removed from _DEFAULT_EXCLUDE; "
+            f"found in pattern: {pattern}"
+        )
 
 
 def test_build_train_cmd_passes_bool_values_for_layer_targeting():
