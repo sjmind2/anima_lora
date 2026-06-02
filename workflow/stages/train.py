@@ -44,7 +44,10 @@ _METADATA_KEYS = {
 
 _NARGS_STAR_KEYS = {"optimizer_args"}
 
-_BOOL_VALUE_KEYS = {"train_self_attn", "train_cross_attn", "train_mlp", "train_adaln"}
+_BOOL_VALUE_KEYS = {
+    "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
+    "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+}
 
 
 def _resolve_default_model(key: str, infra: dict) -> str:

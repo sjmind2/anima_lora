@@ -456,3 +456,40 @@ def test_cli_argparse_has_output_layer_flags():
     assert args.output_cross_attn is True
     assert args.output_mlp is False
     assert args.output_adaln is True
+
+
+def test_workflow_bool_value_keys_contains_output_flags():
+    """_BOOL_VALUE_KEYS must include output_* so workflow always passes
+    --output_X true/false rather than treating them as store_true."""
+    from workflow.stages.train import _BOOL_VALUE_KEYS
+
+    expected = {
+        "output_self_attn", "output_cross_attn",
+        "output_mlp", "output_adaln",
+    }
+    missing = expected - _BOOL_VALUE_KEYS
+    assert not missing, f"Missing from _BOOL_VALUE_KEYS: {missing}"
+
+
+def test_build_train_cmd_passes_output_layer_flags():
+    """_build_train_cmd() passes --output_X true/false for output_* keys."""
+    executor = TrainExecutor.__new__(TrainExecutor)
+    executor.stage_dir = Path("/tmp/test")
+    executor.infrastructure = {}
+
+    config = {
+        "output_self_attn": False,
+        "output_cross_attn": True,
+        "output_mlp": False,
+        "output_adaln": True,
+    }
+    cmd = executor._build_train_cmd(config, Path("/tmp/dataset.toml"))
+
+    idx = cmd.index("--output_self_attn")
+    assert cmd[idx + 1] == "false"
+    idx = cmd.index("--output_cross_attn")
+    assert cmd[idx + 1] == "true"
+    idx = cmd.index("--output_mlp")
+    assert cmd[idx + 1] == "false"
+    idx = cmd.index("--output_adaln")
+    assert cmd[idx + 1] == "true"
