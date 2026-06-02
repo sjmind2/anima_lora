@@ -202,6 +202,10 @@
         "timestep_sampling": "时间步采样策略",
         "discrete_flow_shift": "离散流移位",
         "sigmoid_bias": "Sigmoid 偏置",
+        "train_self_attn": "训练 Self-Attn",
+        "train_cross_attn": "训练 Cross-Attn",
+        "train_mlp": "训练 MLP",
+        "train_adaln": "训练 AdaLN",
         "datasets": "输入数据集",
         "use_shuffled_caption_variants": "使用打乱的 Caption 变体",
         "caption_dropout_rate": "Caption Dropout 率",
@@ -225,7 +229,11 @@
         "vae": "留空使用全局设置",
         "stop_epoch": "在此 epoch 保存后停止",
         "optimizer_args": "多个参数用空格分隔，如: weight_decay=0.01 betas=0.9,0.999,0.9999",
-        "network_train_unet_only": "缓存 TE 输出时必须开启"
+        "network_train_unet_only": "缓存 TE 输出时必须开启",
+        "train_self_attn": "对 self-attention 投影层附加 LoRA（空间构图/姿势/布局）",
+        "train_cross_attn": "对 cross-attention 投影层附加 LoRA（文本-图像绑定）",
+        "train_mlp": "对 MLP 层附加 LoRA（视觉特征/纹理/色彩/渲染风格）",
+        "train_adaln": "对 AdaLN 调制投影附加 LoRA（时间步条件）— 默认冻结以保持稳定性"
       }
     },
     "train_lora": {

@@ -202,6 +202,10 @@
         "timestep_sampling": "タイムステップサンプリング戦略",
         "discrete_flow_shift": "離散フローシフト",
         "sigmoid_bias": "Sigmoid バイアス",
+        "train_self_attn": "Self-Attn を訓練",
+        "train_cross_attn": "Cross-Attn を訓練",
+        "train_mlp": "MLP を訓練",
+        "train_adaln": "AdaLN を訓練",
         "datasets": "入力データセット",
         "use_shuffled_caption_variants": "シャッフル済みCaption変体を使用",
         "caption_dropout_rate": "Caption Dropout率",
@@ -225,7 +229,11 @@
         "vae": "グローバル設定を使用する場合は空欄",
         "stop_epoch": "このエポックで保存後に停止",
         "optimizer_args": "複数の引数をスペース区切りで指定。例: weight_decay=0.01 betas=0.9,0.999,0.9999",
-        "network_train_unet_only": "TE出力をキャッシュする場合は有効にする必要があります"
+        "network_train_unet_only": "TE出力をキャッシュする場合は有効にする必要があります",
+        "train_self_attn": "self-attention 投影層に LoRA を適用（空間構図、ポーズ、レイアウト）",
+        "train_cross_attn": "cross-attention 投影層に LoRA を適用（テキストと画像のバインディング）",
+        "train_mlp": "MLP 層に LoRA を適用（視覚特徴、テクスチャ、カラーパレット、レンダリングスタイル）",
+        "train_adaln": "AdaLN 変調投影に LoRA を適用（タイムステップ条件付け）— 安定性のためデフォルトで凍結"
       }
     },
     "train_lora": {

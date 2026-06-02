@@ -202,6 +202,10 @@
         "timestep_sampling": "Timestep Sampling Strategy",
         "discrete_flow_shift": "Discrete Flow Shift",
         "sigmoid_bias": "Sigmoid Bias",
+        "train_self_attn": "Train Self-Attn",
+        "train_cross_attn": "Train Cross-Attn",
+        "train_mlp": "Train MLP",
+        "train_adaln": "Train AdaLN",
         "datasets": "Input Datasets",
         "use_shuffled_caption_variants": "Use Shuffled Caption Variants",
         "caption_dropout_rate": "Caption Dropout Rate",
@@ -225,7 +229,11 @@
         "vae": "Leave empty to use global settings",
         "stop_epoch": "Stop after saving at this epoch",
         "optimizer_args": "Separate multiple arguments with spaces, e.g.: weight_decay=0.01 betas=0.9,0.999,0.9999",
-        "network_train_unet_only": "Must be enabled when caching TE outputs"
+        "network_train_unet_only": "Must be enabled when caching TE outputs",
+        "train_self_attn": "Attach LoRA to self-attention projections (spatial composition, poses, layout)",
+        "train_cross_attn": "Attach LoRA to cross-attention projections (text-to-image binding)",
+        "train_mlp": "Attach LoRA to MLP layers (visual features, textures, color palettes, rendering style)",
+        "train_adaln": "Attach LoRA to AdaLN modulation projections (timestep conditioning) -- frozen by default for stability"
       }
     },
     "train_lora": {
