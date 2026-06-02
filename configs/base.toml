@@ -11,6 +11,17 @@ save_model_as = "safetensors"
 network_module = "networks.lora_anima"
 network_train_unet_only = true
 
+# Layer-type targeting: which DiT layer families receive LoRA adapters.
+# See docs/superpowers/specs/2026-06-01-layer-targeted-lora-training-design.md
+#   self_attn  = spatial composition, poses, layout
+#   cross_attn = text-to-image binding (prompt interpretation)
+#   mlp        = visual features, textures, color palettes, rendering style
+#   adaln      = timestep conditioning (denoising schedule) -- keep frozen for stability
+train_self_attn = true
+train_cross_attn = true
+train_mlp = true
+train_adaln = false
+
 # ── Dataset paths ────────────────────────────────────────────────────────
 # Top-level scalars so any preset / method can override (the merge chain is
 # base.toml → presets.toml[<preset>] → methods/<method>.toml). The dataset
