@@ -21,6 +21,10 @@ train_self_attn = true
 train_cross_attn = true
 train_mlp = true
 train_adaln = false
+output_self_attn = true
+output_cross_attn = true
+output_mlp = true
+output_adaln = false
 
 # ── Dataset paths ────────────────────────────────────────────────────────
 # Top-level scalars so any preset / method can override (the merge chain is
