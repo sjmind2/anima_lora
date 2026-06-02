@@ -72,6 +72,11 @@ class NetworkSpec:
 # LoRA+, T-LoRA). Cross-cutting because these compose on top of any
 # variant rather than belonging to a single one.
 SHARED_KWARG_FLAGS: Tuple[str, ...] = (
+    # Layer-type targeting (training-time and save-time gating).
+    # Training-time: which DiT layer families receive adapters at all.
+    # Save-time: which trained families are written to the .safetensors.
+    "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
+    "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
     # Core network targeting / knobs
     "train_llm_adapter",
     "exclude_patterns",

@@ -323,3 +323,16 @@ def test_output_layer_targeting_string_bool_parsing():
     assert cfg.output_cross_attn is False
     assert cfg.output_mlp is True
     assert cfg.output_adaln is True
+
+
+def test_shared_kwarg_flags_contains_layer_targeting_keys():
+    """SHARED_KWARG_FLAGS must include all 8 train_*+output_* keys so they
+    propagate from TOML/CLI through to create_network()."""
+    from networks import SHARED_KWARG_FLAGS
+
+    expected = {
+        "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
+        "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+    }
+    missing = expected - set(SHARED_KWARG_FLAGS)
+    assert not missing, f"Missing from SHARED_KWARG_FLAGS: {missing}"
