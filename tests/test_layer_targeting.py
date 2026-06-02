@@ -551,7 +551,7 @@ class _StubNet:
         self.cfg = cfg
 
 
-def test_output_filter_default_removes_nothing():
+def test_output_filter_default_strips_only_adaln_when_all_families_trained():
     """Default output_* config (T,T,T,F) with all 4 families trained:
     only adaln is stripped, because output_adaln=False."""
     cfg = _make_cfg(train_adaln="true")  # train all 4
