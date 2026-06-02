@@ -430,3 +430,29 @@ def test_load_weights_no_warning_without_metadata(tmp_path, caplog):
     assert not any("output gating" in m for m in msgs), (
         f"Unexpected gating warning: {msgs}"
     )
+
+
+def test_cli_argparse_has_output_layer_flags():
+    """The training CLI exposes all 4 --output_* flags with correct defaults."""
+    import argparse
+    import library.anima.training as training_module
+
+    parser = argparse.ArgumentParser()
+    training_module.add_anima_training_arguments(parser)
+
+    defaults = vars(parser.parse_args([]))
+    assert defaults.get("output_self_attn") is None
+    assert defaults.get("output_cross_attn") is None
+    assert defaults.get("output_mlp") is None
+    assert defaults.get("output_adaln") is None
+
+    args = parser.parse_args([
+        "--output_self_attn", "false",
+        "--output_cross_attn", "true",
+        "--output_mlp", "false",
+        "--output_adaln", "true",
+    ])
+    assert args.output_self_attn is False
+    assert args.output_cross_attn is True
+    assert args.output_mlp is False
+    assert args.output_adaln is True

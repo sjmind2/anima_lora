@@ -200,6 +200,30 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Attach LoRA to AdaLN modulation projections. None=config default.",
     )
     parser.add_argument(
+        "--output_self_attn",
+        type=_bool_from_str,
+        default=None,
+        help="Save self-attention LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
+        "--output_cross_attn",
+        type=_bool_from_str,
+        default=None,
+        help="Save cross-attention LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
+        "--output_mlp",
+        type=_bool_from_str,
+        default=None,
+        help="Save MLP LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
+        "--output_adaln",
+        type=_bool_from_str,
+        default=None,
+        help="Save AdaLN modulation LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
         "--t5_tokenizer_path",
         type=str,
         default=None,
