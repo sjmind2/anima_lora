@@ -49,23 +49,42 @@ def _classify_layer(original_name: str) -> str | None:
     """Classify a DiT module path as self_attn / cross_attn / mlp / adaln / None.
 
     Used by ``create_modules`` to skip layer types the user has disabled via
-    ``train_self_attn`` / ``train_cross_attn`` / ``train_mlp`` / ``train_adaln``.
+    ``train_self_attn`` / ``train_cross_attn`` / ``train_mlp`` / ``train_adaln``,
+    and by ``save_weights`` to strip layer types disabled for output via the
+    parallel ``output_*`` flags.
 
-    Boundary rules:
-      * ``.self_attn.`` (dot on both sides) avoids matching ``adaln_modulation_self_attn``
-        where the suffix uses underscore (``_self_attn``).
-      * Same for ``.cross_attn.`` and ``.mlp.``.
-      * ``adaln_modulation_`` (underscore suffix) matches all three modulation
-        projections (self_attn / cross_attn / mlp).
+    Accepts both forms of input:
+      * ``original_name`` dotted form (e.g. ``blocks.0.self_attn.qkv_proj``)
+        used during ``create_modules`` traversal.
+      * ``lora_name`` underscore form (e.g. ``lora_unet_blocks_0_self_attn_q``)
+        where all dots have been collapsed to underscores by ``create_modules``;
+        ``save_weights`` only has ``lora.lora_name`` available.
+
+    Boundary rules (checked in order):
+      1. ``adaln_modulation_`` (underscore suffix) -- matches all three
+         modulation projections (self/cross/mlp). Must be checked first so
+         that ``adaln_modulation_self_attn`` / ``adaln_modulation_mlp`` do
+         not get pulled into the self_attn / mlp families by the underscore
+         boundary checks below.
+      2. ``.self_attn.`` / ``.cross_attn.`` / ``.mlp.`` (dot boundaries) for
+         the dotted ``original_name`` form.
+      3. ``_self_attn_`` / ``_cross_attn_`` / ``_mlp_`` (underscore
+         boundaries) for the underscore ``lora_name`` form.
     """
+    if "adaln_modulation_" in original_name:
+        return "adaln"
     if ".self_attn." in original_name:
         return "self_attn"
     if ".cross_attn." in original_name:
         return "cross_attn"
     if ".mlp." in original_name:
         return "mlp"
-    if "adaln_modulation_" in original_name:
-        return "adaln"
+    if "_self_attn_" in original_name:
+        return "self_attn"
+    if "_cross_attn_" in original_name:
+        return "cross_attn"
+    if "_mlp_" in original_name:
+        return "mlp"
     return None
 
 
@@ -110,9 +129,7 @@ class GlobalRouter(torch.nn.Module):
     ) -> None:
         super().__init__()
         if input_dim <= 0:
-            raise ValueError(
-                f"GlobalRouter: input_dim must be > 0, got {input_dim}"
-            )
+            raise ValueError(f"GlobalRouter: input_dim must be > 0, got {input_dim}")
         if num_experts <= 1:
             raise ValueError(
                 f"GlobalRouter: num_experts must be > 1, got {num_experts}"
@@ -286,7 +303,9 @@ class FreqRouter(torch.nn.Module):
         x32 = x.float()
         if self.apply_layer_norm:
             fei_part = self.ln_fei(x32[..., : self.fei_dim])
-            sigma_part = self.ln_sigma(x32[..., self.fei_dim : self.fei_dim + self.sigma_dim])
+            sigma_part = self.ln_sigma(
+                x32[..., self.fei_dim : self.fei_dim + self.sigma_dim]
+            )
             x32 = torch.cat([fei_part, sigma_part], dim=-1)
         logits = self.net(x32)
         gates = torch.softmax(logits / self.tau, dim=-1)
@@ -370,7 +389,9 @@ class ContentRouter(torch.nn.Module):
                 self.ln_in.float()
         x32 = x.float()
         if x32.dim() == 3:
-            x32 = x32.pow(2).mean(dim=1).sqrt()  # RMS over seq, matches chimera per-Linear pool
+            x32 = (
+                x32.pow(2).mean(dim=1).sqrt()
+            )  # RMS over seq, matches chimera per-Linear pool
         if self.ln_in is not None:
             x32 = self.ln_in(x32)
         logits = self.net(x32)
@@ -466,9 +487,7 @@ class LoRANetwork(torch.nn.Module):
         # From-weights path supplies an explicit name set per router family
         # (different families may have different module memberships in older
         # checkpoints); when present, the explicit set wins over the regex.
-        _router_re = (
-            re.compile(cfg.router_targets) if cfg.router_targets else None
-        )
+        _router_re = re.compile(cfg.router_targets) if cfg.router_targets else None
 
         self._sigma_router_names = (
             set(cfg.sigma_router_names) if cfg.sigma_router_names else None
@@ -526,7 +545,8 @@ class LoRANetwork(torch.nn.Module):
             set(cfg.hydra_router_names) if cfg.hydra_router_names else None
         )
         self._hydra_router_re = (
-            _router_re if (_router_re is not None and self._hydra_router_names is None)
+            _router_re
+            if (_router_re is not None and self._hydra_router_names is None)
             else None
         )
 
@@ -571,10 +591,16 @@ class LoRANetwork(torch.nn.Module):
             # First pass: collect candidate modules
             candidates = []
             skipped_by_target: dict[str, int] = {
-                "self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0,
+                "self_attn": 0,
+                "cross_attn": 0,
+                "mlp": 0,
+                "adaln": 0,
             }
             attached_by_target: dict[str, int] = {
-                "self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0,
+                "self_attn": 0,
+                "cross_attn": 0,
+                "mlp": 0,
+                "adaln": 0,
             }
             for name, module in root_module.named_modules():
                 if (
@@ -692,10 +718,18 @@ class LoRANetwork(torch.nn.Module):
                                         )
                                         alpha_val = alpha
                                     elif is_conv2d:
-                                        effective_conv_dim = conv_dim if conv_dim is not None else lora_dim
+                                        effective_conv_dim = (
+                                            conv_dim
+                                            if conv_dim is not None
+                                            else lora_dim
+                                        )
                                         if effective_conv_dim > 0:
                                             dim = effective_conv_dim
-                                            alpha_val = conv_alpha if conv_alpha is not None else alpha
+                                            alpha_val = (
+                                                conv_alpha
+                                                if conv_alpha is not None
+                                                else alpha
+                                            )
 
                             if dim is None or dim == 0:
                                 if is_linear or is_conv2d_1x1:
@@ -721,22 +755,37 @@ class LoRANetwork(torch.nn.Module):
                                     False,
                                 )
                             )
-                            _kind = _classify_layer(original_name)
-                            if _kind:
-                                attached_by_target[_kind] += 1
+                            if layer_kind:
+                                attached_by_target[layer_kind] += 1
 
                     if target_replace_modules is None:
                         break
 
+            _label = (
+                "DiT"
+                if is_unet
+                else f"TE{text_encoder_idx + 1}"
+                if text_encoder_idx is not None
+                else "model"
+            )
             logger.info(
-                "Layer targeting: self_attn=%s (%d attached, %d skipped), "
+                "[%s] Layer targeting: self_attn=%s (%d attached, %d skipped), "
                 "cross_attn=%s (%d attached, %d skipped), "
                 "mlp=%s (%d attached, %d skipped), "
                 "adaln=%s (%d attached, %d skipped)",
-                cfg.train_self_attn, attached_by_target["self_attn"], skipped_by_target["self_attn"],
-                cfg.train_cross_attn, attached_by_target["cross_attn"], skipped_by_target["cross_attn"],
-                cfg.train_mlp, attached_by_target["mlp"], skipped_by_target["mlp"],
-                cfg.train_adaln, attached_by_target["adaln"], skipped_by_target["adaln"],
+                _label,
+                cfg.train_self_attn,
+                attached_by_target["self_attn"],
+                skipped_by_target["self_attn"],
+                cfg.train_cross_attn,
+                attached_by_target["cross_attn"],
+                skipped_by_target["cross_attn"],
+                cfg.train_mlp,
+                attached_by_target["mlp"],
+                skipped_by_target["mlp"],
+                cfg.train_adaln,
+                attached_by_target["adaln"],
+                skipped_by_target["adaln"],
             )
 
             # Second pass: create LoRA modules with progress bar
@@ -1537,8 +1586,7 @@ class LoRANetwork(torch.nn.Module):
         # re-alias every module so the next call's fast path actually
         # propagates.
         needs_rebind = (
-            self._shared_sigma is not canonical
-            or canonical.shape != cast.shape
+            self._shared_sigma is not canonical or canonical.shape != cast.shape
         )
         if needs_rebind:
             new_sigma = cast.detach().clone()
@@ -1680,8 +1728,7 @@ class LoRANetwork(torch.nn.Module):
                     )
                 current_shared = self._shared_fei.get(dim)
                 needs_rebind = (
-                    current_shared is not canonical
-                    or canonical.shape != cast.shape
+                    current_shared is not canonical or canonical.shape != cast.shape
                 )
                 if needs_rebind:
                     new_fei = cast.detach().clone()
@@ -2151,7 +2198,9 @@ class LoRANetwork(torch.nn.Module):
             cstats = self.get_chimera_router_stats()
             if not cstats:
                 return None
-            parts = [cstats[k] for k in ("content_entropy", "freq_entropy") if k in cstats]
+            parts = [
+                cstats[k] for k in ("content_entropy", "freq_entropy") if k in cstats
+            ]
             if not parts:
                 return None
             return sum(parts) / len(parts)
@@ -2774,9 +2823,9 @@ class LoRANetwork(torch.nn.Module):
                 .clamp_min(1e-12)
                 .reciprocal()
             )
-            weights_sd[down_key] = (
-                down.to(torch.float) * s_norm.unsqueeze(0)
-            ).to(down.dtype)
+            weights_sd[down_key] = (down.to(torch.float) * s_norm.unsqueeze(0)).to(
+                down.dtype
+            )
             weights_sd[f"{name}.inv_scale"] = inv_scale.clone()
 
     def apply_to(self, text_encoders, unet, apply_text_encoder=True, apply_unet=True):
@@ -3231,6 +3280,42 @@ class LoRANetwork(torch.nn.Module):
         for key in [k for k in state_dict if k.startswith("repa_head.")]:
             del state_dict[key]
 
+        # Per-layer-type output gating. Independent of train_*: a family may
+        # be trained but stripped at save, or (harmlessly) marked for output
+        # despite not being trained -- the latter simply has no matching keys
+        # in state_dict. Metadata is keyed off actual deletions so the
+        # default-config save (all output_* True except adaln, which is also
+        # off by default at train time) stays metadata-silent.
+        _output_cfg = {
+            "self_attn": self.cfg.output_self_attn,
+            "cross_attn": self.cfg.output_cross_attn,
+            "mlp":       self.cfg.output_mlp,
+            "adaln":     self.cfg.output_adaln,
+        }
+        _removed_counts = {k: 0 for k in _output_cfg}
+        for _lora in self.text_encoder_loras + self.unet_loras:
+            # lora_name is the dotted module path with '.' collapsed to '_'
+            # (see create_modules); _classify_layer accepts both forms.
+            _kind = _classify_layer(_lora.lora_name)
+            if _kind is None or _output_cfg.get(_kind, True):
+                continue
+            _prefix = _lora.lora_name + "."
+            for _key in [k for k in state_dict if k.startswith(_prefix)]:
+                del state_dict[_key]
+                _removed_counts[_kind] += 1
+        if any(_removed_counts.values()):
+            logger.info(
+                "[Save] output gating removed modules - "
+                f"self_attn={_removed_counts['self_attn']}, "
+                f"cross_attn={_removed_counts['cross_attn']}, "
+                f"mlp={_removed_counts['mlp']}, "
+                f"adaln={_removed_counts['adaln']}"
+            )
+            metadata["ss_output_gated"] = "true"
+            metadata["ss_output_gated_layers"] = ",".join(
+                k for k, n in _removed_counts.items() if n > 0
+            )
+
         if self.cfg.network_type in ("loha", "locon"):
             for lora in self.text_encoder_loras + self.unet_loras:
                 if isinstance(lora, (LohaModule, LoConModule)) and lora.scalar != 1.0:
@@ -3244,7 +3329,6 @@ class LoRANetwork(torch.nn.Module):
                         k = f"{lora_prefix}.lora_up.weight"
                         if k in state_dict:
                             state_dict[k] = state_dict[k] * s
-
 
         lora_save.save_network_weights(
             state_dict,

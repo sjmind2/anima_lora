@@ -336,3 +336,40 @@ def test_shared_kwarg_flags_contains_layer_targeting_keys():
     }
     missing = expected - set(SHARED_KWARG_FLAGS)
     assert not missing, f"Missing from SHARED_KWARG_FLAGS: {missing}"
+
+
+def test_classify_layer_supports_lora_name_underscore_form():
+    """save_weights must classify modules by their lora_name, which is the
+    dotted module path with all '.' collapsed to '_' (see create_modules:
+    `lora_name = f"{prefix}.{original_name}".replace(".", "_")`).
+
+    The original plan proposed prepending '.' so the dot-boundary matchers
+    still hit. That does NOT work: in lora_name form the segment is
+    `_self_attn_` (underscores on both sides), so `.self_attn.` cannot match.
+    Instead, _classify_layer has been extended to recognize the underscore
+    boundary form as well.
+
+    These inputs mirror the lora_name shape produced for Anima DiT blocks:
+      lora_unet_<...>_blocks_<n>_<family>_<...>
+    """
+    assert _classify_layer("lora_unet_blocks_0_self_attn_q") == "self_attn"
+    assert _classify_layer("lora_unet_blocks_0_self_attn_qkv_proj") == "self_attn"
+    assert _classify_layer("lora_unet_blocks_0_cross_attn_q") == "cross_attn"
+    assert _classify_layer("lora_unet_blocks_0_mlp_fc1") == "mlp"
+    assert (
+        _classify_layer("lora_unet_blocks_0_adaln_modulation_self_attn_1")
+        == "adaln"
+    )
+    assert (
+        _classify_layer("lora_unet_blocks_0_adaln_modulation_mlp_1")
+        == "adaln"
+    )
+
+    # The plan's dot-prefix form must also still classify correctly now that
+    # _classify_layer accepts both forms (defence in depth for any caller that
+    # still prepends a dot).
+    assert _classify_layer(".lora_unet_blocks_0_self_attn_q") == "self_attn"
+
+    # Non-DiT modules remain unclassified.
+    assert _classify_layer("lora_unet_patch_embed_proj") is None
+    assert _classify_layer("lora_unet_final_layer_linear") is None
