@@ -75,4 +75,23 @@ class TestTrainExecutor:
         executor = TrainExecutor("train_s2", config, stage_dir, {})
         resolved = executor.prepare_config({})
         assert resolved["network_weights"] == "/path/to/checkpoint.safetensors"
+        # LyCORIS variants must NOT auto-infer rank from weights
+        assert resolved["dim_from_weights"] is False
+
+    def test_build_train_cmd_with_network_weights_lora_infers_dim(self, tmp_path):
+        """For plain LoRA, network_weights triggers dim_from_weights=True
+        so rank is auto-inferred from the warm-start checkpoint."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.000138,
+            "max_train_epochs": 4,
+            "network_weights": "/path/to/lora.safetensors",
+        }
+        stage_dir = tmp_path / "train_s3"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s3", config, stage_dir, {})
+        resolved = executor.prepare_config({})
+        assert resolved["network_weights"] == "/path/to/lora.safetensors"
         assert resolved["dim_from_weights"] is True

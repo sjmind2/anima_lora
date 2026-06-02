@@ -96,16 +96,14 @@ class TrainExecutor(StageBase):
                 resolved[key] = default_val
 
         if not resolved.get("network_weights"):
-            resolved["dim_from_weights"] = False
             for sid, outputs in (stage_outputs or {}).items():
                 if outputs.get("safetensors_path"):
                     resolved["network_weights"] = outputs["safetensors_path"]
-                    nt = resolved.get("network_type", "lora").lower()
-                    if nt in ("lokr", "loha", "locon"):
-                        resolved["dim_from_weights"] = False
-                    else:
-                        resolved["dim_from_weights"] = True
                     break
+
+        if resolved.get("network_weights") and "dim_from_weights" not in resolved:
+            nt = resolved.get("network_type", "lora").lower()
+            resolved["dim_from_weights"] = nt not in ("lokr", "loha", "locon")
 
         if not resolved.get("datasets"):
             datasets = []
