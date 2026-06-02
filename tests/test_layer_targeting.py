@@ -9,32 +9,35 @@ from networks.lora_anima.network import _classify_layer
 from networks.lora_modules import LoRAModule
 
 
-@pytest.mark.parametrize("name,expected", [
-    # self_attn — dot-boundary match
-    ("blocks.0.self_attn.qkv_proj", "self_attn"),
-    ("blocks.0.self_attn.output_proj", "self_attn"),
-    ("blocks.10.self_attn.qkv_proj", "self_attn"),
-    # cross_attn — dot-boundary match
-    ("blocks.0.cross_attn.q_proj", "cross_attn"),
-    ("blocks.0.cross_attn.kv_proj", "cross_attn"),
-    ("blocks.0.cross_attn.output_proj", "cross_attn"),
-    # mlp — dot-boundary match
-    ("blocks.0.mlp.layer1", "mlp"),
-    ("blocks.0.mlp.layer2", "mlp"),
-    # adaln — underscore-prefix match on adaln_modulation_
-    ("blocks.0.adaln_modulation_self_attn.1", "adaln"),
-    ("blocks.0.adaln_modulation_cross_attn.1", "adaln"),
-    ("blocks.0.adaln_modulation_mlp.1", "adaln"),
-    # Non-Block modules -- unclassified
-    ("patch_embed.proj", None),
-    ("time_embed.timestep_embedder.linear.0", None),
-    ("final_layer.linear", None),
-    # Boundary edge case: adaln_modulation_self_attn must NOT match self_attn
-    # because the path uses _self_attn (underscore) not .self_attn (dot)
-    ("blocks.0.adaln_modulation_self_attn.1.weight", "adaln"),
-    # Similarly adaln_modulation_mlp must NOT match mlp
-    ("blocks.0.adaln_modulation_mlp.1.weight", "adaln"),
-])
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # self_attn — dot-boundary match
+        ("blocks.0.self_attn.qkv_proj", "self_attn"),
+        ("blocks.0.self_attn.output_proj", "self_attn"),
+        ("blocks.10.self_attn.qkv_proj", "self_attn"),
+        # cross_attn — dot-boundary match
+        ("blocks.0.cross_attn.q_proj", "cross_attn"),
+        ("blocks.0.cross_attn.kv_proj", "cross_attn"),
+        ("blocks.0.cross_attn.output_proj", "cross_attn"),
+        # mlp — dot-boundary match
+        ("blocks.0.mlp.layer1", "mlp"),
+        ("blocks.0.mlp.layer2", "mlp"),
+        # adaln — underscore-prefix match on adaln_modulation_
+        ("blocks.0.adaln_modulation_self_attn.1", "adaln"),
+        ("blocks.0.adaln_modulation_cross_attn.1", "adaln"),
+        ("blocks.0.adaln_modulation_mlp.1", "adaln"),
+        # Non-Block modules -- unclassified
+        ("patch_embed.proj", None),
+        ("time_embed.timestep_embedder.linear.0", None),
+        ("final_layer.linear", None),
+        # Boundary edge case: adaln_modulation_self_attn must NOT match self_attn
+        # because the path uses _self_attn (underscore) not .self_attn (dot)
+        ("blocks.0.adaln_modulation_self_attn.1.weight", "adaln"),
+        # Similarly adaln_modulation_mlp must NOT match mlp
+        ("blocks.0.adaln_modulation_mlp.1.weight", "adaln"),
+    ],
+)
 def test_classify_layer(name, expected):
     assert _classify_layer(name) == expected
 
@@ -109,7 +112,7 @@ def test_build_train_cmd_passes_bool_values_for_layer_targeting():
     cmd = executor._build_train_cmd(config, Path("/tmp/dataset.toml"))
 
     idx = cmd.index("--train_self_attn")
-    assert cmd[idx + 1] == "false", f"Expected 'false', got {cmd[idx+1]}"
+    assert cmd[idx + 1] == "false", f"Expected 'false', got {cmd[idx + 1]}"
     idx = cmd.index("--train_cross_attn")
     assert cmd[idx + 1] == "true"
     idx = cmd.index("--train_mlp")
@@ -117,8 +120,9 @@ def test_build_train_cmd_passes_bool_values_for_layer_targeting():
     idx = cmd.index("--train_adaln")
     assert cmd[idx + 1] == "true"
 
-    assert "--torch_compile" not in cmd, \
+    assert "--torch_compile" not in cmd, (
         "Existing store_true bools should not be passed when false"
+    )
 
 
 def test_build_train_cmd_passes_bool_true_for_existing_store_true():
@@ -136,5 +140,166 @@ def test_build_train_cmd_passes_bool_true_for_existing_store_true():
     assert "--torch_compile" in cmd
     assert "--gradient_checkpointing" in cmd
     idx = cmd.index("--torch_compile")
-    assert cmd[idx + 1].startswith("--"), \
+    assert cmd[idx + 1].startswith("--"), (
         "Existing bools should not pass a value after the flag"
+    )
+
+
+import torch.nn as nn  # noqa: E402
+
+
+class _MockBlock(nn.Module):
+    """Minimal DiT Block replica with self_attn / cross_attn / mlp / adaln."""
+
+    def __init__(self, dim=64, context_dim=64):
+        super().__init__()
+        self.self_attn = nn.Module()
+        self.self_attn.qkv_proj = nn.Linear(dim, 3 * dim)
+        self.self_attn.output_proj = nn.Linear(dim, dim)
+        self.cross_attn = nn.Module()
+        self.cross_attn.q_proj = nn.Linear(dim, dim)
+        self.cross_attn.kv_proj = nn.Linear(context_dim, 2 * dim)
+        self.cross_attn.output_proj = nn.Linear(dim, dim)
+        self.mlp = nn.Module()
+        self.mlp.layer1 = nn.Linear(dim, dim * 2)
+        self.mlp.layer2 = nn.Linear(dim * 2, dim)
+        self.adaln_modulation_self_attn = nn.Sequential(
+            nn.SiLU(), nn.Linear(dim, 3 * dim)
+        )
+        self.adaln_modulation_cross_attn = nn.Sequential(
+            nn.SiLU(), nn.Linear(dim, 3 * dim)
+        )
+        self.adaln_modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(dim, 3 * dim))
+
+
+class _MockDiT(nn.Module):
+    def __init__(self, num_blocks=2):
+        super().__init__()
+        self.blocks = nn.ModuleList([_MockBlock() for _ in range(num_blocks)])
+
+
+def _apply_layer_filter(dit, cfg):
+    """Apply the layer-type filter logic (same as create_modules) on a mock DiT.
+    Returns list of original_name strings that survive the filter."""
+    results = []
+    for name, module in dit.named_modules():
+        if module.__class__.__name__ == "_MockBlock":
+            for child_name, child_module in module.named_modules():
+                if isinstance(child_module, (nn.Linear, nn.Conv2d)):
+                    original_name = (name + "." if name else "") + child_name
+                    kind = _classify_layer(original_name)
+                    if kind == "self_attn" and not cfg.train_self_attn:
+                        continue
+                    if kind == "cross_attn" and not cfg.train_cross_attn:
+                        continue
+                    if kind == "mlp" and not cfg.train_mlp:
+                        continue
+                    if kind == "adaln" and not cfg.train_adaln:
+                        continue
+                    results.append(original_name)
+    return results
+
+
+def test_default_config_matches_pre_change_behavior():
+    """Default config (train_self_attn=T, cross_attn=T, mlp=T, adaln=F) produces
+    the same module set as the pre-change behavior (when _DEFAULT_EXCLUDE
+    contained _modulation)."""
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg()
+    results = _apply_layer_filter(dit, cfg)
+
+    expected_prefixes = [
+        ".self_attn.qkv_proj",
+        ".self_attn.output_proj",
+        ".cross_attn.q_proj",
+        ".cross_attn.kv_proj",
+        ".cross_attn.output_proj",
+        ".mlp.layer1",
+        ".mlp.layer2",
+    ]
+    for prefix in expected_prefixes:
+        matching = [r for r in results if prefix in r]
+        assert len(matching) == 2, (
+            f"Expected 2 modules matching '{prefix}' (2 blocks), got {len(matching)}"
+        )
+
+    adaln_modules = [r for r in results if "adaln_modulation_" in r]
+    assert len(adaln_modules) == 0, (
+        f"Default config should exclude adaln; got {adaln_modules}"
+    )
+
+
+def test_all_four_disabled_blocks_have_only_non_block_modules():
+    """All 4 flags false -> no Block Linear modules survive the filter."""
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(
+        train_self_attn="false",
+        train_cross_attn="false",
+        train_mlp="false",
+        train_adaln="false",
+    )
+    results = _apply_layer_filter(dit, cfg)
+    assert len(results) == 0, (
+        f"With all 4 flags false, no Block Linears should remain; got {results}"
+    )
+
+
+def test_config_chain_method_overrides_base():
+    """Method TOML overrides base.toml for layer-targeting params."""
+    cfg = _make_cfg(train_adaln="true")
+    assert cfg.train_adaln is True
+
+    cfg = _make_cfg(train_self_attn="false")
+    assert cfg.train_self_attn is False
+
+
+def test_disabling_self_attn_removes_only_self_attn():
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_self_attn="false")
+    results = _apply_layer_filter(dit, cfg)
+    assert not any(".self_attn." in r for r in results)
+    assert any(".cross_attn." in r for r in results)
+    assert any(".mlp." in r for r in results)
+
+
+def test_disabling_cross_attn_removes_only_cross_attn():
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_cross_attn="false")
+    results = _apply_layer_filter(dit, cfg)
+    assert any(".self_attn." in r for r in results)
+    assert not any(".cross_attn." in r for r in results)
+    assert any(".mlp." in r for r in results)
+
+
+def test_disabling_mlp_removes_only_mlp():
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_mlp="false")
+    results = _apply_layer_filter(dit, cfg)
+    assert any(".self_attn." in r for r in results)
+    assert any(".cross_attn." in r for r in results)
+    assert not any(".mlp." in r for r in results)
+
+
+def test_enabling_adaln_includes_modulation_layers():
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_adaln="true")
+    results = _apply_layer_filter(dit, cfg)
+    assert any("adaln_modulation_self_attn" in r for r in results)
+    assert any("adaln_modulation_cross_attn" in r for r in results)
+    assert any("adaln_modulation_mlp" in r for r in results)
+
+
+def test_style_only_preset():
+    """Style only: self_attn=F, cross_attn=F, mlp=T, adaln=F -> only mlp modules."""
+    dit = _MockDiT(num_blocks=1)
+    cfg = _make_cfg(
+        train_self_attn="false",
+        train_cross_attn="false",
+        train_mlp="true",
+        train_adaln="false",
+    )
+    results = _apply_layer_filter(dit, cfg)
+    assert not any(".self_attn." in r for r in results)
+    assert not any(".cross_attn." in r for r in results)
+    assert any(".mlp." in r for r in results)
+    assert not any("adaln_modulation_" in r for r in results)
