@@ -120,6 +120,34 @@ groups:
         layer: common
         default: 0.0
         label: "Sigmoid 偏置"
+      - key: train_self_attn
+        type: bool
+        required: false
+        layer: common
+        default: true
+        label: "训练 Self-Attn"
+        help: "对 self-attention 投影层附加 LoRA（空间构图/姿势/布局）"
+      - key: train_cross_attn
+        type: bool
+        required: false
+        layer: common
+        default: true
+        label: "训练 Cross-Attn"
+        help: "对 cross-attention 投影层附加 LoRA（文本-图像绑定）"
+      - key: train_mlp
+        type: bool
+        required: false
+        layer: common
+        default: true
+        label: "训练 MLP"
+        help: "对 MLP 层附加 LoRA（视觉特征/纹理/色彩/渲染风格）"
+      - key: train_adaln
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "训练 AdaLN"
+        help: "对 AdaLN 调制投影附加 LoRA（时间步条件）— 默认冻结以保持稳定性"
 
   - name: data
     label: "数据"
