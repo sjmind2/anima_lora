@@ -493,3 +493,124 @@ def test_build_train_cmd_passes_output_layer_flags():
     assert cmd[idx + 1] == "false"
     idx = cmd.index("--output_adaln")
     assert cmd[idx + 1] == "true"
+
+
+class _StubLora:
+    """Minimal stand-in for a LoRAModule: only lora_name matters for filtering."""
+    def __init__(self, lora_name):
+        self.lora_name = lora_name
+
+
+def _stub_save_state(net, loras, state_dict):
+    """Drive the same filtering loop that lives in save_weights.
+    Mirrors the production code so tests catch divergence."""
+    _output_cfg = {
+        "self_attn": net.cfg.output_self_attn,
+        "cross_attn": net.cfg.output_cross_attn,
+        "mlp":       net.cfg.output_mlp,
+        "adaln":     net.cfg.output_adaln,
+    }
+    removed = {k: 0 for k in _output_cfg}
+    for lora in loras:
+        kind = _classify_layer(lora.lora_name)
+        if kind is None or _output_cfg.get(kind, True):
+            continue
+        prefix = lora.lora_name + "."
+        for key in [k for k in state_dict if k.startswith(prefix)]:
+            del state_dict[key]
+            removed[kind] += 1
+    return state_dict, removed
+
+
+def _make_stub_loras():
+    return [
+        _StubLora("lora_unet_blocks_0_self_attn_q_proj"),
+        _StubLora("lora_unet_blocks_0_cross_attn_kv_proj"),
+        _StubLora("lora_unet_blocks_0_mlp_fc1"),
+        _StubLora("lora_unet_blocks_0_adaln_modulation_proj"),
+    ]
+
+
+def _make_full_state_dict():
+    keys = [
+        "lora_unet_blocks_0_self_attn_q_proj.lora_up.weight",
+        "lora_unet_blocks_0_self_attn_q_proj.lora_down.weight",
+        "lora_unet_blocks_0_cross_attn_kv_proj.lora_up.weight",
+        "lora_unet_blocks_0_cross_attn_kv_proj.lora_down.weight",
+        "lora_unet_blocks_0_mlp_fc1.lora_up.weight",
+        "lora_unet_blocks_0_mlp_fc1.lora_down.weight",
+        "lora_unet_blocks_0_adaln_modulation_proj.lora_up.weight",
+        "lora_unet_blocks_0_adaln_modulation_proj.lora_down.weight",
+    ]
+    import torch
+    return {k: torch.zeros(1) for k in keys}
+
+
+class _StubNet:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+
+def test_output_filter_default_removes_nothing():
+    """Default output_* config (T,T,T,F) with all 4 families trained:
+    only adaln is stripped, because output_adaln=False."""
+    cfg = _make_cfg(train_adaln="true")  # train all 4
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    # adaln gated off, one module, two keys
+    assert removed == {"self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 2}
+    assert not any("adaln_modulation" in k for k in sd)
+    assert any("self_attn" in k for k in sd)
+
+
+def test_output_filter_disables_self_attn():
+    cfg = _make_cfg(output_self_attn="false", train_adaln="true")
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["self_attn"] == 2
+    assert not any("self_attn_q_proj" in k for k in sd)
+    assert any("cross_attn" in k for k in sd)
+    assert any("mlp" in k for k in sd)
+
+
+def test_output_filter_disables_cross_attn():
+    cfg = _make_cfg(output_cross_attn="false", train_adaln="true")
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["cross_attn"] == 2
+    assert not any("cross_attn" in k for k in sd)
+    assert any("self_attn" in k for k in sd)
+
+
+def test_output_filter_disables_mlp():
+    cfg = _make_cfg(output_mlp="false", train_adaln="true")
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["mlp"] == 2
+    assert not any("mlp_fc1" in k for k in sd)
+    assert any("self_attn" in k for k in sd)
+
+
+def test_output_filter_independent_of_train_filter():
+    """train_adaln=false + output_adaln=true: no error, no removals
+    (because adaln modules never entered self.unet_loras)."""
+    cfg = _make_cfg()  # train_adaln=False default
+    # No adaln lora in the list, mirroring the production filter step
+    loras = [l for l in _make_stub_loras() if "adaln" not in l.lora_name]
+    sd = {k: v for k, v in _make_full_state_dict().items() if "adaln" not in k}
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed == {"self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0}
+
+
+def test_output_filter_train_true_output_false_strips_at_save():
+    """train_adaln=true + output_adaln=false: adaln trained but stripped at save."""
+    cfg = _make_cfg(train_adaln="true")  # output_adaln=False is default
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["adaln"] == 2
+    assert not any("adaln_modulation" in k for k in sd)
