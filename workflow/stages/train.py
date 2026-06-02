@@ -31,7 +31,6 @@ _DATASET_KEYS = {
     "datasets",
     "subsets",
     "source_image_dir",
-    "bucket_families",
     "drop_lowres_images",
     "min_pixels",
     "dataset_subsets",
@@ -169,8 +168,16 @@ class TrainExecutor(StageBase):
 
         cmd += ["--dataset_config", str(dataset_toml_path)]
 
+        if "bucket_families" in resolved_config:
+            bf = resolved_config["bucket_families"]
+            if isinstance(bf, list):
+                bf = ",".join(str(f) for f in bf)
+            if bf:
+                cmd += ["--bucket_families", str(bf)]
+
         network_kwargs: dict[str, str] = {}
         skip_keys = _DATASET_KEYS | _METADATA_KEYS | _NETWORK_MODULE_KWARGS
+        skip_keys = skip_keys | {"bucket_families"}
 
         for key, value in resolved_config.items():
             if key in skip_keys:

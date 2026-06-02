@@ -95,3 +95,55 @@ class TestTrainExecutor:
         resolved = executor.prepare_config({})
         assert resolved["network_weights"] == "/path/to/lora.safetensors"
         assert resolved["dim_from_weights"] is True
+
+    def test_build_train_cmd_forwards_bucket_families_list(self, tmp_path):
+        """bucket_families as list is forwarded as comma-separated --bucket_families."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+            "bucket_families": ["XS"],
+        }
+        stage_dir = tmp_path / "train_s4"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s4", config, stage_dir, {})
+        resolved = executor.prepare_config({})
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        idx = cmd.index("--bucket_families")
+        assert cmd[idx + 1] == "XS"
+
+    def test_build_train_cmd_forwards_bucket_families_string(self, tmp_path):
+        """bucket_families as string is forwarded directly."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+            "bucket_families": "XS,S1",
+        }
+        stage_dir = tmp_path / "train_s5"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s5", config, stage_dir, {})
+        resolved = executor.prepare_config({})
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        idx = cmd.index("--bucket_families")
+        assert cmd[idx + 1] == "XS,S1"
+
+    def test_build_train_cmd_no_bucket_families_when_unset(self, tmp_path):
+        """When bucket_families is not in config, --bucket_families is not in cmd."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+        }
+        stage_dir = tmp_path / "train_s6"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s6", config, stage_dir, {})
+        resolved = executor.prepare_config({})
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        assert "--bucket_families" not in cmd
