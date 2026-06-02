@@ -168,6 +168,37 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Learning rate for AdaLN modulation layers. None=same as base LR, 0=freeze. Note: mod layers are not included in LoRA by default.",
     )
+    # -- Layer-type targeting --
+    # These control which DiT layer families receive LoRA adapters.
+    # None = use config chain default (base.toml -> preset -> method).
+
+    def _bool_from_str(v):
+        return str(v).lower() in ("true", "1", "yes")
+
+    parser.add_argument(
+        "--train_self_attn",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to self-attention projections. None=config default.",
+    )
+    parser.add_argument(
+        "--train_cross_attn",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to cross-attention projections. None=config default.",
+    )
+    parser.add_argument(
+        "--train_mlp",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to MLP layers. None=config default.",
+    )
+    parser.add_argument(
+        "--train_adaln",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to AdaLN modulation projections. None=config default.",
+    )
     parser.add_argument(
         "--t5_tokenizer_path",
         type=str,
