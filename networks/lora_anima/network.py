@@ -2763,8 +2763,23 @@ class LoRANetwork(torch.nn.Module):
     def load_weights(self, file):
         if os.path.splitext(file)[1] == ".safetensors":
             from safetensors.torch import load_file
+            from safetensors import safe_open
 
             weights_sd = load_file(file)
+            try:
+                with safe_open(file, framework="pt") as f:
+                    _md = dict(f.metadata() or {})
+            except Exception:
+                _md = {}
+            if _md.get("ss_output_gated") == "true":
+                _missing = _md.get("ss_output_gated_layers", "")
+                logger.warning(
+                    f"[Load] {os.path.basename(file)} was saved with output "
+                    f"gating disabled for: [{_missing}]. These layers will "
+                    "retain their initialization; resuming training from "
+                    "this file will NOT recover the original weights. "
+                    "Use a full checkpoint for resume."
+                )
         else:
             weights_sd = torch.load(file, map_location="cpu")
 

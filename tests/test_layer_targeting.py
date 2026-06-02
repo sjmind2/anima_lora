@@ -373,3 +373,60 @@ def test_classify_layer_supports_lora_name_underscore_form():
     # Non-DiT modules remain unclassified.
     assert _classify_layer("lora_unet_patch_embed_proj") is None
     assert _classify_layer("lora_unet_final_layer_linear") is None
+
+
+def test_load_weights_warns_on_output_gated_metadata(tmp_path, caplog):
+    """load_weights emits a warning when the file has ss_output_gated=true."""
+    import logging
+    import torch
+    from safetensors.torch import save_file
+
+    dummy = {"lora_TE_ATTN_dummy.weight": torch.zeros(1)}
+    f = tmp_path / "gated.safetensors"
+    save_file(
+        dummy,
+        str(f),
+        metadata={
+            "ss_output_gated": "true",
+            "ss_output_gated_layers": "self_attn,adaln",
+        },
+    )
+
+    from networks.lora_anima.network import LoRANetwork
+    net = LoRANetwork.__new__(LoRANetwork)
+
+    with caplog.at_level(logging.WARNING, logger="networks.lora_anima.network"):
+        try:
+            net.load_weights(str(f))
+        except Exception:
+            pass
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("output gating disabled for: [self_attn,adaln]" in m for m in msgs), (
+        f"Expected gating warning not found in: {msgs}"
+    )
+
+
+def test_load_weights_no_warning_without_metadata(tmp_path, caplog):
+    """load_weights does NOT warn when metadata lacks ss_output_gated."""
+    import logging
+    import torch
+    from safetensors.torch import save_file
+
+    dummy = {"lora_TE_ATTN_dummy.weight": torch.zeros(1)}
+    f = tmp_path / "plain.safetensors"
+    save_file(dummy, str(f), metadata={})
+
+    from networks.lora_anima.network import LoRANetwork
+    net = LoRANetwork.__new__(LoRANetwork)
+
+    with caplog.at_level(logging.WARNING, logger="networks.lora_anima.network"):
+        try:
+            net.load_weights(str(f))
+        except Exception:
+            pass
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("output gating" in m for m in msgs), (
+        f"Unexpected gating warning: {msgs}"
+    )
