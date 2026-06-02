@@ -44,6 +44,8 @@ _METADATA_KEYS = {
 
 _NARGS_STAR_KEYS = {"optimizer_args"}
 
+_BOOL_VALUE_KEYS = {"train_self_attn", "train_cross_attn", "train_mlp", "train_adaln"}
+
 
 def _resolve_default_model(key: str, infra: dict) -> str:
     val = infra.get(key, "")
@@ -186,7 +188,10 @@ class TrainExecutor(StageBase):
                         if item:
                             cmd.append(item)
             elif isinstance(value, bool):
-                if value:
+                if key in _BOOL_VALUE_KEYS:
+                    cmd.append(f"--{key}")
+                    cmd.append("true" if value else "false")
+                elif value:
                     cmd.append(f"--{key}")
             elif isinstance(value, list):
                 for item in value:
