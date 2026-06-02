@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import pytest
+import sys
+from pathlib import Path
 
+import pytest
+import torch.nn as nn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.network import _classify_layer
 from networks.lora_modules import LoRAModule
+from workflow.stages.train import TrainExecutor
 
 
 @pytest.mark.parametrize(
@@ -89,13 +95,6 @@ def test_default_exclude_no_longer_contains_modulation():
         )
 
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from workflow.stages.train import TrainExecutor
-
-
 def test_build_train_cmd_passes_bool_values_for_layer_targeting():
     """_build_train_cmd() passes --key true/false for keys in _BOOL_VALUE_KEYS."""
     executor = TrainExecutor.__new__(TrainExecutor)
@@ -143,9 +142,6 @@ def test_build_train_cmd_passes_bool_true_for_existing_store_true():
     assert cmd[idx + 1].startswith("--"), (
         "Existing bools should not pass a value after the flag"
     )
-
-
-import torch.nn as nn  # noqa: E402
 
 
 class _MockBlock(nn.Module):
