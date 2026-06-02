@@ -206,6 +206,10 @@
         "train_cross_attn": "Train Cross-Attn",
         "train_mlp": "Train MLP",
         "train_adaln": "Train AdaLN",
+        "output_self_attn": "Output Self-Attn",
+        "output_cross_attn": "Output Cross-Attn",
+        "output_mlp": "Output MLP",
+        "output_adaln": "Output AdaLN",
         "datasets": "Input Datasets",
         "use_shuffled_caption_variants": "Use Shuffled Caption Variants",
         "caption_dropout_rate": "Caption Dropout Rate",
@@ -233,7 +237,11 @@
         "train_self_attn": "Attach LoRA to self-attention projections (spatial composition, poses, layout)",
         "train_cross_attn": "Attach LoRA to cross-attention projections (text-to-image binding)",
         "train_mlp": "Attach LoRA to MLP layers (visual features, textures, color palettes, rendering style)",
-        "train_adaln": "Attach LoRA to AdaLN modulation projections (timestep conditioning) -- frozen by default for stability"
+        "train_adaln": "Attach LoRA to AdaLN modulation projections (timestep conditioning) -- frozen by default for stability",
+        "output_self_attn": "Save self-attention LoRA weights to the output file",
+        "output_cross_attn": "Save cross-attention LoRA weights to the output file",
+        "output_mlp": "Save MLP LoRA weights to the output file",
+        "output_adaln": "Save AdaLN modulation LoRA weights to the output file (default off)"
       }
     },
     "train_lora": {

@@ -206,6 +206,10 @@
         "train_cross_attn": "训练 Cross-Attn",
         "train_mlp": "训练 MLP",
         "train_adaln": "训练 AdaLN",
+        "output_self_attn": "输出 Self-Attn",
+        "output_cross_attn": "输出 Cross-Attn",
+        "output_mlp": "输出 MLP",
+        "output_adaln": "输出 AdaLN",
         "datasets": "输入数据集",
         "use_shuffled_caption_variants": "使用打乱的 Caption 变体",
         "caption_dropout_rate": "Caption Dropout 率",
@@ -233,7 +237,11 @@
         "train_self_attn": "对 self-attention 投影层附加 LoRA（空间构图/姿势/布局）",
         "train_cross_attn": "对 cross-attention 投影层附加 LoRA（文本-图像绑定）",
         "train_mlp": "对 MLP 层附加 LoRA（视觉特征/纹理/色彩/渲染风格）",
-        "train_adaln": "对 AdaLN 调制投影附加 LoRA（时间步条件）— 默认冻结以保持稳定性"
+        "train_adaln": "对 AdaLN 调制投影附加 LoRA（时间步条件）— 默认冻结以保持稳定性",
+        "output_self_attn": "保存 self-attention LoRA 权重到输出文件",
+        "output_cross_attn": "保存 cross-attention LoRA 权重到输出文件",
+        "output_mlp": "保存 MLP LoRA 权重到输出文件",
+        "output_adaln": "保存 AdaLN 调制 LoRA 权重到输出文件（默认关闭）"
       }
     },
     "train_lora": {

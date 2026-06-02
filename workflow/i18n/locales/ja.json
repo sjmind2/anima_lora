@@ -206,6 +206,10 @@
         "train_cross_attn": "Cross-Attn を訓練",
         "train_mlp": "MLP を訓練",
         "train_adaln": "AdaLN を訓練",
+        "output_self_attn": "Self-Attn 出力",
+        "output_cross_attn": "Cross-Attn 出力",
+        "output_mlp": "MLP 出力",
+        "output_adaln": "AdaLN 出力",
         "datasets": "入力データセット",
         "use_shuffled_caption_variants": "シャッフル済みCaption変体を使用",
         "caption_dropout_rate": "Caption Dropout率",
@@ -233,7 +237,11 @@
         "train_self_attn": "self-attention 投影層に LoRA を適用（空間構図、ポーズ、レイアウト）",
         "train_cross_attn": "cross-attention 投影層に LoRA を適用（テキストと画像のバインディング）",
         "train_mlp": "MLP 層に LoRA を適用（視覚特徴、テクスチャ、カラーパレット、レンダリングスタイル）",
-        "train_adaln": "AdaLN 変調投影に LoRA を適用（タイムステップ条件付け）— 安定性のためデフォルトで凍結"
+        "train_adaln": "AdaLN 変調投影に LoRA を適用（タイムステップ条件付け）— 安定性のためデフォルトで凍結",
+        "output_self_attn": "self-attention LoRA 重みを出力ファイルに保存",
+        "output_cross_attn": "cross-attention LoRA 重みを出力ファイルに保存",
+        "output_mlp": "MLP LoRA 重みを出力ファイルに保存",
+        "output_adaln": "AdaLN 変調 LoRA 重みを出力ファイルに保存 (デフォルト OFF)"
       }
     },
     "train_lora": {
