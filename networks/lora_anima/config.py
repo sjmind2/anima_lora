@@ -166,7 +166,7 @@ def _parse_kv_pairs(kv_pair_str: str, *, is_int: bool) -> Dict[str, Any]:
 # Default exclude regex appended to user-supplied excludes in `from_kwargs`.
 # Skips embedders / norms / modulation projectors that are never adapted.
 _DEFAULT_EXCLUDE = (
-    r".*(_norm|_embedder|final_layer|adaln_fused_down|adaln_up_|"
+    r".*(_modulation|_norm|_embedder|final_layer|adaln_fused_down|adaln_up_|"
     r"pooled_text_proj).*"
 )
 
@@ -393,14 +393,10 @@ class LoRANetworkCfg:
         train_llm_adapter = _as_bool(kwargs.get("train_llm_adapter"))
 
         # Layer-type targeting (default: train self_attn/cross_attn/mlp, skip adaln)
-        _ts = kwargs.get("train_self_attn")
-        train_self_attn = _as_bool(_ts) if _ts is not None else True
-        _tc = kwargs.get("train_cross_attn")
-        train_cross_attn = _as_bool(_tc) if _tc is not None else True
-        _tm = kwargs.get("train_mlp")
-        train_mlp = _as_bool(_tm) if _tm is not None else True
-        _ta = kwargs.get("train_adaln")
-        train_adaln = _as_bool(_ta) if _ta is not None else False
+        train_self_attn = _as_bool(kwargs.get("train_self_attn", True))
+        train_cross_attn = _as_bool(kwargs.get("train_cross_attn", True))
+        train_mlp = _as_bool(kwargs.get("train_mlp", True))
+        train_adaln = _as_bool(kwargs.get("train_adaln", False))
 
         exclude_patterns = _as_str_list(kwargs.get("exclude_patterns")) or []
         exclude_patterns.append(_DEFAULT_EXCLUDE)
