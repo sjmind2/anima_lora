@@ -299,3 +299,27 @@ def test_style_only_preset():
     assert not any(".cross_attn." in r for r in results)
     assert any(".mlp." in r for r in results)
     assert not any("adaln_modulation_" in r for r in results)
+
+
+def test_output_layer_targeting_defaults():
+    """Default cfg has output_self_attn=True, output_cross_attn=True,
+    output_mlp=True, output_adaln=False."""
+    cfg = _make_cfg()
+    assert cfg.output_self_attn is True
+    assert cfg.output_cross_attn is True
+    assert cfg.output_mlp is True
+    assert cfg.output_adaln is False
+
+
+def test_output_layer_targeting_string_bool_parsing():
+    """String 'true'/'false' from TOML/CLI are parsed correctly."""
+    cfg = _make_cfg(
+        output_self_attn="false",
+        output_cross_attn="false",
+        output_mlp="true",
+        output_adaln="true",
+    )
+    assert cfg.output_self_attn is False
+    assert cfg.output_cross_attn is False
+    assert cfg.output_mlp is True
+    assert cfg.output_adaln is True

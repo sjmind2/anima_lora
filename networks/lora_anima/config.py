@@ -213,6 +213,15 @@ class LoRANetworkCfg:
     train_mlp: bool = True
     train_adaln: bool = False
 
+    # Layer-type output gating: which trained DiT layer families are written
+    # to the saved .safetensors. Independent of train_* (a family may be
+    # trained but stripped at save time). Defaults preserve pre-feature
+    # save behavior; output_adaln=False pairs with train_adaln=False.
+    output_self_attn: bool = True
+    output_cross_attn: bool = True
+    output_mlp: bool = True
+    output_adaln: bool = False
+
     # dropouts
     dropout: Optional[float] = None
     rank_dropout: Optional[float] = None
@@ -398,6 +407,13 @@ class LoRANetworkCfg:
         train_cross_attn = _as_bool(kwargs.get("train_cross_attn", True))
         train_mlp = _as_bool(kwargs.get("train_mlp", True))
         train_adaln = _as_bool(kwargs.get("train_adaln", False))
+
+        # Layer-type output gating (default: write all trained families;
+        # output_adaln=False pairs with the default train_adaln=False).
+        output_self_attn = _as_bool(kwargs.get("output_self_attn", True))
+        output_cross_attn = _as_bool(kwargs.get("output_cross_attn", True))
+        output_mlp = _as_bool(kwargs.get("output_mlp", True))
+        output_adaln = _as_bool(kwargs.get("output_adaln", False))
 
         exclude_patterns = _as_str_list(kwargs.get("exclude_patterns")) or []
         exclude_patterns.append(_DEFAULT_EXCLUDE)
@@ -697,6 +713,10 @@ class LoRANetworkCfg:
             train_cross_attn=train_cross_attn,
             train_mlp=train_mlp,
             train_adaln=train_adaln,
+            output_self_attn=output_self_attn,
+            output_cross_attn=output_cross_attn,
+            output_mlp=output_mlp,
+            output_adaln=output_adaln,
             dropout=neuron_dropout,
             rank_dropout=rank_dropout,
             module_dropout=module_dropout,
