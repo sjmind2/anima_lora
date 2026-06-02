@@ -239,6 +239,10 @@ _GROUPS = {
         "train_cross_attn",
         "train_mlp",
         "train_adaln",
+        "output_self_attn",
+        "output_cross_attn",
+        "output_mlp",
+        "output_adaln",
     },
     "Training": {
         "learning_rate",
