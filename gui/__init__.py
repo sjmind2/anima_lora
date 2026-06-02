@@ -234,6 +234,11 @@ _GROUPS = {
         "specialize_experts_by_sigma_buckets",
         "sigma_bucket_boundaries",
         "network_train_unet_only",
+        # Layer-type targeting
+        "train_self_attn",
+        "train_cross_attn",
+        "train_mlp",
+        "train_adaln",
     },
     "Training": {
         "learning_rate",
