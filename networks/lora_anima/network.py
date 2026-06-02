@@ -570,6 +570,12 @@ class LoRANetwork(torch.nn.Module):
 
             # First pass: collect candidate modules
             candidates = []
+            skipped_by_target: dict[str, int] = {
+                "self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0,
+            }
+            attached_by_target: dict[str, int] = {
+                "self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0,
+            }
             for name, module in root_module.named_modules():
                 if (
                     target_replace_modules is None
@@ -629,6 +635,37 @@ class LoRANetwork(torch.nn.Module):
                                             )
                                         continue
 
+                            # ── Layer-type targeting filter ──────────────
+                            layer_kind = _classify_layer(original_name)
+                            if layer_kind == "self_attn" and not cfg.train_self_attn:
+                                skipped_by_target["self_attn"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (self_attn disabled)"
+                                    )
+                                continue
+                            if layer_kind == "cross_attn" and not cfg.train_cross_attn:
+                                skipped_by_target["cross_attn"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (cross_attn disabled)"
+                                    )
+                                continue
+                            if layer_kind == "mlp" and not cfg.train_mlp:
+                                skipped_by_target["mlp"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (mlp disabled)"
+                                    )
+                                continue
+                            if layer_kind == "adaln" and not cfg.train_adaln:
+                                skipped_by_target["adaln"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (adaln disabled)"
+                                    )
+                                continue
+
                             dim = None
                             alpha_val = None
 
@@ -684,9 +721,23 @@ class LoRANetwork(torch.nn.Module):
                                     False,
                                 )
                             )
+                            _kind = _classify_layer(original_name)
+                            if _kind:
+                                attached_by_target[_kind] += 1
 
                     if target_replace_modules is None:
                         break
+
+            logger.info(
+                "Layer targeting: self_attn=%s (%d attached, %d skipped), "
+                "cross_attn=%s (%d attached, %d skipped), "
+                "mlp=%s (%d attached, %d skipped), "
+                "adaln=%s (%d attached, %d skipped)",
+                cfg.train_self_attn, attached_by_target["self_attn"], skipped_by_target["self_attn"],
+                cfg.train_cross_attn, attached_by_target["cross_attn"], skipped_by_target["cross_attn"],
+                cfg.train_mlp, attached_by_target["mlp"], skipped_by_target["mlp"],
+                cfg.train_adaln, attached_by_target["adaln"], skipped_by_target["adaln"],
+            )
 
             # Second pass: create LoRA modules with progress bar
             from tqdm import tqdm
