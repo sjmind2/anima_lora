@@ -78,7 +78,7 @@ class TestWorkflowDefinition:
                               config_file="b.toml", depends_on=["a"]),
             ],
         )
-        with pytest.raises(ValueError, match="circular"):
+        with pytest.raises(ValueError, match="Circular dependency"):
             wf.topological_order()
 
 

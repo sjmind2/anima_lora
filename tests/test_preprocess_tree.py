@@ -7,7 +7,7 @@ def _make_image(path, w=64, h=64):
     Image.new("RGB", (w, h), (255, 0, 0)).save(path)
 
 
-BUCKET_ARGS = ((1024, 1024), 512, 2048, 64, True)
+BUCKET_ARGS = ((1024, 1024), 512, 2048, 64, True, None)
 
 
 class TestResizeTreeMode:

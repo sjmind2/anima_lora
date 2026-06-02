@@ -330,6 +330,7 @@ def test_resize_images_nested_output(tmp_path: Path) -> None:
         2048,  # max_size
         64,  # reso_steps
         True,  # use_constant_token_buckets
+        None,  # enabled_families
     )
 
     name, _reso = process_image(
@@ -358,7 +359,7 @@ def test_resize_images_flat_output(tmp_path: Path) -> None:
     _write_test_image(img_path)
 
     dst = tmp_path / "post_image_dataset" / "resized"
-    bucket_args = ((1024, 1024), 512, 2048, 64, True)
+    bucket_args = ((1024, 1024), 512, 2048, 64, True, None)
 
     process_image(img_path, dst, bucket_args, copy_captions=False, rel_dir="")
     assert (dst / "cover.png").exists()

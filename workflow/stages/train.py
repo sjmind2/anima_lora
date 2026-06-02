@@ -112,6 +112,12 @@ class TrainExecutor(StageBase):
             if datasets:
                 resolved["datasets"] = datasets
 
+        if "bucket_families" not in resolved:
+            for sid, outputs in (stage_outputs or {}).items():
+                if outputs.get("bucket_families"):
+                    resolved["bucket_families"] = outputs["bucket_families"]
+                    break
+
         if "torch_compile" not in resolved:
             resolved["torch_compile"] = True
 

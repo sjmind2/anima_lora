@@ -156,9 +156,13 @@ class PreprocessExecutor(StageBase):
 
             subsets = self.discover_subsets()
             dataset_dir = str(self.stage_dir / "post_image_dataset")
+            outputs: dict[str, Any] = {"dataset_dir": dataset_dir}
+            families = self.config.get("bucket_families")
+            if families:
+                outputs["bucket_families"] = families
             return StageResult(
                 success=True,
-                outputs={"dataset_dir": dataset_dir},
+                outputs=outputs,
                 subsets=subsets,
             )
         except Exception as e:

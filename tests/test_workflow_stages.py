@@ -147,3 +147,52 @@ class TestTrainExecutor:
         resolved = executor.prepare_config({})
         cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
         assert "--bucket_families" not in cmd
+
+    def test_bucket_families_inherited_from_preprocess_outputs(self, tmp_path):
+        """bucket_families auto-discovered from preprocess stage_outputs."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+        }
+        stage_dir = tmp_path / "train_s7"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s7", config, stage_dir, {})
+        stage_outputs = {
+            "preprocess_1": {
+                "dataset_dir": "/some/path",
+                "bucket_families": ["XS"],
+            }
+        }
+        resolved = executor.prepare_config(stage_outputs)
+        assert resolved["bucket_families"] == ["XS"]
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        idx = cmd.index("--bucket_families")
+        assert cmd[idx + 1] == "XS"
+
+    def test_bucket_families_config_overrides_stage_outputs(self, tmp_path):
+        """Explicit bucket_families in train config takes priority over stage_outputs."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+            "bucket_families": ["S1"],
+        }
+        stage_dir = tmp_path / "train_s8"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s8", config, stage_dir, {})
+        stage_outputs = {
+            "preprocess_1": {
+                "dataset_dir": "/some/path",
+                "bucket_families": ["XS"],
+            }
+        }
+        resolved = executor.prepare_config(stage_outputs)
+        assert resolved["bucket_families"] == ["S1"]
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        idx = cmd.index("--bucket_families")
+        assert cmd[idx + 1] == "S1"

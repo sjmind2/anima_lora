@@ -76,5 +76,5 @@ class TestPlaceholderResolution:
         assert result["sections"]["key2"] == "/data/b"
 
     def test_unresolved_raises(self):
-        with pytest.raises(ValueError, match="unresolved"):
+        with pytest.raises(ValueError, match="Unresolved placeholder"):
             resolve_placeholders("${missing.foo}", {})
