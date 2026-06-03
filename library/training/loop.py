@@ -439,6 +439,42 @@ class _EpochPrefetch:
         self._first_batch = None
 
 
+class _StepPrefetch:
+    """Overlap H2D transfer of batch N+1 with GPU computation of batch N.
+
+    Uses a dedicated CUDA stream so that ``send_to_device`` for the next
+    batch runs concurrently with forward/backward on the default stream.
+    """
+
+    __slots__ = ("_stream", "_batch")
+
+    def __init__(self, device: torch.device):
+        self._stream = torch.cuda.Stream(device=device)
+        self._batch: Optional[Any] = None
+
+    def submit(self, batch_cpu, device: torch.device) -> None:
+        """Launch async H2D transfer on the prefetch stream."""
+        self._stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(self._stream):
+            self._batch = send_to_device(batch_cpu, device)
+
+    def consume(self) -> Optional[Any]:
+        """Wait for transfer completion and return the GPU-resident batch.
+
+        Returns ``None`` if no batch was submitted (cold start or after
+        invalidate).
+        """
+        batch = self._batch
+        self._batch = None
+        if batch is not None:
+            torch.cuda.current_stream(batch.device).wait_stream(self._stream)
+        return batch
+
+    def invalidate(self) -> None:
+        """Discard any pending transfer (used on error / epoch boundary)."""
+        self._batch = None
+
+
 def run_training_loop(trainer, state: LoopState) -> None:
     """Run the full for-epoch training loop and the post-loop end-of-training
     metadata write. Mutates ``state.global_step``, profiler bookkeeping, and
