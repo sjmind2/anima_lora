@@ -3387,7 +3387,6 @@ class LoRANetwork(torch.nn.Module):
         downkeys = []
         upkeys = []
         alphakeys = []
-        norms = []
         keys_scaled = 0
 
         state_dict = self.state_dict()
@@ -3397,6 +3396,8 @@ class LoRANetwork(torch.nn.Module):
                 upkeys.append(key.replace("lora_down", "lora_up"))
                 alphakeys.append(key.replace("lora_down.weight", "alpha"))
 
+        # Batch all norms on GPU; only sync to CPU once at the end.
+        gpu_norms = []
         for i in range(len(downkeys)):
             down = state_dict[downkeys[i]].to(device)
             up = state_dict[upkeys[i]].to(device)
@@ -3421,14 +3422,16 @@ class LoRANetwork(torch.nn.Module):
 
             norm = updown.norm().clamp(min=max_norm_value / 2)
             desired = torch.clamp(norm, max=max_norm_value)
-            ratio = desired.cpu() / norm.cpu()
-            sqrt_ratio_val = (ratio**0.5).item()
-            if ratio != 1:
+            ratio = desired / norm
+            sqrt_ratio = ratio**0.5
+            # Clamp ratio to 1.0 on GPU to avoid unnecessary scaling.
+            needs_scale = (ratio < 1.0 - 1e-7).any()
+            if needs_scale:
                 keys_scaled += 1
+                sqrt_ratio_val = sqrt_ratio.item()
                 state_dict[upkeys[i]].data.mul_(sqrt_ratio_val)
                 state_dict[downkeys[i]].data.mul_(sqrt_ratio_val)
-            scalednorm = updown.norm() * ratio
-            norms.append(scalednorm.item())
+            gpu_norms.append((updown * ratio).norm())
 
         for lora in self.text_encoder_loras + self.unet_loras:
             if hasattr(lora, "apply_max_norm") and not isinstance(lora, LoRAModule):
@@ -3437,8 +3440,12 @@ class LoRANetwork(torch.nn.Module):
                     scaled, norm_val = result
                     if scaled:
                         keys_scaled += 1
-                    norms.append(norm_val)
+                    gpu_norms.append(torch.tensor(norm_val, device=device))
 
-        if norms:
-            return keys_scaled, sum(norms) / len(norms), max(norms)
+        if gpu_norms:
+            # Single D2H sync for all norm statistics.
+            norms_tensor = torch.stack(gpu_norms)
+            mean_norm = norms_tensor.mean().item()
+            maximum_norm = norms_tensor.max().item()
+            return keys_scaled, mean_norm, maximum_norm
         return keys_scaled, 0.0, 0.0

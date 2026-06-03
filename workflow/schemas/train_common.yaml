@@ -297,11 +297,11 @@ groups:
         type: int
         required: false
         layer: common
-        default: 4
+        default: 1
         label: "数据加载进程数"
       - key: dataloader_prefetch_factor
         type: int
         required: false
         layer: common
-        default: 4
+        default: 1
         label: "数据预取深度"

@@ -92,8 +92,8 @@ class TrainExecutor(StageBase):
         "persistent_data_loader_workers": True,
         "use_cmmd": False,
         "save_model_as": "safetensors",
-        "max_data_loader_n_workers": 4,
-        "dataloader_prefetch_factor": 4,
+        "max_data_loader_n_workers": 1,
+        "dataloader_prefetch_factor": 1,
     }
 
     def prepare_config(self, stage_outputs: dict) -> dict:

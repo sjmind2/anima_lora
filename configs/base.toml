@@ -81,8 +81,8 @@ use_custom_down_autograd = true
 log_every_n_steps=2
 dataloader_pin_memory = true
 persistent_data_loader_workers= true
-max_data_loader_n_workers = 4
-dataloader_prefetch_factor = 4
+max_data_loader_n_workers = 1
+dataloader_prefetch_factor = 1
 use_cmmd = false
 
 # ── Dataset config ───────────────────────────────────────────────────────

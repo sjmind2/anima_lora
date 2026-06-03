@@ -446,17 +446,18 @@ class _StepPrefetch:
     batch runs concurrently with forward/backward on the default stream.
     """
 
-    __slots__ = ("_stream", "_batch")
+    __slots__ = ("_stream", "_batch", "_device")
 
     def __init__(self, device: torch.device):
         self._stream = torch.cuda.Stream(device=device)
         self._batch: Optional[Any] = None
+        self._device = device
 
-    def submit(self, batch_cpu, device: torch.device) -> None:
+    def submit(self, batch_cpu) -> None:
         """Launch async H2D transfer on the prefetch stream."""
-        self._stream.wait_stream(torch.cuda.current_stream(device))
+        self._stream.wait_stream(torch.cuda.current_stream(self._device))
         with torch.cuda.stream(self._stream):
-            self._batch = send_to_device(batch_cpu, device)
+            self._batch = send_to_device(batch_cpu, self._device)
 
     def consume(self) -> Optional[Any]:
         """Wait for transfer completion and return the GPU-resident batch.
@@ -467,7 +468,7 @@ class _StepPrefetch:
         batch = self._batch
         self._batch = None
         if batch is not None:
-            torch.cuda.current_stream(batch.device).wait_stream(self._stream)
+            torch.cuda.current_stream(self._device).wait_stream(self._stream)
         return batch
 
     def invalidate(self) -> None:
@@ -610,7 +611,7 @@ def _run_epoch_steps(
                 batch = next_batch
                 # Pipeline the next batch while GPU computes
                 try:
-                    step_prefetch.submit(next(iterator), device)
+                    step_prefetch.submit(next(iterator))
                 except StopIteration:
                     pass
             else:
@@ -621,7 +622,7 @@ def _run_epoch_steps(
                     break
                 # Submit the one after for async transfer
                 try:
-                    step_prefetch.submit(next(iterator), device)
+                    step_prefetch.submit(next(iterator))
                 except StopIteration:
                     pass
     else:
@@ -708,7 +709,7 @@ def _run_epoch_steps(
             # Async-submit next batch for double-buffering
             try:
                 batch_cpu = next(dl_iter)
-                step_prefetch.submit(batch_cpu, accelerator.device)
+                step_prefetch.submit(batch_cpu)
             except StopIteration:
                 break
 
