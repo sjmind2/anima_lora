@@ -7,12 +7,12 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from workflow.config import load_stage_toml, save_stage_toml, resolve_placeholders
 from workflow.i18n import t
 from workflow.logger import EventQueue, WorkflowLogger
-from workflow.models import WorkflowDefinition, WorkflowStage, StageOutput
+from workflow.models import WorkflowDefinition, WorkflowStage
 from workflow.stages.preprocess import PreprocessExecutor
 from workflow.stages.train import TrainExecutor
 
@@ -56,7 +56,9 @@ class _StdoutBuffer:
 
 
 class WorkflowScheduler:
-    def __init__(self, wf_dir: Path, wf: WorkflowDefinition, event_queue: EventQueue) -> None:
+    def __init__(
+        self, wf_dir: Path, wf: WorkflowDefinition, event_queue: EventQueue
+    ) -> None:
         self.wf_dir = wf_dir
         self.wf = wf
         self.event_queue = event_queue
@@ -71,8 +73,9 @@ class WorkflowScheduler:
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
-    def _resolve_and_write_config(self, stage_id: str, run_dir: Path,
-                                   stage_outputs: dict[str, dict[str, str]]) -> dict:
+    def _resolve_and_write_config(
+        self, stage_id: str, run_dir: Path, stage_outputs: dict[str, dict[str, str]]
+    ) -> dict:
         stage = next(s for s in self.wf.stages if s.id == stage_id)
         config_path = self.wf_dir / "configs" / stage.config_file
         raw_config = load_stage_toml(config_path)
@@ -125,7 +128,9 @@ class WorkflowScheduler:
                     entry["outputs"] = info["outputs"]
             payload["stages"].append(entry)
         tmp = run_dir / "status.json.tmp"
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         tmp.replace(run_dir / "status.json")
 
     def run(self, log_file: Path | None = None) -> bool:
@@ -142,22 +147,30 @@ class WorkflowScheduler:
         buffer.start()
 
         logger.workflow_start(len(ordered))
-        self._write_status(run_dir, ordered, stage_statuses, None, "running", started_at)
+        self._write_status(
+            run_dir, ordered, stage_statuses, None, "running", started_at
+        )
 
         for stage in ordered:
             if self._stop_flag.is_set():
                 stage_statuses[stage.id] = {"status": "stopped"}
                 logger.stage_end(stage.id, "stopped")
-                self._write_status(run_dir, ordered, stage_statuses, stage.id, "stopped", started_at)
+                self._write_status(
+                    run_dir, ordered, stage_statuses, stage.id, "stopped", started_at
+                )
                 all_success = False
                 break
 
             try:
-                resolved = self._resolve_and_write_config(stage.id, run_dir, stage_outputs)
+                resolved = self._resolve_and_write_config(
+                    stage.id, run_dir, stage_outputs
+                )
             except Exception as e:
                 stage_statuses[stage.id] = {"status": "config_error", "error": str(e)}
                 logger.stage_end(stage.id, t("backend.scheduler.configError", error=e))
-                self._write_status(run_dir, ordered, stage_statuses, stage.id, "error", started_at)
+                self._write_status(
+                    run_dir, ordered, stage_statuses, stage.id, "error", started_at
+                )
                 all_success = False
                 break
 
@@ -165,11 +178,17 @@ class WorkflowScheduler:
             self._current_executor = executor
             logger.stage_start(stage.id, stage.type)
             stage_statuses[stage.id] = {"status": "running"}
-            self._write_status(run_dir, ordered, stage_statuses, stage.id, "running", started_at)
+            self._write_status(
+                run_dir, ordered, stage_statuses, stage.id, "running", started_at
+            )
 
             config_path = run_dir / stage.id / "config.toml"
             if config_path.exists():
-                logger._log(stage.id, "INFO", t("backend.scheduler.configFile", path=config_path))
+                logger._log(
+                    stage.id,
+                    "INFO",
+                    t("backend.scheduler.configFile", path=config_path),
+                )
                 try:
                     content = config_path.read_text(encoding="utf-8").strip()
                     for line in content.splitlines():
@@ -187,18 +206,27 @@ class WorkflowScheduler:
                 outputs = dict(result.outputs)
                 if result.subsets:
                     outputs["subsets"] = [
-                        {"name": s.name, "image_dir": s.image_dir, "cache_dir": s.cache_dir}
+                        {
+                            "name": s.name,
+                            "image_dir": s.image_dir,
+                            "cache_dir": s.cache_dir,
+                            "num_repeats": s.num_repeats,
+                        }
                         for s in result.subsets
                     ]
                 stage_outputs[stage.id] = outputs
                 stage_statuses[stage.id] = {"status": "ok", "outputs": outputs}
                 logger.stage_end(stage.id, "ok")
-                self._write_status(run_dir, ordered, stage_statuses, None, "running", started_at)
+                self._write_status(
+                    run_dir, ordered, stage_statuses, None, "running", started_at
+                )
             else:
                 all_success = False
                 stage_statuses[stage.id] = {"status": "error", "error": result.error}
                 logger.stage_end(stage.id, f"error: {result.error}")
-                self._write_status(run_dir, ordered, stage_statuses, stage.id, "error", started_at)
+                self._write_status(
+                    run_dir, ordered, stage_statuses, stage.id, "error", started_at
+                )
                 break
 
         buffer.stop()
@@ -211,13 +239,15 @@ class WorkflowScheduler:
             if latest.exists() or latest.is_symlink():
                 if latest.is_dir() and not latest.is_symlink():
                     import shutil
+
                     shutil.rmtree(str(latest))
                 else:
                     latest.unlink()
             if sys.platform == "win32":
                 subprocess.run(
                     ["cmd", "/c", "mklink", "/J", str(latest), str(run_dir)],
-                    check=True, capture_output=True,
+                    check=True,
+                    capture_output=True,
                 )
             else:
                 os.symlink(str(run_dir), str(latest))

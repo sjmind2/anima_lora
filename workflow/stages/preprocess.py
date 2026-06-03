@@ -9,11 +9,22 @@ from workflow.stages.base import StageBase, StageResult
 from workflow.models import SubsetInfo
 
 
+def _parse_num_repeats(name: str) -> int:
+    """Extract repeat count from a '{repeat}_{tag}' directory name."""
+    tokens = name.split("_")
+    try:
+        n = int(tokens[0])
+        return n if n >= 1 else 1
+    except (ValueError, IndexError):
+        return 1
+
+
 def _resolve_default_model(key: str, infra: dict) -> str:
     val = infra.get(key, "")
     if val:
         return val
     from library.env import resolve_under_home
+
     defaults = {
         "vae": "models/vae/qwen_image_vae.safetensors",
         "qwen3": "models/text_encoders/qwen_3_06b_base.safetensors",
@@ -39,8 +50,10 @@ class PreprocessExecutor(StageBase):
         cmd = [
             sys.executable,
             str(self._SCRIPTS_DIR / "resize_images.py"),
-            "--src", src,
-            "--dst", dst,
+            "--src",
+            src,
+            "--dst",
+            dst,
             "--tree",
         ]
         families = self.config.get("bucket_families", ["S1"])
@@ -56,10 +69,13 @@ class PreprocessExecutor(StageBase):
         cmd = [
             sys.executable,
             str(self._SCRIPTS_DIR / "cache_latents.py"),
-            "--dir", dst,
+            "--dir",
+            dst,
             "--tree",
-            "--vae", vae,
-            "--cache_dir", dst,
+            "--vae",
+            vae,
+            "--cache_dir",
+            dst,
         ]
         return cmd
 
@@ -69,11 +85,15 @@ class PreprocessExecutor(StageBase):
         cmd = [
             sys.executable,
             str(self._SCRIPTS_DIR / "cache_text_embeddings.py"),
-            "--dir", dst,
+            "--dir",
+            dst,
             "--tree",
-            "--qwen3", qwen3,
-            "--cache_dir", dst,
-            "--min_pixels", "0",
+            "--qwen3",
+            qwen3,
+            "--cache_dir",
+            dst,
+            "--min_pixels",
+            "0",
         ]
         return cmd
 
@@ -93,7 +113,7 @@ class PreprocessExecutor(StageBase):
                         name=dataset_dir.name,
                         image_dir=str(resized),
                         cache_dir=str(lora),
-                        num_repeats=1,
+                        num_repeats=_parse_num_repeats(dataset_dir.name),
                     )
                 )
                 continue
@@ -108,7 +128,7 @@ class PreprocessExecutor(StageBase):
                             name=subset_dir.name,
                             image_dir=str(resized),
                             cache_dir=str(lora),
-                            num_repeats=1,
+                            num_repeats=_parse_num_repeats(subset_dir.name),
                         )
                     )
         return subsets

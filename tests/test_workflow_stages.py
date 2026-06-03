@@ -196,3 +196,33 @@ class TestTrainExecutor:
         cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
         idx = cmd.index("--bucket_families")
         assert cmd[idx + 1] == "S1"
+
+    def test_bucket_families_matches_dataset_ref_not_first_stage(self, tmp_path):
+        """In multi-stage workflows, bucket_families comes from the
+        dataset-referenced preprocess stage, not the first one found."""
+        config = {
+            "network_type": "lora",
+            "network_dim": 16,
+            "network_alpha": 8,
+            "learning_rate": 0.0001,
+            "max_train_epochs": 1,
+            "datasets": ["preprocess_2"],
+        }
+        stage_dir = tmp_path / "train_s9"
+        stage_dir.mkdir()
+        executor = TrainExecutor("train_s9", config, stage_dir, {})
+        stage_outputs = {
+            "preprocess_1": {
+                "dataset_dir": "/data/p1",
+                "bucket_families": ["S1"],
+            },
+            "preprocess_2": {
+                "dataset_dir": "/data/p2",
+                "bucket_families": ["S2"],
+            },
+        }
+        resolved = executor.prepare_config(stage_outputs)
+        assert resolved["bucket_families"] == ["S2"]
+        cmd = executor._build_train_cmd(resolved, Path("/tmp/dataset.toml"))
+        idx = cmd.index("--bucket_families")
+        assert cmd[idx + 1] == "S2"

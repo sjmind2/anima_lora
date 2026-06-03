@@ -8,7 +8,6 @@ from typing import Callable
 import tomli_w
 
 from workflow.stages.base import StageBase, StageResult
-from workflow.models import SubsetInfo
 
 _NETWORK_MODULE_KWARGS = {
     "network_type",
@@ -44,8 +43,14 @@ _METADATA_KEYS = {
 _NARGS_STAR_KEYS = {"optimizer_args"}
 
 _BOOL_VALUE_KEYS = {
-    "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
-    "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+    "train_self_attn",
+    "train_cross_attn",
+    "train_mlp",
+    "train_adaln",
+    "output_self_attn",
+    "output_cross_attn",
+    "output_mlp",
+    "output_adaln",
 }
 
 
@@ -54,6 +59,7 @@ def _resolve_default_model(key: str, infra: dict) -> str:
     if val:
         return val
     from library.env import resolve_under_home
+
     defaults = {
         "pretrained_model_name_or_path": "models/diffusion_models/anima-base-v1.0.safetensors",
         "qwen3": "models/text_encoders/qwen_3_06b_base.safetensors",
@@ -113,7 +119,17 @@ class TrainExecutor(StageBase):
                 resolved["datasets"] = datasets
 
         if "bucket_families" not in resolved:
-            for sid, outputs in (stage_outputs or {}).items():
+            # Prefer bucket_families from the dataset-referenced preprocess
+            # stages so that multi-stage workflows (each stage with different
+            # families) inherit the correct one.
+            dataset_refs = resolved.get("datasets", [])
+            search_ids = (
+                [sid for sid in dataset_refs if isinstance(sid, str)]
+                if dataset_refs
+                else (stage_outputs or {}).keys()
+            )
+            for sid in search_ids:
+                outputs = (stage_outputs or {}).get(sid, {})
                 if outputs.get("bucket_families"):
                     resolved["bucket_families"] = outputs["bucket_families"]
                     break
@@ -144,7 +160,9 @@ class TrainExecutor(StageBase):
                 if isinstance(ds, str):
                     ref_outputs = stage_outputs.get(ds)
                     if not ref_outputs:
-                        raise ValueError(f"Dataset reference '{ds}' not found in stage outputs")
+                        raise ValueError(
+                            f"Dataset reference '{ds}' not found in stage outputs"
+                        )
                     ref_subsets = ref_outputs.get("subsets", [])
                     dataset_entry = {}
                     if ref_subsets:
@@ -153,12 +171,14 @@ class TrainExecutor(StageBase):
                             entry = {"image_dir": s["image_dir"]}
                             if s.get("cache_dir"):
                                 entry["cache_dir"] = s["cache_dir"]
-                            entry["num_repeats"] = 1
+                            entry["num_repeats"] = s.get("num_repeats", 1)
                             subset_entries.append(entry)
                         dataset_entry["subsets"] = subset_entries
                     else:
                         dataset_dir = ref_outputs.get("dataset_dir", "")
-                        dataset_entry["subsets"] = [{"image_dir": dataset_dir, "num_repeats": 1}]
+                        dataset_entry["subsets"] = [
+                            {"image_dir": dataset_dir, "num_repeats": 1}
+                        ]
                     resolved_datasets.append(dataset_entry)
                 else:
                     resolved_datasets.append(ds)
@@ -169,7 +189,9 @@ class TrainExecutor(StageBase):
 
         return dataset_config_path
 
-    def _build_train_cmd(self, resolved_config: dict, dataset_toml_path: Path) -> list[str]:
+    def _build_train_cmd(
+        self, resolved_config: dict, dataset_toml_path: Path
+    ) -> list[str]:
         cmd = [sys.executable, str(self._TRAIN_SCRIPT)]
 
         cmd += ["--dataset_config", str(dataset_toml_path)]
@@ -197,7 +219,11 @@ class TrainExecutor(StageBase):
                         cmd.append(str(item))
                 elif isinstance(value, str):
                     import re
-                    items = [m.group(0).strip().rstrip(",") for m in re.finditer(r'[^=\s]+=\S+', value)]
+
+                    items = [
+                        m.group(0).strip().rstrip(",")
+                        for m in re.finditer(r"[^=\s]+=\S+", value)
+                    ]
                     for item in items:
                         if item:
                             cmd.append(item)
@@ -244,7 +270,9 @@ class TrainExecutor(StageBase):
             cmd += ["--output_dir", str(output_dir)]
 
             if "pretrained_model_name_or_path" not in resolved:
-                model_path = _resolve_default_model("pretrained_model_name_or_path", self.infrastructure)
+                model_path = _resolve_default_model(
+                    "pretrained_model_name_or_path", self.infrastructure
+                )
                 if model_path:
                     cmd += ["--pretrained_model_name_or_path", model_path]
 
