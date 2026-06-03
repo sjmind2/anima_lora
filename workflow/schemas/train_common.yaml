@@ -293,3 +293,15 @@ groups:
         required: false
         layer: common
         label: "随机种子"
+      - key: max_data_loader_n_workers
+        type: int
+        required: false
+        layer: common
+        default: 4
+        label: "数据加载进程数"
+      - key: dataloader_prefetch_factor
+        type: int
+        required: false
+        layer: common
+        default: 4
+        label: "数据预取深度"
