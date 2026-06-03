@@ -556,6 +556,7 @@ def _run_epoch_steps(
     if prefetch is not None:
         iterator, first_batch = prefetch.result()
         device = accelerator.device
+        step_prefetch = _StepPrefetch(device)
         step = 0
         batch = first_batch
         while True:
@@ -603,10 +604,26 @@ def _run_epoch_steps(
                 next_prefetch.start()
 
             step += 1
-            try:
-                batch = send_to_device(next(iterator), device)
-            except StopIteration:
-                break
+            # Double-buffer: consume async transfer from previous step
+            next_batch = step_prefetch.consume()
+            if next_batch is not None:
+                batch = next_batch
+                # Pipeline the next batch while GPU computes
+                try:
+                    step_prefetch.submit(next(iterator), device)
+                except StopIteration:
+                    pass
+            else:
+                # Cold start (step 0 after first_batch) — no prior submit
+                try:
+                    batch = send_to_device(next(iterator), device)
+                except StopIteration:
+                    break
+                # Submit the one after for async transfer
+                try:
+                    step_prefetch.submit(next(iterator), device)
+                except StopIteration:
+                    pass
     else:
         skipped_dataloader = None
         if state.initial_step > 0:
@@ -615,11 +632,30 @@ def _run_epoch_steps(
             )
             state.initial_step = 1
 
-        for step, batch in enumerate(skipped_dataloader or state.train_dataloader):
-            state.current_step.value = state.global_step
+        step_prefetch = _StepPrefetch(accelerator.device)
+        dl_iter = iter(skipped_dataloader or state.train_dataloader)
+
+        for step in range(len(state.train_dataloader)):
+            # initial_step skip handling
             if state.initial_step > 0:
                 state.initial_step -= 1
+                try:
+                    next(dl_iter)
+                except StopIteration:
+                    break
                 continue
+
+            # Sync-fetch first batch (or from async pipeline)
+            next_batch = step_prefetch.consume()
+            if next_batch is not None:
+                batch = next_batch
+            else:
+                # No async batch ready — sync fetch from iterator
+                try:
+                    batch_cpu = next(dl_iter)
+                except StopIteration:
+                    break
+                batch = send_to_device(batch_cpu, accelerator.device)
 
             _profiler_step_begin(state)
 
@@ -668,6 +704,13 @@ def _run_epoch_steps(
                     state.train_dataloader, indices, accelerator.device
                 )
                 next_prefetch.start()
+
+            # Async-submit next batch for double-buffering
+            try:
+                batch_cpu = next(dl_iter)
+                step_prefetch.submit(batch_cpu, accelerator.device)
+            except StopIteration:
+                break
 
     return next_prefetch
 
