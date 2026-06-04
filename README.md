@@ -91,6 +91,10 @@ Update later in place with `make update` (release-tarball merge, no git needed).
 
 ---
 
+> **Important: Always use regularization (reg) datasets when training LoRA / LyCORIS.** Training without reg data can cause severe contamination of the base model's capabilities — the adapter may overfit to your training images and degrade the model's generalization (e.g., style bleed, pose lock, loss of quality). Include a reg dataset of diverse general-purpose images to preserve the base model's original behavior. This is especially critical for Anima's DiT architecture.
+
+---
+
 ## 1. Fast training
 
 **13.4 GB peak VRAM · 1.1 s/step** on a single RTX 5060 Ti while **rank=32 1MP resolution lora training** — achieved by co-designing the data pipeline, attention, and compiler stack so Dynamo sees a tiny fixed set of shapes (one block graph per token-count family) for the whole run.
