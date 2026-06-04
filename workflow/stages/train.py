@@ -197,9 +197,26 @@ class TrainExecutor(StageBase):
 
         reg_datasets = resolved_config.get("reg_datasets")
         if reg_datasets:
-            all_resolved.extend(
-                _resolve_dataset_refs(reg_datasets, stage_outputs, is_reg=True)
+            reg_resolved = _resolve_dataset_refs(
+                reg_datasets, stage_outputs, is_reg=True
             )
+            # Reg subsets must live in the same [[datasets]] block as train
+            # subsets.  DreamBoothDataset only registers reg images into
+            # image_data when num_train_images > 0 (see dreambooth.py
+            # load_dreambooth_dir).  A standalone reg-only Dataset would have
+            # zero train images, so reg images would never be registered.
+            if all_resolved and reg_resolved:
+                # Collect all reg subsets from all reg entries
+                all_reg_subsets: list[dict] = []
+                for reg_entry in reg_resolved:
+                    all_reg_subsets.extend(reg_entry.get("subsets", []))
+                # Merge reg subsets into every dataset entry so each
+                # DreamBoothDataset has both train and reg images.
+                for ds_entry in all_resolved:
+                    ds_entry.setdefault("subsets", []).extend(all_reg_subsets)
+            else:
+                # No train datasets exist — append as separate entries
+                all_resolved.extend(reg_resolved)
 
         if all_resolved:
             toml_data["datasets"] = all_resolved
