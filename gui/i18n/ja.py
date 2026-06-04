@@ -362,4 +362,13 @@ STRINGS: dict[str, str] = {
     "loha_description": "低ランク アダマール積。ΔW = (A@B)⊙(C@D)。有効ランク = dim²、LoRA の 2 倍のパラメータ。",
     "lokr_description": "低ランク クロネッカー積。次元を因数分解して構造化された高ランク近似。",
     "locon_description": "Conv2d レイヤーにタッカー分解をサポートする拡張 LoRA。線形レイヤーは標準 LoRA と同じ。",
+    # 正則化
+    "reg_source_dir": "正則化ソースディレクトリ",
+    "reg_scan_subsets": "正則スキャン",
+    "reg_scan_subsets_tooltip": "正則化ソースディレクトリのサブディレクトリをスキャン",
+    "reg_subsets_section": "正則化サブセット",
+    "reg_badge": "正則",
+    "prior_loss_weight": "事前損失重み",
+    "prior_loss_weight_tooltip": "正則化画像の損失重み（1.0 = 同等、低いほど影響が小さい）",
+    "reg_scan_no_dir": "正則化ソースディレクトリが指定されていないか、ディレクトリが空です。",
 }

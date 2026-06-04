@@ -369,4 +369,13 @@ STRINGS: dict[str, str] = {
     "bucket_stats": "Stats",
     "bucket_stats_tooltip": "Scan image directory and count images per bucket family",
     "bucket_stats_no_dir": "Please set a valid image directory first",
+    # Regularization
+    "reg_source_dir": "Regularization Source Dir",
+    "reg_scan_subsets": "Scan Reg",
+    "reg_scan_subsets_tooltip": "Scan the regularization source directory for subdirectories",
+    "reg_subsets_section": "Regularization Subsets",
+    "reg_badge": "REG",
+    "prior_loss_weight": "Prior Loss Weight",
+    "prior_loss_weight_tooltip": "Loss weight for regularization images (1.0 = equal, lower = less influence)",
+    "reg_scan_no_dir": "No regularization source directory specified or directory is empty.",
 }

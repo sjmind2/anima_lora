@@ -362,4 +362,13 @@ STRINGS: dict[str, str] = {
     "loha_description": "저랭크 아다마르 곱. ΔW = (A@B)⊙(C@D). 유효 랭크 = dim², LoRA 대비 파라미터 2배.",
     "lokr_description": "저랭크 크로네커 곱. 차원을 인자 분해하여 구조화된 고랭크 근사.",
     "locon_description": "Conv2d 레이어에 터커 분해를 지원하는 향상된 LoRA. 선형 레이어는 표준 LoRA와 동일.",
+    # 정규화
+    "reg_source_dir": "정규화 소스 디렉토리",
+    "reg_scan_subsets": "정규 스캔",
+    "reg_scan_subsets_tooltip": "정규화 소스 디렉토리의 하위 디렉토리를 스캔합니다",
+    "reg_subsets_section": "정규화 서브셋",
+    "reg_badge": "정규",
+    "prior_loss_weight": "사전 손실 가중치",
+    "prior_loss_weight_tooltip": "정규화 이미지의 손실 가중치 (1.0 = 동일, 낮을수록 영향 감소)",
+    "reg_scan_no_dir": "정규화 소스 디렉토리가 지정되지 않았거나 디렉토리가 비어 있습니다.",
 }

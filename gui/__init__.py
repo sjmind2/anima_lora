@@ -292,7 +292,14 @@ _GROUPS = {
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant", "bucket_families"}
+_SKIP = {
+    "base_config",
+    "dataset_config",
+    "general",
+    "datasets",
+    "variant",
+    "bucket_families",
+}
 
 # Virtual keys appear in the form like normal fields but don't round-trip as
 # flat TOML keys — they're derived from / written into structured sections
@@ -731,7 +738,9 @@ def find_stale_latent_caches(cache_dir: Path, enabled_families=None) -> dict[str
     return stale
 
 
-def confirm_stale_caches(parent: QWidget | None, cache_dir: Path, enabled_families=None) -> bool:
+def confirm_stale_caches(
+    parent: QWidget | None, cache_dir: Path, enabled_families=None
+) -> bool:
     """Warn if any VAE latent cache sits at a resolution outside the current
     bucket table. Returns True to proceed (no stale caches found, or
     the user chose to train anyway), False if the user cancelled.
@@ -759,6 +768,7 @@ def confirm_stale_caches(parent: QWidget | None, cache_dir: Path, enabled_famili
 
 def write_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> None:
     from library.datasets.buckets import BUCKET_FAMILIES, get_bucket_list
+
     manifest = {
         "version": 1,
         "enabled_families": enabled_families,
@@ -771,6 +781,7 @@ def write_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> None:
 
 def check_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> bool:
     from library.datasets.buckets import get_bucket_list
+
     manifest_path = cache_dir / ".bucket_manifest.json"
     if not manifest_path.exists():
         return False
@@ -783,7 +794,9 @@ def check_bucket_manifest(cache_dir: Path, enabled_families: list[str]) -> bool:
     return saved == current
 
 
-def confirm_bucket_mismatch(parent, cache_dir: Path, enabled_families: list[str]) -> str | None:
+def confirm_bucket_mismatch(
+    parent, cache_dir: Path, enabled_families: list[str]
+) -> str | None:
     if check_bucket_manifest(cache_dir, enabled_families):
         return "ok"
     manifest_path = cache_dir / ".bucket_manifest.json"
@@ -854,17 +867,24 @@ def _imgs(d: Path) -> list[Path]:
     )
 
 
-def scan_source_dir(source_dir: str) -> list[dict]:
+def scan_source_dir(source_dir: str, *, is_reg: bool = False) -> list[dict]:
     logger.info("scan_source_dir: scanning source_dir=%r", source_dir)
     p = Path(source_dir)
     if not p.is_dir():
-        logger.warning("scan_source_dir: %r is not a directory or does not exist, returning empty list", source_dir)
+        logger.warning(
+            "scan_source_dir: %r is not a directory or does not exist, returning empty list",
+            source_dir,
+        )
         return []
     basename = p.name
     logger.debug("scan_source_dir: resolved basename=%r", basename)
     subsets = []
-    root_images = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
-    logger.debug("scan_source_dir: found %d image file(s) in root directory", len(root_images))
+    root_images = [
+        f for f in p.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+    ]
+    logger.debug(
+        "scan_source_dir: found %d image file(s) in root directory", len(root_images)
+    )
     if root_images:
         sub = {
             "name": "(root)",
@@ -873,11 +893,14 @@ def scan_source_dir(source_dir: str) -> list[dict]:
             "cache_dir": f"post_image_dataset/{basename}/.lora",
             "num_repeats": 1,
             "recursive": True,
+            "is_reg": is_reg,
         }
         subsets.append(sub)
         logger.info(
-            "scan_source_dir: added (root) subset  image_dir=%r  cache_dir=%r  num_repeats=1",
-            sub["image_dir"], sub["cache_dir"],
+            "scan_source_dir: added (root) subset  image_dir=%r  cache_dir=%r  num_repeats=1  is_reg=%s",
+            sub["image_dir"],
+            sub["cache_dir"],
+            is_reg,
         )
     skipped = []
     for child in sorted(p.iterdir()):
@@ -895,21 +918,34 @@ def scan_source_dir(source_dir: str) -> list[dict]:
             "cache_dir": f"post_image_dataset/{basename}/{child.name}/.lora",
             "num_repeats": num_repeats,
             "recursive": True,
+            "is_reg": is_reg,
         }
         subsets.append(sub)
         if m:
             logger.info(
-                "scan_source_dir: subset=%r  matched pattern [N]_rest → num_repeats=%d  image_dir=%r  cache_dir=%r",
-                child.name, num_repeats, sub["image_dir"], sub["cache_dir"],
+                "scan_source_dir: subset=%r  matched pattern [N]_rest → num_repeats=%d  image_dir=%r  cache_dir=%r  is_reg=%s",
+                child.name,
+                num_repeats,
+                sub["image_dir"],
+                sub["cache_dir"],
+                is_reg,
             )
         else:
             logger.info(
-                "scan_source_dir: subset=%r  no repeat prefix → num_repeats=%d (default)  image_dir=%r  cache_dir=%r",
-                child.name, num_repeats, sub["image_dir"], sub["cache_dir"],
+                "scan_source_dir: subset=%r  no repeat prefix → num_repeats=%d (default)  image_dir=%r  cache_dir=%r  is_reg=%s",
+                child.name,
+                num_repeats,
+                sub["image_dir"],
+                sub["cache_dir"],
+                is_reg,
             )
     if skipped:
         logger.debug("scan_source_dir: skipped hidden directories: %s", skipped)
-    logger.info("scan_source_dir: total %d subset(s) generated for source_dir=%r", len(subsets), source_dir)
+    logger.info(
+        "scan_source_dir: total %d subset(s) generated for source_dir=%r",
+        len(subsets),
+        source_dir,
+    )
     return subsets
 
 
@@ -1057,6 +1093,7 @@ class ScaledImageLabel(QLabel):
 
 def load_bucket_families() -> list[str]:
     from library.datasets.buckets import BUCKET_FAMILIES
+
     settings_file = Path(__file__).resolve().parent / "gui_settings.json"
     default = ["M", "L"]
     if not settings_file.exists():

@@ -10,7 +10,17 @@ from pathlib import Path
 
 from ._common import PY, _load_subset_configs, _path, run
 
-_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff', '.tif', '.avif'}
+_IMAGE_EXTS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".gif",
+    ".tiff",
+    ".tif",
+    ".avif",
+}
 
 
 def _bucket_families_args() -> list[str]:
@@ -289,10 +299,16 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
         sd = subset.get("source_dir", "?")
         id_ = subset.get("image_dir", "?")
         cd = subset.get("cache_dir", "?")
-        print(f"  subset[{i}] ({name!r}): src={sd!r} → dst={id_!r}  cache={cd!r}", file=sys.stderr)
+        print(
+            f"  subset[{i}] ({name!r}): src={sd!r} → dst={id_!r}  cache={cd!r}",
+            file=sys.stderr,
+        )
     src = Path(source_dir)
     if not src.is_dir():
-        print(f"  cmd_preprocess_subsets: source_dir {source_dir!r} does not exist", file=sys.stderr)
+        print(
+            f"  cmd_preprocess_subsets: source_dir {source_dir!r} does not exist",
+            file=sys.stderr,
+        )
         return
     bf_args = _bucket_families_args()
     run(
@@ -334,9 +350,15 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
         sd = subset.get("source_dir", "")
         cd = subset.get("cache_dir", "")
         if not sd or not cd:
-            print(f"  TE subset[{i}] ({name!r}): missing source_dir or cache_dir, skipping", file=sys.stderr)
+            print(
+                f"  TE subset[{i}] ({name!r}): missing source_dir or cache_dir, skipping",
+                file=sys.stderr,
+            )
             continue
-        print(f"  TE subset[{i}] ({name!r}): --dir {sd!r} --cache_dir {cd!r}", file=sys.stderr)
+        print(
+            f"  TE subset[{i}] ({name!r}): --dir {sd!r} --cache_dir {cd!r}",
+            file=sys.stderr,
+        )
         run(
             [
                 PY,
@@ -393,25 +415,41 @@ def cmd_preprocess_subsets(extra, subsets=None):
     if subsets is None:
         subsets = _load_subset_configs()
     if not subsets:
-        print("  cmd_preprocess_subsets: no subset configs found, nothing to do", file=sys.stderr)
+        print(
+            "  cmd_preprocess_subsets: no subset configs found, nothing to do",
+            file=sys.stderr,
+        )
         return
-    print(f"  cmd_preprocess_subsets: processing {len(subsets)} subset(s)...", file=sys.stderr)
+    print(
+        f"  cmd_preprocess_subsets: processing {len(subsets)} subset(s)...",
+        file=sys.stderr,
+    )
     tree_paths = _derive_tree_paths(subsets)
     if tree_paths is not None:
         source_dir, dst, cache_dir = tree_paths
         _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra)
-        print(f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed (tree mode)", file=sys.stderr)
+        print(
+            f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed (tree mode)",
+            file=sys.stderr,
+        )
         bf_args = _bucket_families_args()
         if bf_args:
             from ._common import _path_overrides
 
-            families = [f.strip() for f in str(_path_overrides()["bucket_families"]).split(",") if f.strip()]
+            families = [
+                f.strip()
+                for f in str(_path_overrides()["bucket_families"]).split(",")
+                if f.strip()
+            ]
             for subset in subsets:
                 cd = subset.get("cache_dir")
                 if cd:
                     _write_bucket_manifest(cd, families)
         return
-    print("  cmd_preprocess_subsets: could not derive common tree paths, falling back to per-subset mode", file=sys.stderr)
+    print(
+        "  cmd_preprocess_subsets: could not derive common tree paths, falling back to per-subset mode",
+        file=sys.stderr,
+    )
     for i, subset in enumerate(subsets):
         source_dir = subset.get("source_dir")
         image_dir = subset.get("image_dir")
@@ -426,7 +464,10 @@ def cmd_preprocess_subsets(extra, subsets=None):
             continue
         src = Path(source_dir)
         if not src.is_dir():
-            print(f"  subset[{i}] ({name!r}): source_dir {source_dir!r} does not exist, skipping", file=sys.stderr)
+            print(
+                f"  subset[{i}] ({name!r}): source_dir {source_dir!r} does not exist, skipping",
+                file=sys.stderr,
+            )
             continue
         is_root = name == "(root)"
         recursive_flag = "--no-recursive (root subset)" if is_root else "--recursive"
@@ -492,48 +533,63 @@ def cmd_preprocess_subsets(extra, subsets=None):
             te_cmd.append("--recursive")
         te_cmd.extend(extra)
         run(te_cmd)
-    print(f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed", file=sys.stderr)
+    print(
+        f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed",
+        file=sys.stderr,
+    )
 
     bf_args = _bucket_families_args()
     if bf_args:
         from ._common import _path_overrides
 
-        families = [f.strip() for f in str(_path_overrides()["bucket_families"]).split(",") if f.strip()]
+        families = [
+            f.strip()
+            for f in str(_path_overrides()["bucket_families"]).split(",")
+            if f.strip()
+        ]
         for subset in subsets:
             cd = subset.get("cache_dir")
             if cd:
                 _write_bucket_manifest(cd, families)
 
 
-def _auto_scan_subsets(source_dir: str) -> list[dict]:
+def _auto_scan_subsets(source_dir: str, *, is_reg: bool = False) -> list[dict]:
     src = Path(source_dir)
     if not src.is_dir():
         return []
     basename = src.name
     subsets = []
-    root_images = [f for f in src.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS]
+    root_images = [
+        f for f in src.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+    ]
     if root_images:
-        subsets.append({
-            "name": "(root)",
-            "source_dir": str(src),
-            "image_dir": f"post_image_dataset/{basename}/.resized",
-            "cache_dir": f"post_image_dataset/{basename}/.lora",
-            "num_repeats": 1,
-            "recursive": True,
-        })
+        subsets.append(
+            {
+                "name": "(root)",
+                "source_dir": str(src),
+                "image_dir": f"post_image_dataset/{basename}/.resized",
+                "cache_dir": f"post_image_dataset/{basename}/.lora",
+                "num_repeats": 1,
+                "recursive": True,
+                "is_reg": is_reg,
+            }
+        )
     for child in sorted(src.iterdir()):
         if not child.is_dir() or child.name.startswith("."):
             continue
         m = re.match(r"^(\d+)_.+", child.name)
         num_repeats = int(m.group(1)) if m else 1
-        subsets.append({
-            "name": child.name,
-            "source_dir": str(child),
-            "image_dir": f"post_image_dataset/{basename}/{child.name}/.resized",
-            "cache_dir": f"post_image_dataset/{basename}/{child.name}/.lora",
-            "num_repeats": num_repeats,
-            "recursive": True,
-        })
+        subsets.append(
+            {
+                "name": child.name,
+                "source_dir": str(child),
+                "image_dir": f"post_image_dataset/{basename}/{child.name}/.resized",
+                "cache_dir": f"post_image_dataset/{basename}/{child.name}/.lora",
+                "num_repeats": num_repeats,
+                "recursive": True,
+                "is_reg": is_reg,
+            }
+        )
     return subsets
 
 
@@ -548,15 +604,32 @@ def cmd_preprocess(extra):
         )
         subsets = _auto_scan_subsets(source_image_dir)
         if subsets:
-            print(f"  cmd_preprocess: auto-scan found {len(subsets)} subset(s)", file=sys.stderr)
+            print(
+                f"  cmd_preprocess: auto-scan found {len(subsets)} subset(s)",
+                file=sys.stderr,
+            )
         else:
             print(
                 f"  cmd_preprocess: source_image_dir {source_image_dir!r} is empty or does not exist",
                 file=sys.stderr,
             )
 
+    # Append regularization subsets if REG_SOURCE_DIR is set
+    reg_dir = os.environ.get("REG_SOURCE_DIR", "").strip()
+    if reg_dir and Path(reg_dir).is_dir():
+        reg_subsets = _auto_scan_subsets(reg_dir, is_reg=True)
+        if reg_subsets:
+            print(
+                f"  cmd_preprocess: reg auto-scan found {len(reg_subsets)} subset(s) from {reg_dir!r}",
+                file=sys.stderr,
+            )
+            subsets = (subsets or []) + reg_subsets
+
     if subsets:
-        print(f"  cmd_preprocess: tree mode with {len(subsets)} subset(s)", file=sys.stderr)
+        print(
+            f"  cmd_preprocess: tree mode with {len(subsets)} subset(s)",
+            file=sys.stderr,
+        )
         cmd_preprocess_subsets(extra, subsets=subsets)
         return
 

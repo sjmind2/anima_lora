@@ -211,6 +211,8 @@
         "output_mlp": "MLP 出力",
         "output_adaln": "AdaLN 出力",
         "datasets": "入力データセット",
+        "reg_datasets": "正則化データセット",
+        "prior_loss_weight": "事前損失重み",
         "use_shuffled_caption_variants": "シャッフル済みCaption変体を使用",
         "caption_dropout_rate": "Caption Dropout率",
         "caption_extension": "Caption拡張子",

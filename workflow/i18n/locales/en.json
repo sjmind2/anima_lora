@@ -211,6 +211,8 @@
         "output_mlp": "Output MLP",
         "output_adaln": "Output AdaLN",
         "datasets": "Input Datasets",
+        "reg_datasets": "Regularization Datasets",
+        "prior_loss_weight": "Prior Loss Weight",
         "use_shuffled_caption_variants": "Use Shuffled Caption Variants",
         "caption_dropout_rate": "Caption Dropout Rate",
         "caption_extension": "Caption Extension",

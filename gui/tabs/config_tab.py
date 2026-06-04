@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -426,6 +428,17 @@ class ConfigTab(QWidget):
                     self._source_dir_widget = w
                     w.editingFinished.connect(self._on_source_dir_changed)
                     self._build_bucket_family_ui(form)
+                elif k == "reg_source_dir":
+                    reg_scan_btn = QPushButton(t("reg_scan_subsets"))
+                    reg_scan_btn.setToolTip(t("reg_scan_subsets_tooltip"))
+                    reg_scan_btn.clicked.connect(self._scan_reg_subsets)
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setContentsMargins(0, 0, 0, 0)
+                    row_layout.addWidget(w, 1)
+                    row_layout.addWidget(reg_scan_btn)
+                    form.addRow(lbl, row_widget)
+                    self._reg_source_dir_widget = w
                 else:
                     form.addRow(lbl, w)
             box.setLayout(form)
@@ -476,7 +489,8 @@ class ConfigTab(QWidget):
             if isinstance(first_ds, dict) and "subsets" in first_ds:
                 logger.info(
                     "_reload: variant %r has %d subset(s) in [[datasets]], loading into UI",
-                    variant, len(first_ds["subsets"]),
+                    variant,
+                    len(first_ds["subsets"]),
                 )
                 src_dir_base = variant_data.get("source_image_dir", "")
                 for idx, sub in enumerate(first_ds["subsets"]):
@@ -488,7 +502,12 @@ class ConfigTab(QWidget):
                         p = Path(image_dir)
                         if p.name == ".resized":
                             parent_name = p.parent.name
-                            name = "(root)" if not parent_name or parent_name == p.parent.parent.name else parent_name
+                            name = (
+                                "(root)"
+                                if not parent_name
+                                or parent_name == p.parent.parent.name
+                                else parent_name
+                            )
                         else:
                             name = p.name
                     if not source_dir and src_dir_base:
@@ -503,16 +522,25 @@ class ConfigTab(QWidget):
                         "cache_dir": cache_dir,
                         "num_repeats": sub.get("num_repeats", 1),
                         "recursive": sub.get("recursive", True),
+                        "is_reg": sub.get("is_reg", False),
                     }
                     self._subsets.append(entry)
                     logger.debug(
                         "_reload: loaded subset[%d] name=%r  image_dir=%r  cache_dir=%r  num_repeats=%d",
-                        idx, entry["name"], entry["image_dir"], entry["cache_dir"], entry["num_repeats"],
+                        idx,
+                        entry["name"],
+                        entry["image_dir"],
+                        entry["cache_dir"],
+                        entry["num_repeats"],
                     )
             else:
-                logger.debug("_reload: variant %r has no subsets in [[datasets]]", variant)
+                logger.debug(
+                    "_reload: variant %r has no subsets in [[datasets]]", variant
+                )
         else:
             logger.debug("_reload: variant %r has no [[datasets]] section", variant)
+
+        self._prior_loss_weight = variant_data.get("prior_loss_weight", 1.0)
 
         if self._subsets:
             subsets_box = self._build_subsets_box()
@@ -568,24 +596,69 @@ class ConfigTab(QWidget):
     # ── Subset scanning ──
 
     def _scan_subsets(self):
-        src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+        src = (
+            self._source_dir_widget.text().strip()
+            if hasattr(self, "_source_dir_widget")
+            else ""
+        )
         if not src:
             logger.warning("_scan_subsets: source_image_dir is empty, cannot scan")
-            QMessageBox.information(self, t("subsets_section"), t("subsets_scan_no_dir"))
+            QMessageBox.information(
+                self, t("subsets_section"), t("subsets_scan_no_dir")
+            )
             return
         logger.info("_scan_subsets: scanning source_image_dir=%r", src)
-        self._subsets = scan_source_dir(src)
-        logger.info("_scan_subsets: scan returned %d subset(s)", len(self._subsets))
+        train_subsets = scan_source_dir(src)
+        # Preserve existing reg subsets
+        reg_subsets = [s for s in self._subsets if s.get("is_reg")]
+        self._subsets = train_subsets + reg_subsets
+        logger.info(
+            "_scan_subsets: scan returned %d train subset(s), %d reg subset(s) preserved",
+            len(train_subsets),
+            len(reg_subsets),
+        )
         self._rebuild_subset_ui()
         if not self._subsets:
-            QMessageBox.information(self, t("subsets_section"), t("subsets_scan_no_dir"))
+            QMessageBox.information(
+                self, t("subsets_section"), t("subsets_scan_no_dir")
+            )
         else:
             self._mark_dirty()
 
     def _on_source_dir_changed(self):
         if self._subsets:
-            logger.info("_on_source_dir_changed: source_image_dir changed, re-scanning subsets")
+            logger.info(
+                "_on_source_dir_changed: source_image_dir changed, re-scanning subsets"
+            )
             self._scan_subsets()
+
+    def _scan_reg_subsets(self):
+        src = (
+            self._reg_source_dir_widget.text().strip()
+            if hasattr(self, "_reg_source_dir_widget")
+            else ""
+        )
+        if not src:
+            logger.warning("_scan_reg_subsets: reg_source_dir is empty")
+            QMessageBox.information(
+                self, t("reg_subsets_section"), t("reg_scan_no_dir")
+            )
+            return
+        logger.info("_scan_reg_subsets: scanning reg_source_dir=%r", src)
+        reg_subsets = scan_source_dir(src, is_reg=True)
+        logger.info(
+            "_scan_reg_subsets: scan returned %d reg subset(s)", len(reg_subsets)
+        )
+        # Remove existing reg subsets, keep train subsets
+        self._subsets = [s for s in self._subsets if not s.get("is_reg")]
+        self._subsets.extend(reg_subsets)
+        self._rebuild_subset_ui()
+        if not reg_subsets:
+            QMessageBox.information(
+                self, t("reg_subsets_section"), t("reg_scan_no_dir")
+            )
+        else:
+            self._mark_dirty()
 
     def _build_bucket_family_ui(self, form_layout):
         from library.datasets.buckets import BUCKET_FAMILIES
@@ -595,7 +668,7 @@ class ConfigTab(QWidget):
         self._family_count_labels = {}
 
         merged_families = None
-        if hasattr(self, '_origin'):
+        if hasattr(self, "_origin"):
             variant = self._current_variant()
             merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
             bf = merged.get("bucket_families")
@@ -616,7 +689,7 @@ class ConfigTab(QWidget):
             count_label = QLabel("")
             layout.addWidget(count_label)
 
-            res_text = "  ".join(f"{w}x{h}" for w, h in info['members'])
+            res_text = "  ".join(f"{w}x{h}" for w, h in info["members"])
             res_label = QLabel(res_text)
             res_label.setStyleSheet("color: gray; font-size: 10px;")
             layout.addWidget(res_label, 1)
@@ -628,14 +701,21 @@ class ConfigTab(QWidget):
     def _on_family_changed(self):
         enabled = [n for n, cb in self._family_checkboxes.items() if cb.isChecked()]
         if len(enabled) > 2:
-            logger.warning("More than 2 bucket families selected (%d), may impact performance", len(enabled))
+            logger.warning(
+                "More than 2 bucket families selected (%d), may impact performance",
+                len(enabled),
+            )
         self._mark_dirty()
 
     def _bucket_stats(self):
         from library.datasets.buckets import BUCKET_FAMILIES
         from gui import scan_images_for_bucket_stats
 
-        src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+        src = (
+            self._source_dir_widget.text().strip()
+            if hasattr(self, "_source_dir_widget")
+            else ""
+        )
         if not src or not Path(src).is_dir():
             QMessageBox.information(self, t("bucket_stats"), t("bucket_stats_no_dir"))
             return
@@ -649,7 +729,7 @@ class ConfigTab(QWidget):
                 self._family_count_labels[name].setText(f"[{count}]" if count else "")
 
     def get_enabled_families(self):
-        if hasattr(self, '_family_checkboxes'):
+        if hasattr(self, "_family_checkboxes"):
             return [n for n, cb in self._family_checkboxes.items() if cb.isChecked()]
         return ["M", "L"]
 
@@ -669,9 +749,19 @@ class ConfigTab(QWidget):
             card_layout = QVBoxLayout()
             card_layout.setContentsMargins(4, 4, 4, 4)
             card_layout.setSpacing(2)
+            name_row = QHBoxLayout()
             name_lbl = QLabel(sub["name"])
             name_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
-            card_layout.addWidget(name_lbl)
+            name_row.addWidget(name_lbl)
+            if sub.get("is_reg"):
+                reg_badge = QLabel(t("reg_badge"))
+                reg_badge.setStyleSheet(
+                    "background-color: #5b5bd6; color: white; "
+                    "border-radius: 3px; padding: 1px 6px; font-size: 10px; font-weight: bold;"
+                )
+                name_row.addWidget(reg_badge)
+            name_row.addStretch()
+            card_layout.addLayout(name_row)
             img_lbl = QLabel(sub["image_dir"])
             img_lbl.setStyleSheet("color:#aaa; font-size: 11px;")
             img_lbl.setWordWrap(True)
@@ -696,6 +786,30 @@ class ConfigTab(QWidget):
             card.setLayout(card_layout)
             subsets_layout.addWidget(card)
             self._subset_widgets.append({"spin": repeats_spin, "index": i})
+        # prior_loss_weight control (shown when reg subsets exist)
+        has_reg = any(s.get("is_reg") for s in self._subsets)
+        if has_reg:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setFrameShadow(QFrame.Sunken)
+            subsets_layout.addWidget(sep)
+            pw_row = QHBoxLayout()
+            pw_label = QLabel(t("prior_loss_weight"))
+            pw_label.setToolTip(t("prior_loss_weight_tooltip"))
+            pw_row.addWidget(pw_label)
+            self._prior_loss_weight_spin = QDoubleSpinBox()
+            self._prior_loss_weight_spin.setRange(0.0, 10.0)
+            self._prior_loss_weight_spin.setSingleStep(0.1)
+            self._prior_loss_weight_spin.setDecimals(2)
+            self._prior_loss_weight_spin.setValue(
+                self._prior_loss_weight if hasattr(self, "_prior_loss_weight") else 1.0
+            )
+            self._prior_loss_weight_spin.setFixedWidth(80)
+            self._prior_loss_weight_spin.wheelEvent = lambda e: e.ignore()
+            self._prior_loss_weight_spin.valueChanged.connect(self._mark_dirty)
+            pw_row.addWidget(self._prior_loss_weight_spin)
+            pw_row.addStretch()
+            subsets_layout.addLayout(pw_row)
         subsets_box.setLayout(subsets_layout)
         return subsets_box
 
@@ -763,9 +877,7 @@ class ConfigTab(QWidget):
             f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
         ]
         if help_text:
-            parts.append(
-                f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>"
-            )
+            parts.append(f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>")
         else:
             parts.append(
                 f"<p style='color:#888; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
@@ -834,18 +946,53 @@ class ConfigTab(QWidget):
             )
 
         if not self._subsets:
-            src = self._source_dir_widget.text().strip() if hasattr(self, "_source_dir_widget") else ""
+            src = (
+                self._source_dir_widget.text().strip()
+                if hasattr(self, "_source_dir_widget")
+                else ""
+            )
             if src:
-                logger.info("_save_preset: no subsets — auto-scanning source_image_dir=%r", src)
+                logger.info(
+                    "_save_preset: no subsets — auto-scanning source_image_dir=%r", src
+                )
                 self._subsets = scan_source_dir(src)
                 if self._subsets:
                     self._rebuild_subset_ui()
-                    logger.info("_save_preset: auto-scan produced %d subset(s)", len(self._subsets))
+                    logger.info(
+                        "_save_preset: auto-scan produced %d subset(s)",
+                        len(self._subsets),
+                    )
                 else:
-                    logger.warning("_save_preset: auto-scan returned no subsets for %r", src)
+                    logger.warning(
+                        "_save_preset: auto-scan returned no subsets for %r", src
+                    )
+
+        # Auto-scan reg_source_dir if no reg subsets exist
+        has_reg = any(s.get("is_reg") for s in self._subsets)
+        if not has_reg:
+            reg_src = (
+                self._reg_source_dir_widget.text().strip()
+                if hasattr(self, "_reg_source_dir_widget")
+                else ""
+            )
+            if reg_src:
+                logger.info(
+                    "_save_preset: no reg subsets — auto-scanning reg_source_dir=%r",
+                    reg_src,
+                )
+                reg_subsets = scan_source_dir(reg_src, is_reg=True)
+                if reg_subsets:
+                    self._subsets.extend(reg_subsets)
+                    self._rebuild_subset_ui()
+                    logger.info(
+                        "_save_preset: reg auto-scan produced %d subset(s)",
+                        len(reg_subsets),
+                    )
 
         if self._subsets:
-            logger.info("_save_preset: writing %d subset(s) to variant TOML", len(self._subsets))
+            logger.info(
+                "_save_preset: writing %d subset(s) to variant TOML", len(self._subsets)
+            )
             dataset_entry = out.get("datasets")
             if not isinstance(dataset_entry, list):
                 dataset_entry = [{}]
@@ -856,7 +1003,17 @@ class ConfigTab(QWidget):
             if not isinstance(first, dict):
                 first = {}
                 dataset_entry[0] = first
-            _TRAINING_SUBSET_KEYS = {"image_dir", "cache_dir", "num_repeats", "recursive", "is_reg", "class_tokens", "caption_extension", "keep_tokens", "alpha_mask"}
+            _TRAINING_SUBSET_KEYS = {
+                "image_dir",
+                "cache_dir",
+                "num_repeats",
+                "recursive",
+                "is_reg",
+                "class_tokens",
+                "caption_extension",
+                "keep_tokens",
+                "alpha_mask",
+            }
             subsets_list = []
             for i, sub in enumerate(self._subsets):
                 sub_copy = {k: v for k, v in sub.items() if k in _TRAINING_SUBSET_KEYS}
@@ -868,12 +1025,24 @@ class ConfigTab(QWidget):
                 subsets_list.append(sub_copy)
                 logger.debug(
                     "_save_preset: subset[%d] name=%r  image_dir=%r  cache_dir=%r  num_repeats=%d  recursive=%s",
-                    i, sub.get("name"), sub_copy.get("image_dir"), sub_copy.get("cache_dir"),
-                    sub_copy.get("num_repeats"), sub_copy.get("recursive"),
+                    i,
+                    sub.get("name"),
+                    sub_copy.get("image_dir"),
+                    sub_copy.get("cache_dir"),
+                    sub_copy.get("num_repeats"),
+                    sub_copy.get("recursive"),
                 )
             first["subsets"] = subsets_list
+            # Save prior_loss_weight if there are reg subsets
+            has_reg = any(s.get("is_reg") for s in self._subsets)
+            if has_reg and hasattr(self, "_prior_loss_weight_spin"):
+                out["prior_loss_weight"] = self._prior_loss_weight_spin.value()
+            elif not has_reg:
+                out.pop("prior_loss_weight", None)
         else:
-            logger.warning("_save_preset: no subsets to write (source_image_dir may be unset)")
+            logger.warning(
+                "_save_preset: no subsets to write (source_image_dir may be unset)"
+            )
 
         # Extra-args textarea: parse as TOML and merge in. Textarea overrides
         # the form for any duplicate key (it's the more explicit signal).
@@ -903,6 +1072,7 @@ class ConfigTab(QWidget):
         _save(path, out)
 
         from gui.tabs.preprocess_tab import _save_settings
+
         _save_settings({"bucket_families": self.get_enabled_families()})
 
         if extras:
@@ -1050,7 +1220,11 @@ class ConfigTab(QWidget):
         # The spec also tags this command job as *this tab's* preprocess, so
         # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
         chain_train = (
-            {"method": variant, "preset": self._IMPLICIT_PRESET, "methods_subdir": "gui-methods"}
+            {
+                "method": variant,
+                "preset": self._IMPLICIT_PRESET,
+                "methods_subdir": "gui-methods",
+            }
             if getattr(self, "_chain_train_after_preprocess", False)
             else None
         )
@@ -1106,7 +1280,9 @@ class ConfigTab(QWidget):
         # bucket layout (resolutions not in the 4032/4200 table) would be
         # silently skipped/mis-bucketed at train time. Only meaningful when a
         # cache is actually present (decision is True).
-        if decision is True and not confirm_stale_caches(self, cache_dir, enabled_families=self.get_enabled_families()):
+        if decision is True and not confirm_stale_caches(
+            self, cache_dir, enabled_families=self.get_enabled_families()
+        ):
             return
 
         # Resume prompt up-front (before any submit) for BOTH paths. The daemon
@@ -1160,9 +1336,7 @@ class ConfigTab(QWidget):
                 methods_subdir="gui-methods",
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(e))
-            )
+            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
             self._restore_idle_ui()
             return
 
@@ -1231,7 +1405,9 @@ class ConfigTab(QWidget):
         if not replay_log:
             self._stdout_tailer.read_new()  # discard backlog
         self.train_btn.setText(
-            t("train_preprocessing") if kind == "preprocess" else t("train_running_daemon")
+            t("train_preprocessing")
+            if kind == "preprocess"
+            else t("train_running_daemon")
         )
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)

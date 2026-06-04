@@ -211,6 +211,8 @@
         "output_mlp": "输出 MLP",
         "output_adaln": "输出 AdaLN",
         "datasets": "输入数据集",
+        "reg_datasets": "正则化数据集",
+        "prior_loss_weight": "先验损失权重",
         "use_shuffled_caption_variants": "使用打乱的 Caption 变体",
         "caption_dropout_rate": "Caption Dropout 率",
         "caption_extension": "Caption 扩展名",

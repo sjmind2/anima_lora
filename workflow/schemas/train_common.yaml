@@ -185,6 +185,19 @@ groups:
         required: true
         layer: common
         label: "输入数据集"
+      - key: reg_datasets
+        type: dataset_ref
+        required: false
+        layer: common
+        label: "正则化数据集"
+        help: "可选。引用上游预处理阶段的输出作为正则化数据集（防止过拟合）。"
+      - key: prior_loss_weight
+        type: float
+        required: false
+        layer: common
+        default: 1.0
+        label: "先验损失权重"
+        help: "正则化图片的损失权重（1.0 = 等权，更低 = 影响更小）"
       - key: use_shuffled_caption_variants
         type: bool
         required: false

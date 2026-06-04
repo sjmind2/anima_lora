@@ -28,6 +28,7 @@ _NETWORK_MODULE_KWARGS = {
 
 _DATASET_KEYS = {
     "datasets",
+    "reg_datasets",
     "subsets",
     "source_image_dir",
     "drop_lowres_images",
@@ -153,10 +154,11 @@ class TrainExecutor(StageBase):
         if general:
             toml_data["general"] = general
 
-        datasets = resolved_config.get("datasets")
-        if datasets:
+        def _resolve_dataset_refs(
+            refs: list, stage_outputs: dict, *, is_reg: bool = False
+        ) -> list[dict]:
             resolved_datasets = []
-            for ds in datasets:
+            for ds in refs:
                 if isinstance(ds, str):
                     ref_outputs = stage_outputs.get(ds)
                     if not ref_outputs:
@@ -172,17 +174,35 @@ class TrainExecutor(StageBase):
                             if s.get("cache_dir"):
                                 entry["cache_dir"] = s["cache_dir"]
                             entry["num_repeats"] = s.get("num_repeats", 1)
+                            if is_reg:
+                                entry["is_reg"] = True
                             subset_entries.append(entry)
                         dataset_entry["subsets"] = subset_entries
                     else:
                         dataset_dir = ref_outputs.get("dataset_dir", "")
-                        dataset_entry["subsets"] = [
-                            {"image_dir": dataset_dir, "num_repeats": 1}
-                        ]
+                        fallback = {"image_dir": dataset_dir, "num_repeats": 1}
+                        if is_reg:
+                            fallback["is_reg"] = True
+                        dataset_entry["subsets"] = [fallback]
                     resolved_datasets.append(dataset_entry)
                 else:
                     resolved_datasets.append(ds)
-            toml_data["datasets"] = resolved_datasets
+            return resolved_datasets
+
+        all_resolved: list[dict] = []
+
+        datasets = resolved_config.get("datasets")
+        if datasets:
+            all_resolved.extend(_resolve_dataset_refs(datasets, stage_outputs))
+
+        reg_datasets = resolved_config.get("reg_datasets")
+        if reg_datasets:
+            all_resolved.extend(
+                _resolve_dataset_refs(reg_datasets, stage_outputs, is_reg=True)
+            )
+
+        if all_resolved:
+            toml_data["datasets"] = all_resolved
 
         with open(dataset_config_path, "wb") as f:
             tomli_w.dump(toml_data, f)

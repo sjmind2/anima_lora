@@ -357,4 +357,13 @@ STRINGS: dict[str, str] = {
     "bucket_stats": "统计",
     "bucket_stats_tooltip": "扫描图片目录，按桶家族统计图片数量",
     "bucket_stats_no_dir": "请先设置有效的图片目录",
+    # 正则化
+    "reg_source_dir": "正则化源目录",
+    "reg_scan_subsets": "扫描正则",
+    "reg_scan_subsets_tooltip": "扫描正则化源目录的子目录",
+    "reg_subsets_section": "正则化子集",
+    "reg_badge": "正则",
+    "prior_loss_weight": "先验损失权重",
+    "prior_loss_weight_tooltip": "正则化图片的损失权重（1.0 = 等权，更低 = 影响更小）",
+    "reg_scan_no_dir": "未指定正则化源目录或目录为空。",
 }
