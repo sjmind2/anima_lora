@@ -1139,6 +1139,7 @@ def _apply_lycoris_to_model(model, lycoris_data: dict, strength: float) -> int:
             patched += 1
 
     if "lokr" in lycoris_data:
+        lokr_total = len(lycoris_data["lokr"])
         for prefix, mod in lycoris_data["lokr"].items():
             comfy_key = _try_map(prefix)
             if comfy_key is None:
@@ -1181,8 +1182,18 @@ def _apply_lycoris_to_model(model, lycoris_data: dict, strength: float) -> int:
             if scale != 1:
                 diff = diff * scale
 
+            if patched < 3:
+                logger.info(
+                    f"[LyCORIS LoKr] prefix={prefix} -> comfy_key={comfy_key}, "
+                    f"w1_shape={tuple(w1.shape)}, w2_shape={tuple(w2.shape)}, "
+                    f"diff_shape={tuple(diff.shape)}, diff_norm={diff.norm().item():.6f}, "
+                    f"alpha={alpha}, dim={dim}, scale={scale:.6f}"
+                )
             patches[comfy_key] = ("diff", (diff,))
             patched += 1
+        logger.info(
+            f"[LyCORIS LoKr] Total: {patched}/{lokr_total} modules patched"
+        )
 
     if "locon_tucker" in lycoris_data:
         for prefix, mod in lycoris_data["locon_tucker"].items():

@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_folder_list(folder_name, fallback=None):
-    names = folder_paths.get_filename_list(folder_name)
-    if not names and fallback:
-        names = folder_paths.get_filename_list(fallback)
+    names = list(folder_paths.get_filename_list(folder_name) or [])
+    if fallback:
+        seen = set(names)
+        fb_names = folder_paths.get_filename_list(fallback) or []
+        names.extend(n for n in fb_names if n not in seen)
     return names
 
 
@@ -27,6 +29,29 @@ def _get_folder_path(folder_name, filename, fallback=None):
     if p is None and fallback:
         p = folder_paths.get_full_path(fallback, filename)
     return p
+
+
+def _log_model_patches(model, label):
+    """Log model patch state for diagnostics."""
+    patches_count = len(model.patches) if hasattr(model, 'patches') else 0
+    obj_patches_count = len(model.object_patches) if hasattr(model, 'object_patches') else 0
+    # Summarize patch keys
+    patch_keys_summary = {}
+    if hasattr(model, 'patches') and model.patches:
+        for k, v in model.patches.items():
+            patch_type = type(v[0]).__name__ if v else "empty"
+            patch_keys_summary[k] = patch_type
+    obj_keys = list(model.object_patches.keys())[:10] if hasattr(model, 'object_patches') and model.object_patches else []
+    logger.info(
+        f"[Model Diag] {label}: "
+        f"weight_patches={patches_count}, "
+        f"object_patches={obj_patches_count}, "
+        f"obj_patch_keys_sample={obj_keys}"
+    )
+    if patch_keys_summary:
+        # Show first 5 weight patch keys with their types
+        sample = list(patch_keys_summary.items())[:5]
+        logger.info(f"[Model Diag] {label} weight_patch_sample: {sample}")
 
 
 def _try_apply_adapter(model, lora_path, strength_lora, strength_reft):
@@ -118,23 +143,46 @@ class AnimaEfficientLoader:
         clip_path = _get_folder_path("text_encoders", clip_name, "clip")
         vae_path = folder_paths.get_full_path("vae", vae_name)
 
+        logger.info(f"[Efficient Loader] Loading UNet: {unet_name} -> {unet_path}")
         model = comfy.sd.load_diffusion_model(unet_path)
+        logger.info(f"[Efficient Loader] Loading CLIP: {clip_name} -> {clip_path}")
         clip = comfy.sd.load_clip(
             ckpt_paths=[clip_path],
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
             clip_type=comfy.sd.CLIPType.QWEN_IMAGE,
         )
+        logger.info(f"[Efficient Loader] Loading VAE: {vae_name} -> {vae_path}")
         sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
 
         base_model = model.clone()
+        _log_model_patches(base_model, "base_model (clean, no adapter)")
 
         if lora_name != "None":
             lora_path = folder_paths.get_full_path("loras", lora_name)
-            lora_sd = comfy.utils.load_torch_file(lora_path)
-            model, clip = comfy.sd.load_lora_for_models(
-                model, clip, lora_sd, strength_model, strength_clip
+            logger.info(
+                f"[Efficient Loader] Loading LoRA/Adapter: {lora_name} "
+                f"-> {lora_path}, strength_model={strength_model}, "
+                f"strength_clip={strength_clip}"
             )
+            adapter_model = model.clone()
+            if _try_apply_adapter(adapter_model, lora_path, strength_model, strength_model):
+                model = adapter_model
+                logger.info("[Efficient Loader] LoRA loaded via _try_apply_adapter (Anima adapter path)")
+                _log_model_patches(model, "model after _try_apply_adapter")
+            else:
+                lora_sd = comfy.utils.load_torch_file(lora_path)
+                logger.info(
+                    f"[Efficient Loader] LoRA fallback to load_lora_for_models, "
+                    f"sd keys: {len(lora_sd)}, sample keys: {list(lora_sd.keys())[:5]}..."
+                )
+                model, clip = comfy.sd.load_lora_for_models(
+                    model, clip, lora_sd, strength_model, strength_clip
+                )
+                logger.info("[Efficient Loader] LoRA loaded via load_lora_for_models (standard ComfyUI path)")
+                _log_model_patches(model, "model after load_lora_for_models")
+        else:
+            logger.info("[Efficient Loader] No LoRA selected (None)")
 
         positive_encoded = CLIPTextEncode().encode(clip, positive)[0]
         negative_encoded = CLIPTextEncode().encode(clip, negative)[0]
@@ -163,6 +211,16 @@ class AnimaEfficientLoader:
             empty_latent_height,
             batch_size,
         )
+
+        _log_model_patches(base_model, "deps[0] (base_model in Dependencies)")
+        logger.info(
+            f"[Efficient Loader] Dependencies summary: "
+            f"base_model_patches={len(base_model.patches)}, "
+            f"base_model_object_patches={len(base_model.object_patches)}, "
+            f"lora_name={lora_name}, strength_model={strength_model}, "
+            f"strength_clip={strength_clip}"
+        )
+        _log_model_patches(model, "returned MODEL")
 
         return (
             model,
@@ -391,6 +449,11 @@ class AnimaEfficientKSampler:
         return positive_text, negative_text
 
     def _apply_model_mod(self, param_type, param_val, model, clip, deps):
+        logger.info(
+            f"[Model Mod] Applying param_type={param_type}, "
+            f"param_val={repr(param_val)[:100]}"
+        )
+        _log_model_patches(model, f"model BEFORE _apply_model_mod({param_type})")
         if param_type == "anima_adapter":
             adapter_name, lora_str, reft_str = param_val
             adapter_path = folder_paths.get_full_path("loras", adapter_name)
@@ -402,38 +465,59 @@ class AnimaEfficientKSampler:
                     f"(path: {adapter_path}). Check ComfyUI log for details."
                 )
             logger.info(f"[Model Mod] Applied anima_adapter: {adapter_name}")
+            _log_model_patches(new_model, f"model AFTER anima_adapter({adapter_name})")
             return new_model, clip
         elif param_type == "anima_adapter_strength":
             lora_name = deps[3]
             if lora_name != "None":
                 lora_path = folder_paths.get_full_path("loras", lora_name)
                 lora_sd = comfy.utils.load_torch_file(lora_path)
+                logger.info(
+                    f"[Model Mod] adapter_strength: re-loading {lora_name} "
+                    f"with strength={float(param_val)} via load_lora_for_models, "
+                    f"sd_keys={len(lora_sd)}"
+                )
                 new_model, new_clip = comfy.sd.load_lora_for_models(
                     model, clip, lora_sd, float(param_val), deps[5]
                 )
                 logger.info(f"[Model Mod] Applied adapter_strength: {param_val}")
+                _log_model_patches(new_model, f"model AFTER adapter_strength({param_val})")
                 return new_model, new_clip
+            logger.info("[Model Mod] adapter_strength: lora_name is None, skipping")
             return model, clip
         elif param_type == "anima_reft_strength":
             lora_name = deps[3]
             if lora_name != "None":
                 lora_path = folder_paths.get_full_path("loras", lora_name)
                 lora_sd = comfy.utils.load_torch_file(lora_path)
+                logger.info(
+                    f"[Model Mod] reft_strength: re-loading {lora_name} "
+                    f"with reft_strength={float(param_val)} via load_lora_for_models, "
+                    f"sd_keys={len(lora_sd)}"
+                )
                 new_model, new_clip = comfy.sd.load_lora_for_models(
                     model, clip, lora_sd, deps[4], float(param_val)
                 )
                 logger.info(f"[Model Mod] Applied reft_strength: {param_val}")
+                _log_model_patches(new_model, f"model AFTER reft_strength({param_val})")
                 return new_model, new_clip
+            logger.info("[Model Mod] reft_strength: lora_name is None, skipping")
             return model, clip
         elif param_type == "lora":
             lora_name, model_str, clip_str = param_val
             if lora_name != "None":
                 lora_path = folder_paths.get_full_path("loras", lora_name)
                 lora_sd = comfy.utils.load_torch_file(lora_path)
+                logger.info(
+                    f"[Model Mod] lora: loading {lora_name} "
+                    f"model_str={model_str}, clip_str={clip_str}, "
+                    f"sd_keys={len(lora_sd)}"
+                )
                 new_model, new_clip = comfy.sd.load_lora_for_models(
                     model, clip, lora_sd, model_str, clip_str
                 )
                 logger.info(f"[Model Mod] Applied lora: {lora_name}")
+                _log_model_patches(new_model, f"model AFTER lora({lora_name})")
                 return new_model, new_clip
             else:
                 new_model = model.clone()
@@ -441,9 +525,12 @@ class AnimaEfficientKSampler:
                 return new_model, clip
         elif param_type == "checkpoint":
             ckpt_path = _get_folder_path("diffusion_models", param_val, "unet")
+            logger.info(f"[Model Mod] Loading checkpoint: {param_val} -> {ckpt_path}")
             new_model = comfy.sd.load_diffusion_model(ckpt_path)
             logger.info(f"[Model Mod] Loaded checkpoint: {param_val}")
+            _log_model_patches(new_model, f"model AFTER checkpoint({param_val})")
             return new_model, clip
+        logger.info(f"[Model Mod] Unknown param_type={param_type}, no change")
         return model, clip
 
     def _apply_simple_mod(self, param_type, param_val, cur):
@@ -563,6 +650,14 @@ class AnimaEfficientKSampler:
             xy_flip = xyplot.get("XY_flip", "False") == "True"
             ksampler_output_images = xyplot.get("ksampler_output_images", "Plot")
 
+            logger.info(
+                f"[KSampler XY] XY Plot parameters: "
+                f"x_type={x_type}, x_values_count={len(x_values)}, "
+                f"x_labels={self._make_label(x_type, x_values[0]) if x_values else 'none'}..., "
+                f"y_type={y_type}, y_values_count={len(y_values)}"
+            )
+            _log_model_patches(model, "KSampler input MODEL (from Loader)")
+
             images_2d = []
             x_labels = [self._make_label(x_type, v) for v in x_values]
             y_labels = []
@@ -573,6 +668,10 @@ class AnimaEfficientKSampler:
             completed = 0
 
             deps = dependencies
+            logger.info(
+                f"[KSampler XY] deps[0] (base_model): patches={len(deps[0].patches)}, "
+                f"object_patches={len(deps[0].object_patches)}"
+            )
 
             for y_val in y_values:
                 if y_type is not None and y_val is not None:
@@ -611,10 +710,17 @@ class AnimaEfficientKSampler:
                     cur_model = deps[0].clone()
                     cur_clip = deps[1]
                     model_modified = False
-                    if self._is_model_type(x_type):
+                    x_is_model = self._is_model_type(x_type)
+                    y_is_model = y_type is not None and y_val is not None and self._is_model_type(y_type)
+                    logger.info(
+                        f"[KSampler XY] Iteration x={self._make_label(x_type, x_val)}, "
+                        f"y={self._make_label(y_type, y_val) if y_val else 'N/A'}: "
+                        f"x_is_model_type={x_is_model}, y_is_model_type={y_is_model}"
+                    )
+                    if x_is_model:
                         cur_model, cur_clip = self._apply_model_mod(x_type, x_val, cur_model, cur_clip, deps)
                         model_modified = True
-                    if y_type is not None and y_val is not None and self._is_model_type(y_type):
+                    if y_is_model:
                         cur_model, cur_clip = self._apply_model_mod(y_type, y_val, cur_model, cur_clip, deps)
                         model_modified = True
 
@@ -623,9 +729,22 @@ class AnimaEfficientKSampler:
                         logger.info(f"[Phase 3] Re-encoding: text_modified={text_modified}, model_modified={model_modified}")
                         cur["positive"] = CLIPTextEncode().encode(cur_clip, cur_pos_text)[0]
                         cur["negative"] = CLIPTextEncode().encode(cur_clip, cur_neg_text)[0]
+                    if model_modified:
                         cur["model"] = cur_model
                     else:
+                        if text_modified or model_modified:
+                            logger.info(
+                                "[Phase 3] Text-only change, keeping original "
+                                "model (preserves adapter from Loader)"
+                            )
+                        else:
+                            logger.info(
+                                "[Phase 3] No text/model modification, using original "
+                                "model (with adapter from Loader)"
+                            )
                         cur["model"] = model
+
+                    _log_model_patches(cur["model"], f"FINAL model for sampling (x={x_val}, y={y_val})")
 
                     # Phase 4: Simple values + VAE (X then Y)
                     if not self._is_text_type(x_type) and not self._is_model_type(x_type):

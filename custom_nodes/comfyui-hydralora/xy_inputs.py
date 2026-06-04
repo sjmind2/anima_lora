@@ -365,14 +365,15 @@ class AnimaXYInputCheckpoint:
 
     @classmethod
     def INPUT_TYPES(cls):
-        unet_list = folder_paths.get_filename_list(
-            "diffusion_models"
-        ) or folder_paths.get_filename_list("unet")
+        dm_names = list(folder_paths.get_filename_list("diffusion_models") or [])
+        unet_names = folder_paths.get_filename_list("unet") or []
+        seen = set(dm_names)
+        dm_names.extend(n for n in unet_names if n not in seen)
         inputs = {
             "required": {"input_count": ("INT", {"default": 2, "min": 1, "max": 10})}
         }
         for i in range(1, 11):
-            inputs["required"][f"unet_name_{i}"] = (unet_list,)
+            inputs["required"][f"unet_name_{i}"] = (dm_names,)
         return inputs
 
     def xy_input(self, **kwargs):
