@@ -27,58 +27,67 @@
 
 ## 始め方
 
-1行で完了 — [uv](https://astral.sh/uv) が未導入なら自動インストールし、最新リリースを取得して `uv sync` を実行します（git 不要）。インストーラはチェックサム署名付きのリリースアセットとして公開されています：
+### 推奨 — Workflow（ワークフローエンジン）
+
+最も簡単な始め方は、内蔵の **Workflow エンジン** を使うことです — WebUI + CLI マルチステージ学習パイプラインで、リアルタイム進捗とスキーマ駆動フォームを提供します。
+
+```bash
+uv sync                   # 依存関係をインストール（Python 3.13）
+.venv\Scripts\activate    # Windows: 仮想環境を有効化
+# source .venv/bin/activate   # Linux/macOS
+python -m workflow        # Workflow WebUI を起動（http://localhost:8765）
+```
+
+Workflow WebUI がモデルダウンロード、データセット準備、学習、推論までガイドします — すべてブラウザインターフェースから操作可能。
+
+> 初回使用前に HuggingFace 認証を行ってください：`hf auth login`
+
+Workflow の使い方は [docs/guidelines/workflow.ja.md](docs/guidelines/workflow.ja.md) を参照してください。
+
+### その他の入口
+
+<details>
+<summary><b>GUI（PySide6 デスクトップアプリ）</b></summary>
+
+```bash
+make gui                  # 設定エディタ + データセットブラウザ + 学習モニタ
+```
+</details>
+
+<details>
+<summary><b>CLI（make ターゲット）</b></summary>
+
+```bash
+make preprocess           # VAE 互換のリサイズとバリデーション
+make lora                 # または: PRESET=fast_16gb make lora / PRESET=low_vram make lora / make exp-chimera
+make test                 # 最新の学習済み LoRA でサンプル生成
+```
+</details>
+
+<details>
+<summary><b>ワンラインインストーラ（リリースからインストール）</b></summary>
+
+[uv](https://astral.sh/uv) が未導入なら自動インストールし、最新リリースを取得して `uv sync` を実行します（git 不要）。インストーラはチェックサム署名付きのリリースアセットとして公開されています：
 
 ```bash
 # Linux / macOS
-curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh | sh
+curl -LsSf https://github.com/sjmind2/anima_lora/releases/latest/download/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
+irm https://github.com/sjmind2/anima_lora/releases/latest/download/install.ps1 | iex
 ```
 
 `./anima_lora/` にインストールされます（`ANIMA_DIR` で変更可能）。Windows ではデスクトップに **"Anima LoRA GUI"** ショートカットも作成されます。
 
-<details>
-<summary><b>より安全なインストール</b> — スクリプトを事前に確認・検証する場合</summary>
-
-各リリースには `checksums.txt`（インストーラ + ソースアーカイブの SHA-256）が同梱されています。ダウンロードして検証後、実行してください：
-
-```bash
-# Linux / macOS
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt
-grep install.sh checksums.txt | sha256sum -c -    # "install.sh: OK" と表示されることを確認
-less install.sh                                    # 内容を確認
-sh install.sh
-```
-```powershell
-# Windows (PowerShell)
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 -OutFile install.ps1
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt -OutFile checksums.txt
-(Get-FileHash install.ps1 -Algorithm SHA256).Hash.ToLower()   # checksums.txt の値と照合
-notepad install.ps1                                            # 内容を確認
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-</details>
-
-**再現可能な固定バージョンインストール** — `ANIMA_VERSION` を設定すると、最新版ではなく指定タグをインストールします（既知の安定環境が必要な場合に推奨）：
+**再現可能な固定バージョンインストール** — `ANIMA_VERSION` を設定すると、最新版ではなく指定タグをインストールします：
 
 ```bash
 ANIMA_VERSION=v1.4.0 sh install.sh       # または: $env:ANIMA_VERSION='v1.4.0'; irm ... | iex
 ```
 
-その後、認証してモデルをダウンロードします：
-
-```bash
-cd anima_lora
-hf auth login
-make download-models      # DiT + Qwen3 TE + QwenImage VAE（+ マスク・画像条件付け用の SAM3 / MIT / PE）を models/ にダウンロード
-make gui                  # 推奨 — 設定エディタ + データセットブラウザ + 学習モニタ
-```
-
 後からアップデートする場合は `make update` を使用します（リリース tarball のマージ、git 不要）。リポジトリをクローンしたい場合は [セットアップ → 手動](#manual-from-a-clone) を参照してください。
+</details>
 
 ---
 

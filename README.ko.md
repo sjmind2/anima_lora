@@ -19,49 +19,67 @@
 
 ## 시작하기
 
-한 줄이면 됩니다 — [uv](https://astral.sh/uv)가 없으면 설치하고, 최신 릴리스를 받아 `uv sync`까지 실행합니다 (git 불필요). 설치 스크립트는 체크섬으로 검증 가능한 릴리스 에셋으로 배포됩니다:
+### 추천 — Workflow (워크플로 엔진)
+
+가장 쉬운 시작 방법은 내장 **Workflow 엔진**을 사용하는 것입니다 — WebUI + CLI 멀티스테이지 학습 파이프라인으로, 실시간 진행 상황과 스키마 기반 폼을 제공합니다.
 
 ```bash
-# Linux / macOS
-curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh | sh
-```
-```powershell
-# Windows (PowerShell)
-irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
+uv sync                   # 의존성 설치 (Python 3.13)
+.venv\Scripts\activate    # Windows: 가상환경 활성화
+# source .venv/bin/activate   # Linux/macOS
+python -m workflow        # Workflow WebUI 실행 (http://localhost:8765)
 ```
 
-`./anima_lora/`에 설치됩니다 (`ANIMA_DIR`로 경로 변경). Windows에서는 바탕화면에 **"Anima LoRA GUI"** 바로가기도 생성됩니다. 바로가기를 누르면 GUI상에서 모델 다운로드가 가능합니다.
+Workflow WebUI가 모델 다운로드, 데이터셋 준비, 학습, 추론까지 안내합니다 — 모든 것을 브라우저 인터페이스에서 조작할 수 있습니다.
+
+> 처음 사용하기 전에 HuggingFace 인증을 수행하세요: `hf auth login`
+
+Workflow 사용법은 [docs/guidelines/workflow.md](docs/guidelines/workflow.md)을 참고하세요.
+
+### 다른 진입점
 
 <details>
-<summary><b>더 안전한 설치</b> — 실행 전 스크립트 확인 &amp; 검증</summary>
-
-모든 릴리스에는 `checksums.txt`(설치 스크립트 + 소스 아카이브의 SHA-256)가 포함됩니다. 내려받아 검증한 뒤 실행하세요:
+<summary><b>GUI (PySide6 데스크톱 앱)</b></summary>
 
 ```bash
-# Linux / macOS
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt
-grep install.sh checksums.txt | sha256sum -c -    # "install.sh: OK" 가 출력되어야 함
-less install.sh                                    # 내용 확인
-sh install.sh
-```
-```powershell
-# Windows (PowerShell)
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 -OutFile install.ps1
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt -OutFile checksums.txt
-(Get-FileHash install.ps1 -Algorithm SHA256).Hash.ToLower()   # checksums.txt 와 비교
-notepad install.ps1                                           # 내용 확인
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+make gui                  # 설정 에디터 + 데이터셋 브라우저 + 학습 모니터
 ```
 </details>
 
-**재현 가능한 / 고정 설치** — `ANIMA_VERSION`을 지정하면 최신 대신 특정 태그를 설치합니다 (known-good 환경이 필요할 때 권장):
+<details>
+<summary><b>CLI (make 타겟)</b></summary>
+
+```bash
+make preprocess           # VAE 호환 리사이즈 및 검증
+make lora                 # 또는: PRESET=fast_16gb make lora / PRESET=low_vram make lora / make exp-chimera
+make test                 # 최신 학습된 LoRA로 샘플 생성
+```
+</details>
+
+<details>
+<summary><b>원라인 인스톨러 (릴리스에서 설치)</b></summary>
+
+[uv](https://astral.sh/uv)가 없으면 설치하고, 최신 릴리스를 받아 `uv sync`까지 실행합니다 (git 불필요). 설치 스크립트는 체크섬으로 검증 가능한 릴리스 에셋으로 배포됩니다:
+
+```bash
+# Linux / macOS
+curl -LsSf https://github.com/sjmind2/anima_lora/releases/latest/download/install.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://github.com/sjmind2/anima_lora/releases/latest/download/install.ps1 | iex
+```
+
+`./anima_lora/`에 설치됩니다 (`ANIMA_DIR`로 경로 변경). Windows에서는 바탕화면에 **"Anima LoRA GUI"** 바로가기도 생성됩니다.
+
+**재현 가능한 / 고정 설치** — `ANIMA_VERSION`을 지정하면 최신 대신 특정 태그를 설치합니다:
 
 ```bash
 ANIMA_VERSION=v1.4.0 sh install.sh       # 또는: $env:ANIMA_VERSION='v1.4.0'; irm ... | iex
 ```
 
 clone 방식을 선호하시나요? [설치 → 수동 설치](#수동-설치-clone에서) 참고.
+</details>
 
 ---
 

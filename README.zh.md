@@ -27,58 +27,67 @@
 
 ## 快速开始
 
-一行命令 — 自动安装 [uv](https://astral.sh/uv)（如未安装）、获取最新版本并运行 `uv sync`（无需 git）。安装脚本以带校验和签名的发布资产发布：
+### 推荐方式 — Workflow（工作流引擎）
+
+最简单的上手方式是使用内置的 **Workflow 工作流引擎** — 一个 WebUI + CLI 多阶段训练流水线，提供实时进度和表单驱动的配置界面。
+
+```bash
+uv sync                   # 安装依赖（Python 3.13）
+.venv\Scripts\activate    # Windows: 激活虚拟环境
+# source .venv/bin/activate   # Linux/macOS
+python -m workflow        # 启动 Workflow WebUI（http://localhost:8765）
+```
+
+Workflow WebUI 将引导你完成模型下载、数据集准备、训练和推理 — 全部通过浏览器界面操作。
+
+> 首次使用前，请先进行 HuggingFace 认证：`hf auth login`
+
+Workflow 使用详情请参见 [docs/guidelines/workflow.zh.md](docs/guidelines/workflow.zh.md)。
+
+### 其他入口
+
+<details>
+<summary><b>GUI（PySide6 桌面应用）</b></summary>
+
+```bash
+make gui                  # 配置编辑器 + 数据集浏览器 + 训练监控
+```
+</details>
+
+<details>
+<summary><b>CLI（make 命令行）</b></summary>
+
+```bash
+make preprocess           # VAE 兼容的缩放和验证
+make lora                 # 或: PRESET=fast_16gb make lora / PRESET=low_vram make lora / make exp-chimera
+make test                 # 使用最新训练的 LoRA 进行采样生成
+```
+</details>
+
+<details>
+<summary><b>一键安装脚本（从发布版安装）</b></summary>
+
+自动安装 [uv](https://astral.sh/uv)（如未安装）、获取最新版本并运行 `uv sync`（无需 git）。安装脚本以带校验和签名的发布资产发布：
 
 ```bash
 # Linux / macOS
-curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh | sh
+curl -LsSf https://github.com/sjmind2/anima_lora/releases/latest/download/install.sh | sh
 ```
 ```powershell
 # Windows (PowerShell)
-irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
+irm https://github.com/sjmind2/anima_lora/releases/latest/download/install.ps1 | iex
 ```
 
 安装到 `./anima_lora/`（可通过 `ANIMA_DIR` 覆盖）。在 Windows 上还会在桌面创建 **"Anima LoRA GUI"** 快捷方式。
 
-<details>
-<summary><b>更安全的安装方式</b> — 在运行前检查并验证脚本</summary>
-
-每个版本附带 `checksums.txt`（安装脚本和源码归档的 SHA-256）。下载、验证后再运行：
-
-```bash
-# Linux / macOS
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/install.sh
-curl -fLO https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt
-grep install.sh checksums.txt | sha256sum -c -    # 必须输出 "install.sh: OK"
-less install.sh                                    # 阅读脚本内容
-sh install.sh
-```
-```powershell
-# Windows (PowerShell)
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 -OutFile install.ps1
-iwr https://github.com/sorryhyun/anima_lora/releases/latest/download/checksums.txt -OutFile checksums.txt
-(Get-FileHash install.ps1 -Algorithm SHA256).Hash.ToLower()   # 与 checksums.txt 中的值对比
-notepad install.ps1                                            # 阅读脚本内容
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-</details>
-
-**可复现 / 固定版本安装** — 设置 `ANIMA_VERSION` 来安装特定版本而非最新版（需要已知稳定环境时推荐使用）：
+**可复现 / 固定版本安装** — 设置 `ANIMA_VERSION` 来安装特定版本而非最新版：
 
 ```bash
 ANIMA_VERSION=v1.4.0 sh install.sh       # 或: $env:ANIMA_VERSION='v1.4.0'; irm ... | iex
 ```
 
-然后进行认证并下载模型：
-
-```bash
-cd anima_lora
-hf auth login
-make download-models      # 下载 DiT + Qwen3 TE + QwenImage VAE（+ SAM3 / MIT / PE，用于遮罩和图像条件）到 models/
-make gui                  # 推荐 — 配置编辑器 + 数据集浏览器 + 训练监控
-```
-
 后续可通过 `make update` 原地更新（发布归档合并，无需 git）。想克隆仓库？参见 [安装 → 手动](#手动从克隆安装)。
+</details>
 
 ---
 
