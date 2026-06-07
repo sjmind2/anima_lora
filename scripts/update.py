@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Update anima_lora from a GitHub release.
 
-Downloads the release tarball from sorryhyun/anima_lora, extracts it to a
+Downloads the release tarball from sjmind2/anima_lora, extracts it to a
 temp dir, then merges over the working tree using a 3-way reconciliation
 of (baseline / user / new) sha256 hashes:
 
@@ -52,7 +52,7 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 ROOT = Path(__file__).resolve().parent.parent
-REPO = "sorryhyun/anima_lora"
+REPO = "sjmind2/anima_lora"
 MANIFEST_FILE = ROOT / ".anima_release.json"
 BACKUP_ROOT = ROOT / ".anima-update-backups"
 

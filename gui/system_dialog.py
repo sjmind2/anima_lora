@@ -243,7 +243,7 @@ class ModelsDialog(_StreamingDialog):
             )
 
 
-GITHUB_REPO = "sorryhyun/anima_lora"
+GITHUB_REPO = "sjmind2/anima_lora"
 GITHUB_REPO_URL = f"https://github.com/{GITHUB_REPO}"
 GITHUB_ISSUES_URL = f"{GITHUB_REPO_URL}/issues"
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
