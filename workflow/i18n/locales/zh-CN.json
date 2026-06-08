@@ -154,7 +154,7 @@
     },
     "preprocess": {
       "root": { "label": "预处理", "description": "图像缩放 + VAE缓存 + 文本嵌入缓存" },
-      "group": { "advanced": "高级覆盖", "data_source": "数据源", "bucket": "分辨率设置", "filter": "过滤选项" },
+      "group": { "cache": "缓存", "advanced": "高级覆盖", "data_source": "数据源", "bucket": "分辨率设置", "filter": "过滤选项" },
       "field": {
         "pretrained_model_name_or_path": "DiT 模型覆盖",
         "qwen3": "文本编码器覆盖",
@@ -162,14 +162,16 @@
         "source_image_dir": "原始数据集路径",
         "bucket_families": "分辨率分组",
         "drop_lowres_images": "过滤低分辨率图片",
-        "min_pixels": "最小像素数"
+        "min_pixels": "最小像素数",
+        "shared_cache": "共享缓存"
       },
       "help": {
         "pretrained_model_name_or_path": "留空使用全局设置",
         "qwen3": "留空使用全局设置",
         "vae": "留空使用全局设置",
         "source_image_dir": "包含原始图片和 caption 文件的目录",
-        "bucket_families": "选择训练图片的目标分辨率分组。S1/S2 为固定比例，XS~XL 为自然分布。可多选组合。"
+        "bucket_families": "选择训练图片的目标分辨率分组。S1/S2 为固定比例，XS~XL 为自然分布。可多选组合。",
+        "shared_cache": "开启时，同一工作流内相同配置的预处理结果会被复用，避免重复计算"
       },
       "choice_labels": {
         "bucket_families": {
@@ -341,7 +343,9 @@
       "stepFailed": "{step} 失败，退出码 {code}",
       "trainDatasetRefNotFound": "在阶段输出中未找到数据集引用 '{ds}'",
       "commandLabel": "[命令] {cmd}",
-      "trainFailed": "train.py 失败，退出码 {code}"
+      "trainFailed": "train.py 失败，退出码 {code}",
+      "sharedCacheHit": "共享缓存命中，跳过预处理 ({stage_id})",
+      "sharedCacheMismatch": "共享缓存配置不匹配，重新计算预处理 ({stage_id})"
     },
     "logger": {
       "checkpointSaved": "检查点已保存: {path} (epoch {epoch})"

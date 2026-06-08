@@ -20,7 +20,12 @@ from library.anima.text_strategies import (
     TextEncodingStrategy,
     TokenizeStrategy,
 )
-from library.datasets.buckets import BucketBatchIndex, BucketManager
+from library.datasets.buckets import (
+    BUCKET_FAMILIES,
+    CONSTANT_TOKEN_BUCKETS,
+    BucketBatchIndex,
+    BucketManager,
+)
 from library.datasets.image_utils import (
     validate_interpolation_fn,
     IMAGE_TRANSFORMS,
@@ -451,12 +456,36 @@ class BaseDataset(torch.utils.data.Dataset):
                     constant_token_buckets=constant_token_buckets
                 )
 
+        # Build a set of all valid bucket resolutions across ALL families so
+        # that images preprocessed with a different family than the training
+        # default can keep their original resolution.  This is what allows
+        # mixing, e.g., L-family training images with XL-family reg images.
+        all_valid_resos: set = set()
+        for _fname, _fdata in BUCKET_FAMILIES.items():
+            for _w, _h in _fdata["members"]:
+                all_valid_resos.add((_w, _h))
+                if _w != _h:
+                    all_valid_resos.add((_h, _w))
+        for _w, _h in CONSTANT_TOKEN_BUCKETS:
+            all_valid_resos.add((_w, _h))
+
         img_ar_errors = []
         for image_info in self.image_data.values():
             image_width, image_height = image_info.image_size
-            image_info.bucket_reso, image_info.resized_size, ar_error = (
-                self.bucket_manager.select_bucket(image_width, image_height)
-            )
+            img_size = (image_width, image_height)
+
+            if img_size in all_valid_resos:
+                # Image was already resized to a valid bucket resolution
+                # during preprocessing (possibly from a different family).
+                # Use it directly — the latent cache matches this resolution.
+                image_info.bucket_reso = img_size
+                image_info.resized_size = img_size
+                ar_error = 0.0
+                self.bucket_manager.add_if_new_reso(img_size)
+            else:
+                image_info.bucket_reso, image_info.resized_size, ar_error = (
+                    self.bucket_manager.select_bucket(image_width, image_height)
+                )
 
             img_ar_errors.append(abs(ar_error))
 

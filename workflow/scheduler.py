@@ -87,12 +87,18 @@ class WorkflowScheduler:
         return resolved
 
     def _make_executor(self, stage: WorkflowStage, config: dict, run_dir: Path):
-        stage_dir = run_dir / stage.id
-        stage_dir.mkdir(parents=True, exist_ok=True)
         infra = self.wf.infrastructure or {}
         if stage.type == "preprocess":
+            use_shared = config.get("shared_cache", True)
+            if use_shared:
+                stage_dir = self.wf_dir / "shared_cache" / stage.id
+            else:
+                stage_dir = run_dir / stage.id
+            stage_dir.mkdir(parents=True, exist_ok=True)
             return PreprocessExecutor(stage.id, config, stage_dir, infra)
         elif stage.type == "train":
+            stage_dir = run_dir / stage.id
+            stage_dir.mkdir(parents=True, exist_ok=True)
             return TrainExecutor(stage.id, config, stage_dir, infra)
         raise ValueError(t("backend.scheduler.unknownStageType", type=stage.type))
 

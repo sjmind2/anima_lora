@@ -154,7 +154,7 @@
     },
     "preprocess": {
       "root": { "label": "前処理", "description": "画像リサイズ + VAEキャッシュ + テキスト埋め込みキャッシュ" },
-      "group": { "advanced": "高度な上書き", "data_source": "データソース", "bucket": "解像度設定", "filter": "フィルターオプション" },
+      "group": { "cache": "キャッシュ", "advanced": "高度な上書き", "data_source": "データソース", "bucket": "解像度設定", "filter": "フィルターオプション" },
       "field": {
         "pretrained_model_name_or_path": "DiT モデル上書き",
         "qwen3": "テキストエンコーダ上書き",
@@ -162,14 +162,16 @@
         "source_image_dir": "元データセットパス",
         "bucket_families": "解像度グループ",
         "drop_lowres_images": "低解像度画像をフィルタ",
-        "min_pixels": "最小ピクセル数"
+        "min_pixels": "最小ピクセル数",
+        "shared_cache": "共有キャッシュ"
       },
       "help": {
         "pretrained_model_name_or_path": "グローバル設定を使用する場合は空欄",
         "qwen3": "グローバル設定を使用する場合は空欄",
         "vae": "グローバル設定を使用する場合は空欄",
         "source_image_dir": "元画像とキャプションファイルを含むディレクトリ",
-        "bucket_families": "学習画像のターゲット解像度グループを選択。S1/S2は固定比率、XS~XLは自然分布。複数選択可能。"
+        "bucket_families": "学習画像のターゲット解像度グループを選択。S1/S2は固定比率、XS~XLは自然分布。複数選択可能。",
+        "shared_cache": "有効にすると、同じワークフロー内で同じ設定の前処理結果が再利用され、重複計算を回避します"
       },
       "choice_labels": {
         "bucket_families": {
@@ -341,7 +343,9 @@
       "stepFailed": "{step} が終了コード {code} で失敗",
       "trainDatasetRefNotFound": "ステージ出力にデータセット参照 '{ds}' が見つかりません",
       "commandLabel": "[コマンド] {cmd}",
-      "trainFailed": "train.py が終了コード {code} で失敗"
+      "trainFailed": "train.py が終了コード {code} で失敗",
+      "sharedCacheHit": "共有キャッシュヒット、前処理をスキップ ({stage_id})",
+      "sharedCacheMismatch": "共有キャッシュ設定が不一致、前処理を再実行 ({stage_id})"
     },
     "logger": {
       "checkpointSaved": "チェックポイント保存: {path} (epoch {epoch})"

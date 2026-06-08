@@ -3,6 +3,9 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+import hashlib
+import json
+import shutil
 from typing import Any, Callable
 
 from workflow.stages.base import StageBase, StageResult
@@ -39,6 +42,87 @@ def _resolve_default_model(key: str, infra: dict) -> str:
 
 class PreprocessExecutor(StageBase):
     _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts" / "preprocess"
+
+    @staticmethod
+    def _compute_config_hash(config: dict) -> str:
+        """Deterministic hash of config contents, independent of key order."""
+        canonical = json.dumps(config, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _invalidate_shared_cache(self, post_dir: Path, hash_file: Path) -> None:
+        """Delete both cache data and hash snapshot to prevent stale matches."""
+        shutil.rmtree(str(post_dir), ignore_errors=True)
+        hash_file.unlink(missing_ok=True)
+        config_file = hash_file.parent / "config.toml"
+        config_file.unlink(missing_ok=True)
+
+    def _should_skip_shared_cache(self, resolved_config: dict, on_stdout) -> bool:
+        """Check shared cache: return True if preprocessing can be skipped."""
+        post_dir = self.stage_dir / "post_image_dataset"
+        hash_file = self.stage_dir / ".config_hash"
+
+        if not post_dir.exists():
+            # No cache data; also clean up stale hash if present
+            if hash_file.exists():
+                hash_file.unlink(missing_ok=True)
+                config_file = hash_file.parent / "config.toml"
+                config_file.unlink(missing_ok=True)
+            return False
+
+        current_hash = self._compute_config_hash(resolved_config)
+
+        if hash_file.exists():
+            saved_hash = hash_file.read_text(encoding="utf-8").strip()
+            if saved_hash == current_hash:
+                # Verify cache is complete: all subsets must have both .resized and .lora dirs
+                subsets = self.discover_subsets()
+                if subsets and all(
+                    Path(s.image_dir).exists() and Path(s.cache_dir).exists()
+                    for s in subsets
+                ):
+                    if on_stdout:
+                        from workflow.i18n import t
+                        on_stdout(
+                            self.stage_id,
+                            t("backend.stages.sharedCacheHit", stage_id=self.stage_id),
+                        )
+                    return True
+                else:
+                    if on_stdout:
+                        from workflow.i18n import t
+                        on_stdout(
+                            self.stage_id,
+                            t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
+                        )
+                    self._invalidate_shared_cache(post_dir, hash_file)
+                    return False
+            else:
+                if on_stdout:
+                    from workflow.i18n import t
+                    on_stdout(
+                        self.stage_id,
+                        t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
+                    )
+                self._invalidate_shared_cache(post_dir, hash_file)
+        else:
+            # Cache data exists but no hash snapshot — incomplete run, invalidate
+            if on_stdout:
+                from workflow.i18n import t
+                on_stdout(
+                    self.stage_id,
+                    t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
+                )
+            self._invalidate_shared_cache(post_dir, hash_file)
+
+        return False
+
+    def _save_config_snapshot(self, resolved_config: dict) -> None:
+        """Save config.toml and .config_hash for shared cache comparison."""
+        from workflow.config import save_stage_toml
+
+        save_stage_toml(resolved_config, self.stage_dir / "config.toml")
+        hash_val = self._compute_config_hash(resolved_config)
+        (self.stage_dir / ".config_hash").write_text(hash_val, encoding="utf-8")
 
     def prepare_config(self, stage_outputs: dict) -> dict:
         merged = {**self.infrastructure, **self.config}
@@ -140,6 +224,24 @@ class PreprocessExecutor(StageBase):
         stage_outputs: dict | None = None,
     ) -> StageResult:
         try:
+            use_shared = self.config.get("shared_cache", True)
+            resolved_config = self.prepare_config(stage_outputs or {})
+
+            # Shared cache skip check
+            if use_shared and self._should_skip_shared_cache(resolved_config, on_stdout):
+                subsets = self.discover_subsets()
+                dataset_dir = str(self.stage_dir / "post_image_dataset")
+                outputs: dict[str, Any] = {"dataset_dir": dataset_dir}
+                families = self.config.get("bucket_families")
+                if families:
+                    outputs["bucket_families"] = families
+                return StageResult(
+                    success=True,
+                    outputs=outputs,
+                    subsets=subsets,
+                )
+
+            # Run preprocessing pipeline
             for step_name, cmd_builder in [
                 ("resize", self._build_resize_cmd),
                 ("vae", self._build_vae_cmd),
@@ -174,9 +276,13 @@ class PreprocessExecutor(StageBase):
                         error=f"{step_name} failed with exit code {proc.returncode}",
                     )
 
+            # Save config snapshot for shared cache
+            if use_shared:
+                self._save_config_snapshot(resolved_config)
+
             subsets = self.discover_subsets()
             dataset_dir = str(self.stage_dir / "post_image_dataset")
-            outputs: dict[str, Any] = {"dataset_dir": dataset_dir}
+            outputs = {"dataset_dir": dataset_dir}
             families = self.config.get("bucket_families")
             if families:
                 outputs["bucket_families"] = families

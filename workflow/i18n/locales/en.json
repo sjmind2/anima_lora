@@ -154,7 +154,7 @@
     },
     "preprocess": {
       "root": { "label": "Preprocessing", "description": "Image resizing + VAE caching + text embedding caching" },
-      "group": { "advanced": "Advanced Overrides", "data_source": "Data Source", "bucket": "Resolution Settings", "filter": "Filter Options" },
+      "group": { "cache": "Cache", "advanced": "Advanced Overrides", "data_source": "Data Source", "bucket": "Resolution Settings", "filter": "Filter Options" },
       "field": {
         "pretrained_model_name_or_path": "DiT Model Override",
         "qwen3": "Text Encoder Override",
@@ -162,14 +162,16 @@
         "source_image_dir": "Raw Dataset Path",
         "bucket_families": "Resolution Groups",
         "drop_lowres_images": "Filter Low-Resolution Images",
-        "min_pixels": "Minimum Pixels"
+        "min_pixels": "Minimum Pixels",
+        "shared_cache": "Shared Cache"
       },
       "help": {
         "pretrained_model_name_or_path": "Leave empty to use global settings",
         "qwen3": "Leave empty to use global settings",
         "vae": "Leave empty to use global settings",
         "source_image_dir": "Directory containing raw images and caption files",
-        "bucket_families": "Select target resolution groups for training images. S1/S2 are fixed-ratio, XS~XL are natural distributions. Multiple can be combined."
+        "bucket_families": "Select target resolution groups for training images. S1/S2 are fixed-ratio, XS~XL are natural distributions. Multiple can be combined.",
+        "shared_cache": "When enabled, identical preprocessing results are reused within the same workflow to avoid redundant computation"
       },
       "choice_labels": {
         "bucket_families": {
@@ -341,7 +343,9 @@
       "stepFailed": "{step} failed with exit code {code}",
       "trainDatasetRefNotFound": "Dataset reference '{ds}' not found in stage outputs",
       "commandLabel": "[COMMAND] {cmd}",
-      "trainFailed": "train.py failed with exit code {code}"
+      "trainFailed": "train.py failed with exit code {code}",
+      "sharedCacheHit": "Shared cache hit, skipping preprocess ({stage_id})",
+      "sharedCacheMismatch": "Shared cache config mismatch, re-running preprocess ({stage_id})"
     },
     "logger": {
       "checkpointSaved": "checkpoint saved: {path} (epoch {epoch})"

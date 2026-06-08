@@ -3,6 +3,15 @@ label: "预处理"
 description: "图像缩放 + VAE缓存 + 文本嵌入缓存"
 
 groups:
+  - name: cache
+    label: "缓存"
+    fields:
+      - key: shared_cache
+        type: bool
+        required: false
+        default: true
+        label: "共享缓存"
+
   - name: advanced
     label: "高级覆盖"
     collapsed: true
