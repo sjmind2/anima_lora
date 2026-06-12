@@ -258,6 +258,7 @@ _GROUPS = {
         "discrete_flow_shift",
         "use_valid",
         "validation_split_num",
+        "batch_size",
     },
     "Performance": {
         "attn_mode",
@@ -306,7 +307,7 @@ _SKIP = {
 # (e.g. ``use_valid`` toggles a `[[datasets]]` validation_split_num override).
 # The save loop in ConfigTab skips these, and per-key apply helpers handle the
 # structured write.
-_VIRTUAL_KEYS = {"use_valid", "validation_split_num"}
+_VIRTUAL_KEYS = {"use_valid", "validation_split_num", "batch_size"}
 
 # Fields shown under the "Basic" section. Everything else falls under the
 # collapsible "Advanced" section. Picked to cover the knobs a first-time user
@@ -334,6 +335,7 @@ _BASIC = {
     "min_pixels",
     "use_valid",
     "validation_split_num",
+    "batch_size",
 }
 
 
@@ -417,6 +419,17 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     else:
         merged["validation_split_num"] = _base_validation_split_num(base)
         origin["validation_split_num"] = "base"
+
+    # Inject `batch_size` from the [[datasets]] block so users can view / edit
+    # it from the Training section without exposing the full datasets section.
+    variant_bs = _variant_batch_size(meth)
+    if variant_bs is not None:
+        merged["batch_size"] = variant_bs
+        origin["batch_size"] = "method"
+    else:
+        merged["batch_size"] = _base_batch_size(base)
+        origin["batch_size"] = "base"
+
     return merged, origin
 
 
@@ -478,6 +491,35 @@ def _base_validation_split_num(base_data: dict) -> int:
     """Default validation_split_num pulled from configs/base.toml. Falls back
     to 0 when the block / key is missing."""
     return _validation_split_num_from_datasets(base_data.get("datasets")) or 0
+
+
+def _batch_size_from_datasets(datasets: Any) -> Optional[int]:
+    """Pull ``batch_size`` off the first [[datasets]] entry as an int.
+    Returns None when the block is missing or the key isn't set."""
+    if not isinstance(datasets, list) or not datasets:
+        return None
+    first = datasets[0]
+    if not isinstance(first, dict):
+        return None
+    bs = first.get("batch_size")
+    if bs is None:
+        return None
+    try:
+        return int(bs)
+    except (TypeError, ValueError):
+        return None
+
+
+def _variant_batch_size(variant_data: dict) -> Optional[int]:
+    """Return the variant TOML's explicit batch_size override, or None when
+    the variant doesn't touch it."""
+    return _batch_size_from_datasets(variant_data.get("datasets"))
+
+
+def _base_batch_size(base_data: dict) -> int:
+    """Default batch_size pulled from configs/base.toml. Falls back to 1
+    when the block / key is missing."""
+    return _batch_size_from_datasets(base_data.get("datasets")) or 1
 
 
 def apply_validation_choice(

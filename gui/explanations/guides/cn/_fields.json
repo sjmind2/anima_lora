@@ -30,6 +30,7 @@
   "max_train_epochs": "总训练轮数。一轮 = 完整遍历一次数据集。",
   "save_every_n_epochs": "每N轮保存一次检查点。设为max_train_epochs则只保存最终模型。",
   "checkpointing_epochs": "每N轮保存一次可恢复的训练状态。状态文件较大；建议使用比save_every_n_epochs更大的间隔。",
+  "batch_size": "每个训练步处理的样本数量。更高的值能提高 GPU 利用率和训练稳定性，但需要更多显存。等效批次大小 = batch_size × gradient_accumulation_steps。8–16GB 显存建议设为 1；24GB+ 可尝试 2–4。增大 batch_size 通常比增大 gradient_accumulation_steps 更高效。",
   "gradient_accumulation_steps": "更新前累积N步梯度。有效批次大小 = batch_size × accumulation_steps。",
   "use_shuffled_caption_variants": "从文本编码器缓存使用预处理的字幕洗牌变体。当缓存有多个变体时，每个样本随机抽取一个。若未预处理变体，则静默回退到单变体。",
   "caption_dropout_rate": "每个样本丢弃字幕（替换为空文本嵌入）的概率。将LoRA推向无条件偏置 — 适合希望风格无论提示词如何都能应用的风格训练。典型值：角色/概念LoRA为0.0–0.05，风格LoRA为0.1–0.25。过高会模糊提示词驱动的多样性（姿势/构图）。",

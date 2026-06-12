@@ -42,12 +42,54 @@ CAME is the default optimizer in Workflow schemas (`workflow/schemas/train_commo
 - **2D+ parameters**: Factorized update with row/column second moments + residual correction. Same-shape parameters are stacked into batch tensors for efficiency.
 - **1D parameters** (biases, scalars): Unfactored Adam-style update with full `exp_avg_sq`.
 
+## CAME_C — CUDA Accelerated Variant
+
+CAME_C is a C++/CUDA fused-kernel implementation of CAME that replaces all Python-level ATen operations with 8 custom CUDA kernels. It delivers **1.31× faster** training with numerically equivalent results.
+
+### Usage
+
+Set `optimizer_type` to `CAME_C` in your TOML config:
+
+```toml
+optimizer_type = "CAME_C"
+learning_rate = 1.5e-5
+```
+
+Or via `optimizer_args`:
+
+```toml
+optimizer_type = "CAME_C"
+optimizer_args = ["weight_decay=0.01", "betas=0.9,0.999,0.9999"]
+learning_rate = 1.5e-5
+```
+
+CAME_C and CAME share the same API and checkpoint format — switch between them by changing only the `optimizer_type` string.
+
+### Performance
+
+| Metric | CAME (Python) | CAME_C (CUDA) |
+|--------|---------------|----------------|
+| Time per step | 1.358 ms | 1.033 ms |
+| Kernel launches/param | 35+ | 3–6 |
+| Speed ratio | 1.00× | **1.31×** |
+| Loss trajectory RelErr | — | ≤ 6e-08 |
+
+CAME_C uses JIT compilation on first import (~5–10s, cached for the session). No manual build step is required.
+
+### When to use CAME_C vs CAME
+
+- **CAME_C**: Recommended for all single-GPU training. Faster, no numerical downsides.
+- **CAME**: Fallback if CUDA compilation fails or for debugging.
+
+For full technical details, see [came_cpp_extension/README.md](../../library/training/came_cpp_extension/README.md).
+
 ## Comparison with Other Optimizers
 
 | Optimizer | Memory (per param) | Auto LR | Best for | Source |
 |-----------|-------------------|---------|----------|--------|
 | **AdamW** | 2 × full state | No | General purpose, default | `torch.optim` |
 | **CAME** | ~2 × (row+col) state | No | LyCORIS variants, memory-constrained | Built-in (`library/training/came_optimizer.py`) |
+| **CAME_C** | ~2 × (row+col) state | No | Same as CAME, but **1.31× faster** via fused CUDA kernels | Built-in (`library/training/came_cpp_extension/`) |
 | **Adopt_Adv** | Configurable (factored option) | No | Small-batch stability, long training | `adv_optm` package |
 | **Prodigy_Adv** | 2 × full state + D-Adaptation state | **Yes** (set `lr=1.0`) | Unknown optimal LR | `adv_optm` package |
 

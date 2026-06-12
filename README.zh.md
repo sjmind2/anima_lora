@@ -17,6 +17,7 @@
 
 | 功能 | 描述 | 指南 |
 |------|------|------|
+| **CAME_C 优化器** | CAME 的融合 CUDA kernel 实现 — 用 8 个自定义 kernel 替代 35+ ATen 操作，速度提升 1.31 倍 | [docs/guidelines/came.zh.md](docs/guidelines/came.zh.md) |
 | **LoKR** | 低秩 Kronecker 积适配 — 结构化高秩，自适应参数量 | [docs/guidelines/lokr.zh.md](docs/guidelines/lokr.zh.md) |
 | **LoHA** | 低秩 Hadamard 积适配 — 有效秩为 r²，仅需 2× LoRA 参数量 | [docs/guidelines/loha.zh.md](docs/guidelines/loha.zh.md) |
 | **CAME 优化器** | 分解式优化器，替代全矩阵二阶矩 — 显著节省显存 | [docs/guidelines/came.zh.md](docs/guidelines/came.zh.md) |

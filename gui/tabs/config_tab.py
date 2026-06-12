@@ -1044,6 +1044,38 @@ class ConfigTab(QWidget):
                 "_save_preset: no subsets to write (source_image_dir may be unset)"
             )
 
+        # Write batch_size override into [[datasets]][0] if changed from base default.
+        batch_size_w = self._w.get("batch_size")
+        if batch_size_w is not None:
+            from gui import _base_batch_size
+
+            base_bs = _base_batch_size(base)
+            try:
+                bs_val = _read(batch_size_w, base_bs)
+                if isinstance(bs_val, str):
+                    bs_val = int(bs_val)
+            except (TypeError, ValueError):
+                bs_val = base_bs
+            if isinstance(bs_val, int) and bs_val != base_bs:
+                ds_entry = out.get("datasets")
+                if not isinstance(ds_entry, list):
+                    ds_entry = [{}]
+                    out["datasets"] = ds_entry
+                if not ds_entry:
+                    ds_entry.append({})
+                first_ds = ds_entry[0]
+                if not isinstance(first_ds, dict):
+                    first_ds = {}
+                    ds_entry[0] = first_ds
+                first_ds["batch_size"] = bs_val
+            else:
+                # Same as base — strip override
+                ds_entry = out.get("datasets")
+                if isinstance(ds_entry, list) and ds_entry:
+                    first_ds = ds_entry[0]
+                    if isinstance(first_ds, dict):
+                        first_ds.pop("batch_size", None)
+
         # Extra-args textarea: parse as TOML and merge in. Textarea overrides
         # the form for any duplicate key (it's the more explicit signal).
         # Bare backslashes (Windows path paste) break TOML escape parsing —

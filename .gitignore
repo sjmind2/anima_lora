@@ -46,3 +46,4 @@ node_modules/
 workflows/
 .anima_workflow/
 .worktrees/
+.qoder/

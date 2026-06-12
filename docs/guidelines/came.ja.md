@@ -44,12 +44,54 @@ CAME は Workflow スキーマ（`workflow/schemas/train_common.yaml`）のデ�
 - **2D 以上のパラメータ**：行/列の二次モーメント + 残余補正による因子分解更新。同じ形状のパラメータはバッチテンソルにスタックされて効率化されます。
 - **1D パラメータ**（バイアス、スカラー）：因子分解なしの Adam スタイルの更新（フル `exp_avg_sq` を使用）。
 
+## CAME_C — CUDA 高速版
+
+CAME_C は CAME の C++/CUDA フューズドカーネル実装で、Python レイヤーの全 ATen 演算を 8 個のカスタム CUDA カーネルに置き換えます。数値的に等価な結果を維持しながら、**1.31 倍高速**なトレーニングを実現します。
+
+### 使用方法
+
+TOML 設定で `optimizer_type` を `CAME_C` に設定します：
+
+```toml
+optimizer_type = "CAME_C"
+learning_rate = 1.5e-5
+```
+
+`optimizer_args` でパラメータを指定することも可能です：
+
+```toml
+optimizer_type = "CAME_C"
+optimizer_args = ["weight_decay=0.01", "betas=0.9,0.999,0.9999"]
+learning_rate = 1.5e-5
+```
+
+CAME_C と CAME は同じ API とチェックポイント形式を共有しています — `optimizer_type` の変更だけで切り替え可能です。
+
+### パフォーマンス
+
+| 指標 | CAME (Python) | CAME_C (CUDA) |
+|------|---------------|----------------|
+| ステップあたりの時間 | 1.358 ms | 1.033 ms |
+| パラメータあたりのカーネル起動数 | 35+ | 3–6 |
+| 速度比 | 1.00× | **1.31×** |
+| 損失軌跡の相対誤差 | — | ≤ 6e-08 |
+
+CAME_C は初回インポート時に JIT コンパイルを使用します（約 5–10 秒、セッション内キャッシュ）。手動ビルドは不要です。
+
+### CAME_C と CAME の使い分け
+
+- **CAME_C**：すべてのシングル GPU トレーニングに推奨。高速で数値的なデメリットなし。
+- **CAME**：CUDA コンパイルに失敗した場合やデバッグ時のフォールバック。
+
+技術的な詳細は [came_cpp_extension/README.md](../../library/training/came_cpp_extension/README.md) を参照してください。
+
 ## 他のオプティマイザとの比較
 
 | オプティマイザ | メモリ（パラメータあたり） | 自動 LR | 最適な用途 | ソース |
 |---------------|-------------------------|---------|-----------|--------|
 | **AdamW** | 2 × フル状態 | なし | 汎用、デフォルト | `torch.optim` |
 | **CAME** | ~2 × (行+列) 状態 | なし | LyCORIS 系、メモリ制約環境 | 組み込み（`library/training/came_optimizer.py`） |
+| **CAME_C** | ~2 × (行+列) 状態 | なし | CAME と同じ、フューズド CUDA カーネルで **1.31× 高速** | 組み込み（`library/training/came_cpp_extension/`） |
 | **Adopt_Adv** | 設定可能（因子分解オプションあり） | なし | 小バッチ安定性、長期トレーニング | `adv_optm` パッケージ |
 | **Prodigy_Adv** | 2 × フル状態 + D-Adaptation 状態 | **あり**（`lr=1.0` を設定） | 最適 LR が不明な場合 | `adv_optm` パッケージ |
 

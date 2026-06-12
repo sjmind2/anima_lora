@@ -30,6 +30,7 @@
   "max_train_epochs": "学習エポック数の合計。1 エポック = データセットを 1 周。",
   "save_every_n_epochs": "N エポックごとにチェックポイントを保存します。max_train_epochs と同じ値に設定すると最終モデルのみ保存されます。",
   "checkpointing_epochs": "N エポックごとに再開可能な学習状態を保存します。状態ファイルは大きいので save_every_n_epochs より大きい間隔を使用してください。",
+  "batch_size": "1ステップあたりの学習サンプル数。値を大きくするとGPU利用率と学習安定性が向上しますが、VRAM使用量も増加します。実効バッチサイズ = batch_size × gradient_accumulation_steps。8–16GB VRAMでは1、24GB+では2–4を推奨。gradient_accumulation_stepsを増やすよりbatch_sizeを増やす方が一般的に効率的です。",
   "gradient_accumulation_steps": "更新前に N ステップ分の勾配を累積します。有効バッチサイズ = batch_size × accumulation_steps。",
   "use_shuffled_caption_variants": "テキストエンコーダーキャッシュから前処理済みのキャプションシャッフルバリアントを使用します。キャッシュに複数のバリアントがある場合、サンプルごとにランダムに選択されます。バリアントが前処理されていない場合は単一バリアントにサイレントフォールバックします。",
   "caption_dropout_rate": "キャプションをドロップする (空のテキスト埋め込みに置換する) サンプルごとの確率。LoRA を無条件バイアスに向けてプッシュします。スタイル学習 (任意のプロンプトに対してその見た目を適用したい場合) で有効。典型値: キャラクター/コンセプト LoRA では 0.0–0.05、スタイル LoRA (絵柄学習) では 0.1–0.25。高すぎるとプロンプトによるポーズ/構図の多様性が失われる可能性があります。",

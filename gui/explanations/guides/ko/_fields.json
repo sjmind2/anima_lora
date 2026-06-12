@@ -30,6 +30,7 @@
   "max_train_epochs": "총 학습 에폭 수. 1 에폭 = 데이터셋 전체를 1회 순회.",
   "save_every_n_epochs": "N 에폭마다 체크포인트 저장. max_train_epochs와 같게 설정하면 최종 모델만 저장.",
   "checkpointing_epochs": "N 에폭마다 학습 재개 상태 저장. 상태 파일이 크므로 save_every_n_epochs보다 큰 간격 권장.",
+  "batch_size": "학습 스텝당 처리되는 샘플 수입니다. 값을 높이면 GPU 활용도와 학습 안정성이 향상되지만 VRAM 사용량이 증가합니다. 유효 배치 크기 = batch_size × gradient_accumulation_steps. 8–16GB VRAM에서는 1, 24GB+에서는 2–4를 권장합니다. gradient_accumulation_steps를 늘리는 것보다 batch_size를 늘리는 것이 일반적으로 더 효율적입니다.",
   "gradient_accumulation_steps": "N 스텝 동안 그레이디언트 누적 후 업데이트. 실효 배치 크기 = batch_size × accumulation_steps.",
   "use_shuffled_caption_variants": "전처리된 캡션 셔플 변형을 텍스트 인코더 캐시에서 사용. 캐시에 여러 변형이 있으면 샘플당 무작위 선택. 변형이 전처리되지 않았다면 단일 캡션으로 자동 대체.",
   "caption_dropout_rate": "샘플별로 캡션을 비울(빈 텍스트 임베딩으로 대체) 확률. LoRA를 무조건부(unconditional) 방향으로 학습시켜, 프롬프트와 무관하게 항상 적용되는 \"스타일\"을 학습할 때 유리. 일반적: 캐릭터/컨셉 LoRA는 0.0–0.05, 그림체 학습은 0.1–0.25. 너무 높이면 캡션이 담당하던 다양성(포즈/구도)까지 함께 약해짐.",

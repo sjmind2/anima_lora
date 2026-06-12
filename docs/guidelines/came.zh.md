@@ -44,12 +44,54 @@ CAME 是工作流模式（`workflow/schemas/train_common.yaml`）中的默认优
 - **2D+ 参数**：使用行/列二阶矩 + 残差校正的分解更新。相同形状的参数会被堆叠为批量张量以提高效率。
 - **1D 参数**（偏置、标量）：非分解的 Adam 风格更新，使用完整的 `exp_avg_sq`。
 
+## CAME_C — CUDA 加速版本
+
+CAME_C 是 CAME 的 C++/CUDA 融合 kernel 实现，用 8 个自定义 CUDA kernel 替代了所有 Python 层 ATen 操作。训练速度提升 **1.31 倍**，且数值结果完全等价。
+
+### 用法
+
+在 TOML 配置中将 `optimizer_type` 设为 `CAME_C`：
+
+```toml
+optimizer_type = "CAME_C"
+learning_rate = 1.5e-5
+```
+
+通过 `optimizer_args` 传递参数：
+
+```toml
+optimizer_type = "CAME_C"
+optimizer_args = ["weight_decay=0.01", "betas=0.9,0.999,0.9999"]
+learning_rate = 1.5e-5
+```
+
+CAME_C 与 CAME 共享相同的 API 和检查点格式 — 只需修改 `optimizer_type` 即可在两者之间切换。
+
+### 性能
+
+| 指标 | CAME (Python) | CAME_C (CUDA) |
+|------|---------------|----------------|
+| 每步耗时 | 1.358 ms | 1.033 ms |
+| 每参数 kernel 启动数 | 35+ | 3–6 |
+| 速度比 | 1.00× | **1.31×** |
+| 损失轨迹相对误差 | — | ≤ 6e-08 |
+
+CAME_C 首次导入时使用 JIT 编译（约 5–10 秒，会话内缓存）。无需手动构建。
+
+### 何时使用 CAME_C 或 CAME
+
+- **CAME_C**：推荐用于所有单 GPU 训练。速度更快，无数值副作用。
+- **CAME**：CUDA 编译失败或调试时作为回退。
+
+完整技术细节请参见 [came_cpp_extension/README.md](../../library/training/came_cpp_extension/README.md)。
+
 ## 与其他优化器的对比
 
 | 优化器 | 显存（每参数） | 自动学习率 | 最适用场景 | 来源 |
 |--------|---------------|-----------|-----------|------|
 | **AdamW** | 2 × 完整状态 | 否 | 通用场景，默认选择 | `torch.optim` |
 | **CAME** | ~2 × (行+列) 状态 | 否 | LyCORIS 变体，显存受限场景 | 内置 (`library/training/came_optimizer.py`) |
+| **CAME_C** | ~2 × (行+列) 状态 | 否 | 与 CAME 相同，但通过融合 CUDA kernel **快 1.31 倍** | 内置 (`library/training/came_cpp_extension/`) |
 | **Adopt_Adv** | 可配置（含分解选项） | 否 | 小批量稳定性，长训练 | `adv_optm` 包 |
 | **Prodigy_Adv** | 2 × 完整状态 + D-Adaptation 状态 | **是**（设 `lr=1.0`） | 不确定最优学习率时 | `adv_optm` 包 |
 

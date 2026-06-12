@@ -352,6 +352,29 @@ def get_optimizer(args, trainable_params) -> tuple[str, str, object]:
         optimizer_class = CAME
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
+    elif optimizer_type == "CAME_C".lower():
+        try:
+            from library.training.came_cpp_extension import CAME_C
+        except ImportError as e:
+            raise ImportError(
+                f"CAME_C extension not available ({e}). "
+                "Build it first: cd library/training/came_cpp_extension && python setup.py develop"
+            )
+
+        logger.info(f"use CAME_C optimizer (C++ accelerated) | {optimizer_kwargs}")
+        logger.info(
+            "CAME_C: C++ ATen variant — recommended lr is 0.5-0.9x of AdamW lr. "
+            "Same math as CAME with reduced Python dispatch overhead."
+        )
+        optimizer_class = CAME_C
+        try:
+            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"CAME_C initialization failed: {e}. "
+                "Falling back: set optimizer_type = 'CAME' in your config."
+            ) from e
+
     elif optimizer_type == "AdamW".lower():
         if "fused" not in optimizer_kwargs and torch.cuda.is_available():
             optimizer_kwargs["fused"] = True

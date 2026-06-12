@@ -17,6 +17,7 @@ Four things this repo aims to do well:
 
 | Feature | Description | Guide |
 |---------|-------------|-------|
+| **CAME_C optimizer** | Fused CUDA kernel implementation of CAME — 1.31× faster with 8 custom kernels replacing 35+ ATen ops | [docs/guidelines/came.md](docs/guidelines/came.md) |
 | **LoKR** | Low-rank Kronecker product adaptation — structured high-rank with adaptive parameter count | [docs/guidelines/lokr.md](docs/guidelines/lokr.md) |
 | **LoHA** | Low-rank Hadamard product adaptation — effective rank r² with only 2× LoRA parameters | [docs/guidelines/loha.md](docs/guidelines/loha.md) |
 | **CAME optimizer** | Factorized optimizer replacing full-matrix second moments — significant memory savings | [docs/guidelines/came.md](docs/guidelines/came.md) |

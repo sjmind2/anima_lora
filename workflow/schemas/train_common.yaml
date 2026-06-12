@@ -71,6 +71,7 @@ groups:
           - "AdamW8bit"
           - "Lion"
           - "CAME"
+          - "CAME_C"
           - "Prodigy"
           - "Prodigy_Adv"
           - "Adopt_Adv"
@@ -95,6 +96,13 @@ groups:
         layer: common
         default: 1
         label: "梯度累积步数"
+      - key: batch_size
+        type: int
+        required: false
+        layer: common
+        default: 1
+        label: "Batch Size"
+        help: "每个训练步处理的样本数。等效批次大小 = batch_size × gradient_accumulation_steps。增大 batch_size 比增大梯度累积更高效但需要更多显存。"
       - key: max_grad_norm
         type: float
         required: false

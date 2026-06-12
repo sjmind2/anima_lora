@@ -35,6 +35,7 @@ _DATASET_KEYS = {
     "min_pixels",
     "dataset_subsets",
     "general",
+    "batch_size",
 }
 
 _METADATA_KEYS = {
@@ -220,6 +221,12 @@ class TrainExecutor(StageBase):
 
         if all_resolved:
             toml_data["datasets"] = all_resolved
+
+        # Apply batch_size uniformly to all dataset entries
+        batch_size = resolved_config.get("batch_size")
+        if batch_size is not None and all_resolved:
+            for ds_entry in all_resolved:
+                ds_entry["batch_size"] = int(batch_size)
 
         with open(dataset_config_path, "wb") as f:
             tomli_w.dump(toml_data, f)
