@@ -98,6 +98,7 @@ setup(
             sources=[
                 "came_op.cpp",
                 "came_cuda_kernel.cu",
+                "came_cuda_batched.cu",
             ],
             extra_compile_args={
                 "cxx": cxx_flags,

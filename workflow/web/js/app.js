@@ -534,8 +534,64 @@
         }
       }
 
+      // Method-specific architecture fields.  When the user switches method,
+      // stale keys from the *old* method must be removed from the stage config
+      // so they don't leak into the saved TOML (and end up in the train.py
+      // --network_args).  network_dim/network_alpha are shared and kept.
+      var LYCORIS_ONLY_KEYS = [
+        "conv_dim", "conv_alpha", "use_tucker", "use_scalar",
+        "weight_decompose", "lokr_factor", "decompose_both", "full_matrix",
+      ];
+      var LORA_ONLY_KEYS = ["network_dropout"];
+
+      var METHODS_TABLE = [
+        { value: "train_lora", baseType: "lora" },
+        { value: "train_loha", baseType: "lycoris" },
+        { value: "train_locon", baseType: "lycoris" },
+        { value: "train_lokr", baseType: "lycoris" },
+      ];
+      function baseTypeOf(val) {
+        var entry = METHODS_TABLE.find(function(m) { return m.value === val; });
+        return entry ? entry.baseType : "lora";
+      }
+
       function onMethodChange(methodName) {
         currentMethod.value = methodName;
+
+        var sid = selectedStageId.value;
+        if (!sid || !stageConfigs[sid]) return;
+        var cfg = stageConfigs[sid];
+
+        var newBase = baseTypeOf(methodName);
+
+        // Remove stale fields based on the NEW method's baseType.
+        // (We cannot rely on prevMethod because v-model already updated
+        //  currentMethod before @change fires.)
+        if (newBase === "lora") {
+          LYCORIS_ONLY_KEYS.forEach(function(k) { delete cfg[k]; });
+          // scale_weight_norms is shared but lycoris methods auto-set it to
+          // 1.0; LoRA should leave it unset (empty = disabled).
+          delete cfg.scale_weight_norms;
+        } else {
+          LORA_ONLY_KEYS.forEach(function(k) { delete cfg[k]; });
+        }
+
+        // Remove method-exclusive keys from sibling lycoris methods.
+        var methodKey = methodName.replace(/^train_/, "");
+        if (methodKey !== "lokr") {
+          ["lokr_factor", "decompose_both", "full_matrix"].forEach(function(k) {
+            delete cfg[k];
+          });
+        }
+
+        // Set network_type for the new method.
+        if (newBase === "lycoris") {
+          cfg.network_type = methodKey;
+        } else {
+          if (cfg.network_type && cfg.network_type !== "lora") {
+            delete cfg.network_type;
+          }
+        }
       }
 
       function toggleWorkflowMenu() {

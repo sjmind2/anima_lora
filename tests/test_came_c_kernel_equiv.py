@@ -270,5 +270,208 @@ class TestCAMECKernelEquivalence:
             )
 
 
+class TestCAMECBatchedEquivalence:
+    """Test batched (shape-grouped) path vs single-param path.
+
+    Strategy: put each param in its own param_group for single-path,
+    all params in one group for batched-path. The math is identical;
+    only kernel launch strategy differs.
+    """
+
+    @staticmethod
+    def _make_paired(n, shape, dtype=torch.bfloat16, seed=42):
+        """Create (params_single, params_batched, opt_single, opt_batched)."""
+        torch.manual_seed(seed)
+        refs = [torch.randn(shape, device="cuda", dtype=dtype) for _ in range(n)]
+        params_s = [r.clone().requires_grad_(True) for r in refs]
+        params_b = [r.clone().requires_grad_(True) for r in refs]
+
+        opt_s = CAME_C(
+            [{"params": [p]} for p in params_s],
+            lr=1e-4, betas=(0.9, 0.999, 0.9999),
+        )
+        opt_b = CAME_C(params_b, lr=1e-4, betas=(0.9, 0.999, 0.9999))
+        return params_s, params_b, opt_s, opt_b
+
+    @staticmethod
+    def _assign_grads(params, seed=100):
+        """Assign identical random gradients."""
+        torch.manual_seed(seed)
+        for p in params:
+            p.grad = torch.randn_like(p)
+
+    @staticmethod
+    def _compare(ps_list, pb_list, opt_s, opt_b, atol=1e-6, rtol=1e-5):
+        """Compare params and states between single and batched paths."""
+        for i, (ps, pb) in enumerate(zip(ps_list, pb_list)):
+            torch.testing.assert_close(
+                ps.data.to(torch.float32), pb.data.to(torch.float32),
+                atol=atol, rtol=rtol,
+                msg=f"Param {i} mismatch",
+            )
+            # Compare states
+            ss = opt_s.state[ps]
+            sb = opt_b.state[pb]
+            for key in ("exp_avg", "exp_avg_sq_row", "exp_avg_sq_col",
+                        "exp_avg_res_row", "exp_avg_res_col", "exp_avg_sq"):
+                if key in ss and key in sb:
+                    torch.testing.assert_close(
+                        ss[key], sb[key],
+                        atol=atol, rtol=rtol,
+                        msg=f"State[{key}] mismatch for param {i}",
+                    )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_factored_wide(self):
+        """8 wide matrices (32, 2048) — batched vs single."""
+        ps, pb, os_, ob = self._make_paired(8, (32, 2048))
+        self._assign_grads(ps, seed=100)
+        self._assign_grads(pb, seed=100)
+        os_.step()
+        ob.step()
+        self._compare(ps, pb, os_, ob)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_factored_tall(self):
+        """8 tall matrices (2048, 32) — batched vs single."""
+        ps, pb, os_, ob = self._make_paired(8, (2048, 32))
+        self._assign_grads(ps, seed=200)
+        self._assign_grads(pb, seed=200)
+        os_.step()
+        ob.step()
+        self._compare(ps, pb, os_, ob)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_factored_small(self):
+        """8 small matrices (64, 32) — typical LoKR shapes."""
+        ps, pb, os_, ob = self._make_paired(8, (64, 32))
+        self._assign_grads(ps, seed=300)
+        self._assign_grads(pb, seed=300)
+        os_.step()
+        ob.step()
+        self._compare(ps, pb, os_, ob)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_unfactored(self):
+        """8 1D params (512,) — batched vs single."""
+        ps, pb, os_, ob = self._make_paired(8, (512,))
+        self._assign_grads(ps, seed=400)
+        self._assign_grads(pb, seed=400)
+        os_.step()
+        ob.step()
+        self._compare(ps, pb, os_, ob)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_fp32_params(self):
+        """Batched path with fp32 params (no dtype conversion)."""
+        ps, pb, os_, ob = self._make_paired(8, (64, 128), dtype=torch.float32)
+        self._assign_grads(ps, seed=500)
+        self._assign_grads(pb, seed=500)
+        os_.step()
+        ob.step()
+        self._compare(ps, pb, os_, ob, atol=1e-7, rtol=1e-6)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_multi_step(self):
+        """50-step trajectory — batched vs single should stay identical."""
+        ps, pb, os_, ob = self._make_paired(8, (32, 256))
+        for step in range(50):
+            self._assign_grads(ps, seed=600 + step)
+            self._assign_grads(pb, seed=600 + step)
+            os_.step()
+            ob.step()
+        self._compare(ps, pb, os_, ob)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_mixed_shapes(self):
+        """Multiple shape groups in one step — simulates real DiT."""
+        torch.manual_seed(42)
+        shapes = [(32, 2048), (32, 1024), (2048, 32), (6144, 32), (64, 32)]
+        refs_s = {}
+        refs_b = {}
+        for shp in shapes:
+            refs_s[shp] = [torch.randn(*shp, device="cuda", dtype=torch.bfloat16,
+                                        requires_grad=True) for _ in range(4)]
+            refs_b[shp] = [p.detach().clone().requires_grad_(True)
+                           for p in refs_s[shp]]
+
+        all_s = [p for shp in shapes for p in refs_s[shp]]
+        all_b = [p for shp in shapes for p in refs_b[shp]]
+        opt_s = CAME_C([{"params": [p]} for p in all_s], lr=1e-4)
+        opt_b = CAME_C(all_b, lr=1e-4)
+
+        # Assign identical gradients via separate seeded passes
+        torch.manual_seed(700)
+        for p in all_s:
+            p.grad = torch.randn_like(p)
+        torch.manual_seed(700)
+        for p in all_b:
+            p.grad = torch.randn_like(p)
+
+        opt_s.step()
+        opt_b.step()
+
+        flat_s = [p for shp in shapes for p in refs_s[shp]]
+        flat_b = [p for shp in shapes for p in refs_b[shp]]
+        self._compare(flat_s, flat_b, opt_s, opt_b)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_state_dict_roundtrip(self):
+        """Checkpoint save/load — batched path must recover correctly.
+
+        PyTorch's load_state_dict casts state tensors to the param dtype (bf16),
+        causing precision loss. This is standard PyTorch behavior, not a bug.
+        We use bf16-appropriate tolerances for the post-roundtrip comparison.
+        """
+        ps, pb, os_, ob = self._make_paired(6, (32, 128))
+        self._assign_grads(ps, seed=800)
+        self._assign_grads(pb, seed=800)
+        os_.step()
+        ob.step()
+
+        # Save batched optimizer state
+        sd = ob.state_dict()
+        # Create fresh optimizer and load
+        pb2 = [p.detach().clone().requires_grad_(True) for p in pb]
+        # Copy param data from pb to pb2
+        for src, dst in zip(pb, pb2):
+            dst.data.copy_(src.data)
+        ob2 = CAME_C(pb2, lr=1e-4, betas=(0.9, 0.999, 0.9999))
+        ob2.load_state_dict(sd)
+
+        # Step both single and loaded-batched
+        self._assign_grads(ps, seed=801)
+        self._assign_grads(pb2, seed=801)
+        os_.step()
+        ob2.step()
+
+        # load_state_dict casts fp32 state → bf16 (param dtype), losing precision.
+        # Use bf16-level tolerance for this comparison.
+        self._compare(ps, pb2, os_, ob2, atol=1e-3, rtol=1e-2)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_batched_single_param_fallback(self):
+        """Singleton shape group falls back to single-param path."""
+        torch.manual_seed(42)
+        p_s = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        p_b = p_s.detach().clone().requires_grad_(True)
+
+        # Single group with 1 param → singleton → single-param path
+        opt_s = CAME_C([p_s], lr=1e-4)
+        # Group with 1 param → also singleton
+        opt_b = CAME_C([p_b], lr=1e-4)
+
+        p_s.grad = torch.randn_like(p_s)
+        p_b.grad = p_s.grad.clone()
+
+        opt_s.step()
+        opt_b.step()
+
+        torch.testing.assert_close(
+            p_s.data.to(torch.float32), p_b.data.to(torch.float32),
+            atol=1e-6, rtol=1e-5,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

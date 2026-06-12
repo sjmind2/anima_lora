@@ -138,6 +138,48 @@ class KronLinearTwoStageFn(torch.autograd.Function):
         )
 
 
+# ============================================================================
+# Dynamo-compatible delta functions — standard torch ops only, no
+# autograd.Function.  Used when torch.compile is active so Dynamo can
+# trace through the Kronecker computation without graph breaks.
+# ============================================================================
+
+def _kron1_delta(x, w1, w2, scalar):
+    """Single-stage Kronecker delta via standard torch ops."""
+    out_l, in_m = w1.shape
+    out_k, in_n = w2.shape
+    leading = x.shape[:-1]
+    x_f = x.float().reshape(-1, in_m * in_n)
+    X = x_f.reshape(x_f.shape[0], in_m, in_n)
+    temp = X @ w2.float().t()
+    result = torch.einsum("pr,brk->bpk", w1.float(), temp)
+    out = (result.reshape(x_f.shape[0], out_l * out_k) * scalar).to(x.dtype)
+    return out.reshape(*leading, out_l * out_k)
+
+
+def _kron2_delta(x, w1_a, w1_b, w2_a, w2_b, scalar):
+    """Two-stage Kronecker delta via standard torch ops."""
+    r1 = w1_b.shape[0]
+    r2 = w2_b.shape[0]
+    in_m = w1_b.shape[1]
+    in_n = w2_b.shape[1]
+    in_m_a = w1_a.shape[1]
+    in_n_a = w2_a.shape[1]
+    out_l_a = w1_a.shape[0]
+    out_k_a = w2_a.shape[0]
+    leading = x.shape[:-1]
+    x_f = x.float().reshape(-1, in_m * in_n)
+    X = x_f.reshape(x_f.shape[0], in_m, in_n)
+    temp1 = X @ w2_b.float().t()
+    result1 = torch.einsum("pr,brk->bpk", w1_b.float(), temp1)
+    z = result1.reshape(x_f.shape[0], r1 * r2)
+    Z = z.reshape(x_f.shape[0], in_m_a, in_n_a)
+    temp2 = Z @ w2_a.float().t()
+    result2 = torch.einsum("pr,brk->bpk", w1_a.float(), temp2)
+    out = (result2.reshape(x_f.shape[0], out_l_a * out_k_a) * scalar).to(x.dtype)
+    return out.reshape(*leading, out_l_a * out_k_a)
+
+
 class LokrModule(BaseLoRAModule):
     supports_conv2d = True
 
@@ -494,15 +536,26 @@ class LokrModule(BaseLoRAModule):
                 self.org_module_ref[0].groups,
             )
         else:
+            _compiling = torch.compiler.is_compiling()
             if not self.use_w1 and not self.use_w2:
-                delta = KronLinearTwoStageFn.apply(
-                    x,
-                    self.lokr_w1_a,
-                    self.lokr_w1_b,
-                    self.lokr_w2_a,
-                    self.lokr_w2_b,
-                    self.scalar * self.scale,
-                )
+                if _LOKR_CUDA and not _compiling:
+                    delta = KronLinearTwoStageFn.apply(
+                        x,
+                        self.lokr_w1_a,
+                        self.lokr_w1_b,
+                        self.lokr_w2_a,
+                        self.lokr_w2_b,
+                        self.scalar * self.scale,
+                    )
+                else:
+                    delta = _kron2_delta(
+                        x,
+                        self.lokr_w1_a,
+                        self.lokr_w1_b,
+                        self.lokr_w2_a,
+                        self.lokr_w2_b,
+                        self.scalar * self.scale,
+                    )
             else:
                 if self.use_w1:
                     w1 = self.lokr_w1
@@ -512,7 +565,14 @@ class LokrModule(BaseLoRAModule):
                     w2 = self.lokr_w2
                 else:
                     w2 = self.lokr_w2_a @ self.lokr_w2_b
-                delta = KronLinearFn.apply(x, w1, w2, self.scalar * self.scale)
+                if _LOKR_CUDA and not _compiling:
+                    delta = KronLinearFn.apply(
+                        x, w1, w2, self.scalar * self.scale
+                    )
+                else:
+                    delta = _kron1_delta(
+                        x, w1, w2, self.scalar * self.scale
+                    )
             if self.rank_dropout is not None and self.training:
                 drop = (
                     torch.rand(delta.shape[-1], device=x.device) > self.rank_dropout
@@ -600,3 +660,27 @@ class LokrModule(BaseLoRAModule):
         if self.wd:
             destination["dora_scale"] = self.dora_scale
         return destination
+
+
+# ============================================================================
+# CUDA kernel acceleration — conditionally override the autograd Functions.
+#
+# When the extension loads, KronLinearFn / KronLinearTwoStageFn are replaced
+# by the CUDA-accelerated versions. The fallback extension __init__.py imports
+# the original classes from THIS module when CUDA is unavailable, so the
+# circular import is handled by the extension side (it only imports during
+# fallback, which happens after this module is fully loaded).
+# ============================================================================
+
+# Save pure-PyTorch implementations for benchmarking / fallback access
+_KronLinearFn_PyTorch = KronLinearFn
+_KronLinearTwoStageFn_PyTorch = KronLinearTwoStageFn
+
+try:
+    from networks.lora_modules.lokr_cpp_extension import (
+        KronLinearFnCUDA as KronLinearFn,
+        KronLinearTwoStageFnCUDA as KronLinearTwoStageFn,
+        _LOKR_KERNEL_AVAILABLE as _LOKR_CUDA,
+    )
+except Exception:
+    _LOKR_CUDA = False

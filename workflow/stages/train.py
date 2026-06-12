@@ -17,6 +17,7 @@ _NETWORK_MODULE_KWARGS = {
     "decompose_both",
     "use_tucker",
     "use_scalar",
+    "use_custom_down_autograd",
     "block_lr",
     "down_lr_weight",
     "mid_lr_weight",
@@ -80,6 +81,7 @@ class TrainExecutor(StageBase):
     _AUTO_DEFAULTS = {
         "network_module": "networks.lora_anima",
         "network_train_unet_only": True,
+        "use_custom_down_autograd": "True",
         "mixed_precision": "bf16",
         "save_precision": "bf16",
         "attn_mode": "flash",
