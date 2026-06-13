@@ -416,7 +416,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help=(
             "Use Selective Activation Checkpointing (PyTorch 2.12+). Saves "
             "expensive attention ops and recomputes cheap ops during backward, "
-            "reducing GC recompute overhead by ~15-25%. Requires "
+            "reducing GC recompute overhead by ~15-25%%. Requires "
             "--gradient_checkpointing and --torch_compile. Incompatible with "
             "--unsloth_offload_checkpointing."
         ),
