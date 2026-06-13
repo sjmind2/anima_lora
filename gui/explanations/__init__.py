@@ -22,6 +22,7 @@ _GUIDES_DIR = Path(__file__).parent / "guides"
 
 # ── HTML guide loader ──────────────────────────────────────────
 
+
 @functools.lru_cache(maxsize=None)
 def _read_guide(name: str, lang: str) -> str:
     path = _GUIDES_DIR / lang / f"{name}.html"
@@ -35,6 +36,7 @@ def _guide(name: str) -> str:
 
 
 # ── JSON field-help loaders ────────────────────────────────────
+
 
 @functools.lru_cache(maxsize=None)
 def _read_fields(lang: str) -> dict[str, str]:
@@ -84,8 +86,29 @@ def preprocess_guide() -> str:
 # Methods that can't be baked into a plain DiT via scripts/merge_to_dit.py
 # (router is layer-local / hook-only / not a weight delta) — render the
 # "not mergeable" callout above their guide.
-_NOT_MERGEABLE = frozenset({"postfix", "hydralora", "reft", "fera", "loha", "locon", "lokr"})
-_KNOWN_METHODS = frozenset({"lora", "tlora", "postfix", "hydralora", "reft", "fera", "chimera", "ip_adapter", "easycontrol", "loha", "locon", "lokr"})
+_NOT_MERGEABLE = frozenset(
+    {"postfix", "hydralora", "reft", "fera", "loha", "locon", "lokr", "chimera", "soft_tokens"}
+)
+_KNOWN_METHODS = frozenset(
+    {
+        "lora",
+        "tlora",
+        "postfix",
+        "hydralora",
+        "reft",
+        "fera",
+        "chimera",
+        "ip_adapter",
+        "soft_tokens",
+        "spd",
+        "turbo",
+        "easycontrol",
+        "colorize",
+        "loha",
+        "locon",
+        "lokr",
+    }
+)
 
 
 def method_guide(method: str) -> str | None:
@@ -97,3 +120,15 @@ def method_guide(method: str) -> str | None:
         parts.append(_guide("_not_mergeable"))
     parts.append(_guide(method))
     return "".join(parts)
+
+
+def method_overview(method: str) -> str | None:
+    """Translated method guide body *without* the Apply / not-mergeable chrome.
+
+    For surfaces that have no Apply button (the distill/methods tab for
+    ``spd`` / ``turbo``) and just want the localized overview. Returns None
+    if no guide is registered, so callers can fall back to their own text.
+    """
+    if method not in _KNOWN_METHODS:
+        return None
+    return _guide(method)

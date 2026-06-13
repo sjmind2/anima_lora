@@ -19,7 +19,12 @@ import psutil
 import pytest
 
 from scripts.daemon import config, gpu, jobs, proc
+
+# Bound at import time so tests that monkeypatch the client module's attribute
+# can still build a real (dead) client without recursing into their own patch.
+from scripts.daemon.client import DaemonClient as _RealDaemonClient
 from scripts.daemon.manager import JobManager
+from scripts.daemon.mcp import MCPServer
 from scripts.daemon.server import serve
 from scripts.tasks._common import build_method_args
 
@@ -185,9 +190,7 @@ def test_cli_queue_submits_instead_of_launching(daemon, monkeypatch):
 
     monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
     launched = []
-    monkeypatch.setattr(
-        _common, "accelerate_launch", lambda *a: launched.append(a)
-    )
+    monkeypatch.setattr(_common, "accelerate_launch", lambda *a: launched.append(a))
 
     _common.train("tlora", ["--queue"], methods_subdir="gui-methods")
 
@@ -230,6 +233,89 @@ def test_stop_running_job(daemon):
     assert _wait_until(lambda: cl.get(jid)["state"] == "stopped", timeout=10)
     # tree torn down → the training pid is gone
     assert _wait_until(lambda: not psutil.pid_exists(pid), timeout=5)
+
+
+def test_stop_queued_job_finalizes_immediately(daemon):
+    """Cancelling a job that's still queued behind a running one finalizes it
+    *now* (not lazily when the worker eventually dequeues it), so a UI watching
+    the job list sees it leave the queue right away."""
+    cl, _ = daemon
+    # j1 holds the worker for a while; j2 stays queued behind it.
+    j1 = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    j2 = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    assert _wait_until(lambda: cl.get(j1)["state"] == "running", timeout=10)
+    assert cl.get(j2)["state"] == "queued"
+
+    cl.stop(j2)
+    # Finalized immediately while j1 is still running — no need to wait for the
+    # worker to reach j2.
+    assert _wait_until(lambda: cl.get(j2)["state"] == "stopped", timeout=3)
+    assert cl.get(j1)["state"] == "running"  # the running job is untouched
+
+    # The stale FIFO entry is harmless: when the worker eventually dequeues j2's
+    # id it skips it (state != queued), never relaunching it.
+    cl.stop(j1)
+    assert _wait_until(lambda: cl.get(j1)["state"] == "stopped", timeout=10)
+    time.sleep(0.5)
+    assert cl.get(j2)["state"] == "stopped"
+
+
+def test_queue_hold_then_start(daemon):
+    """A job submitted with ``start=False`` is enqueued but *held* (the queue is
+    paused — health reflects it), and only runs once ``start_queue`` resumes it.
+    This is the GUI "add to queue, don't start now" → "Start Queue" flow."""
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 1.0}, start=False)["job_id"]
+
+    assert cl.health()["paused"] is True
+    # Held: it stays queued and does not start on its own.
+    assert _wait_until(lambda: cl.get(jid)["state"] == "queued", timeout=2)
+    time.sleep(0.7)
+    assert cl.get(jid)["state"] == "queued"  # still not launched
+
+    cl.start_queue()
+    assert cl.health()["paused"] is False
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+
+def test_queue_start_true_flushes_held_backlog(daemon):
+    """``start=True`` (the main Train/Run button) resumes a paused queue, so a
+    job held earlier via ``start=False`` runs too."""
+    cl, _ = daemon
+    held = cl.submit(method="lora", overrides={"duration": 1.0}, start=False)["job_id"]
+    assert cl.health()["paused"] is True
+
+    run_now = cl.submit(method="lora", overrides={"duration": 1.0}, start=True)[
+        "job_id"
+    ]
+    assert cl.health()["paused"] is False
+    # Both drain in FIFO order once the gate opens.
+    assert _wait_until(lambda: cl.get(held)["state"] == "done", timeout=15)
+    assert _wait_until(lambda: cl.get(run_now)["state"] == "done", timeout=15)
+    assert cl.get(run_now)["started_at"] >= cl.get(held)["ended_at"] - 0.5
+
+
+def test_pause_does_not_interrupt_running_job(daemon):
+    """Pausing the queue holds the *next* launch but never stops a job already
+    running."""
+    cl, _ = daemon
+    running = cl.submit(method="lora", overrides={"duration": 60.0}, start=True)[
+        "job_id"
+    ]
+    queued = cl.submit(method="lora", overrides={"duration": 1.0})["job_id"]
+    assert _wait_until(lambda: cl.get(running)["state"] == "running", timeout=10)
+
+    cl.pause_queue()
+    assert cl.health()["paused"] is True
+    assert cl.get(running)["state"] == "running"  # untouched
+
+    cl.stop(running)
+    assert _wait_until(lambda: cl.get(running)["state"] == "stopped", timeout=10)
+    # The queued one stays held while paused — it must not advance.
+    time.sleep(0.7)
+    assert cl.get(queued)["state"] == "queued"
+    cl.start_queue()
+    assert _wait_until(lambda: cl.get(queued)["state"] == "done", timeout=15)
 
 
 def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
@@ -296,6 +382,8 @@ def test_command_job_build_cmd():
     assert "train.py" not in cmd
     assert env["CAPTION_SHUFFLE_VARIANTS"] == "7"
     assert env["PYTHONUNBUFFERED"] == "1"
+    # tqdm throttled so stdout.log stays tail-readable (redraws every 10s, not 0.1s)
+    assert env["TQDM_MININTERVAL"] == "10"
 
 
 def test_command_job_loads_with_train_default():
@@ -340,7 +428,10 @@ def test_command_job_end_to_end(real_cmd_daemon):
     cl, _ = real_cmd_daemon
     resp = cl.submit_command(
         label="preprocess",
-        argv=["-c", "import os;print('shuf=' + os.environ['CAPTION_SHUFFLE_VARIANTS'])"],
+        argv=[
+            "-c",
+            "import os;print('shuf=' + os.environ['CAPTION_SHUFFLE_VARIANTS'])",
+        ],
         extra_env={"CAPTION_SHUFFLE_VARIANTS": "7"},
     )
     jid = resp["job_id"]
@@ -403,6 +494,215 @@ def test_serve_defers_to_a_live_sibling_daemon(daemon):
         serve_with_fallback(JobManager.__new__(JobManager), port=port)
 
 
+# --------------------------------------------------------------------------
+# MCP stdio bridge (scripts/daemon/mcp.py)
+# --------------------------------------------------------------------------
+
+
+def _mcp_for(cl):
+    """A bridge wired to an in-process daemon client (no pidfile discovery)."""
+    return MCPServer(client_factory=lambda: cl, ensure=lambda: cl)
+
+
+def _call_tool(srv, name, arguments=None, msg_id=1):
+    resp = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}},
+        }
+    )
+    result = resp["result"]
+    payload = json.loads(result["content"][0]["text"])
+    return result, payload
+
+
+def _dead_client():
+    """A client pointed at a port nothing listens on (health → None fast)."""
+    return _RealDaemonClient(port=1)
+
+
+def test_mcp_initialize_and_tools_list():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    resp = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+        }
+    )
+    res = resp["result"]
+    assert res["protocolVersion"] == "2025-06-18"
+    assert "tools" in res["capabilities"]
+    # notifications get no response
+    assert srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+
+    tools = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in tools["result"]["tools"]}
+    assert {
+        "submit_training",
+        "submit_command",
+        "list_jobs",
+        "get_job",
+        "stop_job",
+        "tail_log",
+        "pause_queue",
+        "start_queue",
+        "health",
+        "shutdown",
+    } <= names
+    assert "tail_logs" not in names  # SSE endpoint replaced, not registered
+    for t in tools["result"]["tools"]:
+        assert t["inputSchema"]["type"] == "object"
+
+
+def test_mcp_unknown_method_and_tool():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    resp = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "nope/nope"})
+    assert resp["error"]["code"] == -32601
+    result = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "no_such_tool", "arguments": {}},
+        }
+    )["result"]
+    assert result["isError"] is True
+
+
+def test_mcp_daemon_down_is_reported_not_spawned():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    # health degrades gracefully…
+    result, payload = _call_tool(srv, "health")
+    assert result["isError"] is False
+    assert payload["up"] is False
+    # …while other passive tools error with a hint instead of booting a daemon
+    result = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "list_jobs", "arguments": {}},
+        }
+    )["result"]
+    assert result["isError"] is True
+    assert "no daemon is running" in result["content"][0]["text"]
+
+
+def test_mcp_submit_train_get_stop_roundtrip(daemon):
+    cl, _ = daemon
+    srv = _mcp_for(cl)
+
+    result, payload = _call_tool(
+        srv, "submit_training", {"method": "lora", "overrides": {"duration": 0.5}}
+    )
+    assert result["isError"] is False
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+    _, job = _call_tool(srv, "get_job", {"id": jid})
+    assert job["latest"]["ev"] == "run_end"
+
+    result, payload = _call_tool(srv, "health")
+    assert payload["ok"] is True
+
+    # stopping an already-done job is a clean no-op response, not a crash
+    result, payload = _call_tool(srv, "stop_job", {"id": jid})
+    assert result["isError"] is False
+
+
+def test_mcp_get_job_404_is_tool_error(daemon):
+    cl, _ = daemon
+    result = _mcp_for(cl).handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "get_job", "arguments": {"id": "nope"}},
+        }
+    )["result"]
+    assert result["isError"] is True
+    assert "404" in result["content"][0]["text"]
+
+
+def test_mcp_submit_command_and_tail_log(real_cmd_daemon):
+    cl, _ = real_cmd_daemon
+    srv = _mcp_for(cl)
+
+    # the bridge injects kind="command" so the daemon doesn't treat it as train
+    result, payload = _call_tool(
+        srv,
+        "submit_command",
+        {"label": "echo", "argv": ["-c", "print('hello-mcp')"]},
+    )
+    assert result["isError"] is False
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+
+    result, payload = _call_tool(srv, "tail_log", {"id": jid, "lines": 5})
+    assert result["isError"] is False
+    assert payload["state"] == "done"
+    assert any("hello-mcp" in line for line in payload["lines"])
+
+    # tail_log survives the daemon going away (reads job.json + stdout.log)
+    down = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    result, payload = _call_tool(down, "tail_log", {"id": jid})
+    assert result["isError"] is False
+    assert payload["state"] == "done"
+    assert any("hello-mcp" in line for line in payload["lines"])
+
+
+# --------------------------------------------------------------------------
+# daemon-status CLI verb
+# --------------------------------------------------------------------------
+
+
+def test_daemon_status_json(daemon, monkeypatch, capsys):
+    import scripts.daemon.client as daemon_client
+    from scripts.tasks import daemon as daemon_tasks
+
+    cl, _ = daemon
+    monkeypatch.setattr(daemon_client, "DaemonClient", lambda port=None: cl)
+    jid = cl.submit(method="lora", overrides={"duration": 0.3})["job_id"]
+
+    daemon_tasks.cmd_daemon_status([])
+    out = json.loads(capsys.readouterr().out)
+    assert out["up"] is True
+    assert out["base_url"] == cl.base
+    assert any(j["id"] == jid for j in out["jobs"])
+    # compact by default: heavy record fields are stripped…
+    assert "argv" not in out["jobs"][0] and "extra_env" not in out["jobs"][0]
+
+    # …and --full restores the raw records
+    daemon_tasks.cmd_daemon_status(["--full"])
+    full = json.loads(capsys.readouterr().out)
+    assert "argv" in full["jobs"][0]
+
+
+def test_daemon_status_down_exits_1(monkeypatch, capsys):
+    import scripts.daemon.client as daemon_client
+    from scripts.tasks import daemon as daemon_tasks
+
+    monkeypatch.setattr(daemon_client, "DaemonClient", lambda port=None: _dead_client())
+    with pytest.raises(SystemExit) as ei:
+        daemon_tasks.cmd_daemon_status([])
+    assert ei.value.code == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["up"] is False
+
+
 def test_tail_while_write(tmp_path):
     """progress.jsonl tail-while-write: last_event sees the freshest line even
     as it grows (Windows-strict-locking smoke check)."""
@@ -449,3 +749,127 @@ def test_kill_tree_survives_access_denied(monkeypatch):
 
     # Must not raise — previously this killed the worker thread.
     proc.kill_tree(99999)
+
+
+# --------------------------------------------------------------------------
+# structured progress queries (get_progress) + agent-readable log tails
+# --------------------------------------------------------------------------
+
+
+def test_read_events_filters(tmp_path):
+    from scripts.daemon import tail
+
+    p = tmp_path / "progress.jsonl"
+    stream = [{"ev": "run_start", "ts": 0.0}]
+    for i in range(1, 11):
+        stream.append({"ev": "step", "ts": float(i), "global_step": i, "loss": 1.0 / i})
+    stream += [
+        {"ev": "log", "ts": 10.5, "level": "WARNING", "logger": "x", "msg": "boom"},
+        {"ev": "ckpt", "ts": 11.0, "global_step": 10, "path": "/tmp/x.safetensors"},
+        {"ev": "run_end", "ts": 12.0, "status": "ok", "final_step": 10},
+    ]
+    with open(p, "w", encoding="utf-8") as f:
+        for ev in stream:
+            f.write(json.dumps(ev) + "\n")
+
+    assert len(tail.read_events(str(p))) == len(stream)
+
+    # ev-kind filter
+    steps = tail.read_events(str(p), events=["step"])
+    assert [e["global_step"] for e in steps] == list(range(1, 11))
+
+    # since_step — step-less events inherit the preceding step
+    late = tail.read_events(str(p), since_step=8)
+    assert [e["ev"] for e in late] == ["step", "step", "step", "log", "ckpt", "run_end"]
+
+    # every_nth thins step events but always keeps the latest one
+    thinned = tail.read_events(str(p), events=["step"], every_nth=4)
+    assert [e["global_step"] for e in thinned] == [1, 5, 9, 10]
+
+    # last_n trailing cap
+    assert [e["ev"] for e in tail.read_events(str(p), last_n=2)] == ["ckpt", "run_end"]
+
+    # a half-written tail line is skipped, not fatal
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"ev": "step", "global_st')
+    assert len(tail.read_events(str(p))) == len(stream)
+
+    # missing / unset path → empty
+    assert tail.read_events(None) == []
+    assert tail.read_events(str(tmp_path / "nope.jsonl")) == []
+
+
+def test_progress_endpoint_http(daemon):
+    import urllib.error
+
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 0.2})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+    out = cl._request("GET", f"/jobs/{jid}/progress")
+    assert out["job_id"] == jid and out["state"] == "done"
+    kinds = [e["ev"] for e in out["events"]]
+    assert kinds == ["run_start", "step", "ckpt", "run_end"]
+    assert out["count"] == 4
+
+    out = cl._request("GET", f"/jobs/{jid}/progress?events=step,run_end&last_n=1")
+    assert [e["ev"] for e in out["events"]] == ["run_end"]
+
+    with pytest.raises(urllib.error.HTTPError):
+        cl._request("GET", "/jobs/nope/progress")
+
+
+def test_mcp_get_progress(daemon):
+    cl, _ = daemon
+    srv = _mcp_for(cl)
+    _, payload = _call_tool(
+        srv, "submit_training", {"method": "lora", "overrides": {"duration": 0.2}}
+    )
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+
+    # registered in the catalog (rides in from server.TOOLS)
+    tools = srv.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+    assert "get_progress" in {t["name"] for t in tools["result"]["tools"]}
+
+    result, payload = _call_tool(srv, "get_progress", {"id": jid})
+    assert result["isError"] is False
+    assert [e["ev"] for e in payload["events"]] == [
+        "run_start",
+        "step",
+        "ckpt",
+        "run_end",
+    ]
+
+    # filters ride through (comma-string form, as in the manifest schema)
+    _, payload = _call_tool(srv, "get_progress", {"id": jid, "events": "step"})
+    assert [e["ev"] for e in payload["events"]] == ["step"]
+
+    # …and it survives the daemon going away (reads progress.jsonl from disk)
+    down = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    result, payload = _call_tool(down, "get_progress", {"id": jid})
+    assert result["isError"] is False
+    assert payload["events"][-1]["ev"] == "run_end"
+
+    result, payload = _call_tool(down, "get_progress", {"id": "nope"})
+    assert payload.get("error") == "no such job"
+
+
+def test_tail_lines_collapse_tqdm_redraws(tmp_path):
+    """One tqdm bar = one tail line: \\r redraw runs collapse to the final
+    rendering instead of flooding the window with bar updates."""
+    from scripts.daemon.mcp import _tail_lines
+
+    p = tmp_path / "stdout.log"
+    bar = "\r".join(f"caching:  {i}%|██| {i}/100" for i in range(0, 101, 10))
+    p.write_text("starting\n" + bar + "\nwarn: thing happened\n\n", encoding="utf-8")
+    assert _tail_lines(str(p), 10) == [
+        "starting",
+        "caching:  100%|██| 100/100",
+        "warn: thing happened",
+    ]

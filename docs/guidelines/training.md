@@ -16,10 +16,15 @@ make print-config METHOD=lora PRESET=default   # dump the merged config
 
 Run `ls configs/gui-methods/` for the live variant list.
 
+For a key-by-key reference of the bottom layer — model paths, the noise
+schedule, caching, compile, and every memory knob — see
+[`base-config.md`](base-config.md). This doc focuses on **method/variant
+selection** and the training-specific options on top of that base.
+
 ## LoRA family — the three-axis surface
 
-`configs/methods/lora.toml` covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA /
-ReFT under one routing surface:
+`configs/methods/lora.toml` covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA
+under one routing surface:
 
 ```toml
 use_moe_style    = false | "shared_A" | "independent_A"
@@ -64,16 +69,11 @@ See [`../methods/timestep_mask.md`](../methods/timestep_mask.md).
 
 ### HydraLoRA / FeRA / Hydra+FEI
 
-Multi-head expert routing variants. See [`../methods/hydra-lora.md`](../methods/hydra-lora.md)
-and [`../../docs/experimental/fera.md`](../experimental/fera.md). The
+Multi-head expert routing variants. See [`../methods/hydra-lora.md`](../methods/hydra-lora.md);
+FEI-routed shared-A is the shipped default and the FEI lineage is documented in
+[`../experimental/chimera-hydra.md`](../experimental/chimera-hydra.md). The
 `balance_loss_weight` ceiling is ~5e-5 on Anima — above that the Switch loss
 saturates.
-
-### ReFT
-
-Block-level residual-stream intervention. Off by default; flip
-`add_reft = true` and pick a layer band (`reft_layers = "last_8"`).
-See [`../methods/reft.md`](../methods/reft.md).
 
 ## Other adapter families
 
@@ -83,15 +83,14 @@ Each has its own method TOML and `make` entrypoint:
 |--------|--------|--------------|
 | ChimeraHydra (dual-pool MoE) | `methods/chimera.toml` | `make exp-chimera` |
 | Postfix (free + cond+ortho) | `methods/postfix.toml` | `make exp-postfix` |
-| IP-Adapter | `methods/ip_adapter.toml` | `make exp-ip-adapter` |
-| EasyControl | `methods/easycontrol.toml` | `make exp-easycontrol` |
+| EasyControl | `methods/easycontrol.toml` | `make easycontrol` |
 | Soft Tokens (SoftREPA) | `methods/soft_tokens.toml` | `make exp-soft-tokens` |
 
 Deep dives in `docs/methods/` (shipped) and `docs/experimental/`.
 
 ## FP32 accumulation
 
-Unconditional. LoRA / Hydra / ReFT bottleneck matmuls run in fp32 regardless
+Unconditional. LoRA / Hydra bottleneck matmuls run in fp32 regardless
 of autocast; stored parameters stay bf16. The legacy `lora_fp32_accumulation`
 flag is deprecated and ignored.
 
@@ -142,31 +141,33 @@ so it never pollutes argparse. Top-level path keys interpolate into the
 blueprint at load time:
 
 ```toml
-source_image_dir  = "image_dataset"            # captions live here
+# source_image_dir now lives in configs/preprocess.toml (preprocess-only).
+# These shared keys stay in base.toml so the blueprint can interpolate them:
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir    = "post_image_dataset/lora"
 
 [general]
-caption_extension = '.txt'
-keep_tokens = 3
+# (empty) — kohya-legacy keep_tokens / caption_extension were removed: both are
+# inert in the cached workflow (keep_tokens is superseded by the pre-cached
+# shuffle variants; the TE-cacher hardcodes .txt). Add a real dataset-wide
+# default here only if one applies.
 
 [[datasets]]
-resolution = 1024
 batch_size = 1
-enable_bucket = true
-validation_split_num = 16
+validation_split_num = 0
 validation_seed = 42
 
   [[datasets.subsets]]
   image_dir = '{resized_image_dir}'
   cache_dir = '{lora_cache_dir}'
   num_repeats = 1
+  recursive = true
 ```
 
 `cache_dir` redirects every VAE / TE / PE sidecar to a flat,
-stem-keyed location — used so IP-Adapter and EasyControl can keep their
-source dirs (`ip-adapter-dataset/`, `easycontrol-dataset/`) purely
-user-facing while caches all land under `post_image_dataset/`.
+stem-keyed location — used so EasyControl can keep its source dir
+(`easycontrol-dataset/`) purely user-facing while caches all land
+under `post_image_dataset/`.
 
 To shallow-override the blueprint, drop a `[general]` / `[[datasets]]` block
 into the method TOML — `_apply_dataset_overrides` in `library/config/io.py`

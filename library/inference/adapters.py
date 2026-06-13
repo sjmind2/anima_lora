@@ -111,8 +111,7 @@ def set_hydra_content(model: Any, crossattn_emb: torch.Tensor) -> None:
 
     Mirrors :func:`set_hydra_fei`. ``crossattn_emb`` is the post-LLM-adapter
     text feature tensor (B, L, D) — the same one fed into the DiT's
-    cross-attention. No-op on networks without a ContentRouter (chimera
-    off, or ``content_router_source="input"``).
+    cross-attention. No-op on networks without a ContentRouter (chimera off).
 
     Call BEFORE each forward in the denoising loop, separately for cond
     and uncond branches — the two have different captions and therefore
@@ -152,6 +151,46 @@ def set_hydra_crossattn(model: Any, crossattn_emb: torch.Tensor) -> None:
         set_crossattn = getattr(network, "set_crossattn_routing", None)
         if callable(set_crossattn):
             set_crossattn(crossattn_emb)
+
+
+def iter_step_expert_networks(model: Any) -> Iterable[Any]:
+    """Yield attached per-step-expert turbo networks (deduped, compile-aware)."""
+    candidates = []
+    containers = [model]
+    orig_mod = getattr(model, "_orig_mod", None)
+    if orig_mod is not None and orig_mod is not model:
+        containers.append(orig_mod)
+    for container in containers:
+        candidates.extend(
+            _as_iterable(getattr(container, "_step_expert_networks", None))
+        )
+    seen = set()
+    for network in candidates:
+        if network is None:
+            continue
+        ident = id(network)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        yield network
+
+
+def set_step_expert_index(model: Any, step: int) -> None:
+    """Select the active step-expert up-head for the current denoise step.
+
+    No-op when no per-step-expert turbo network is attached. The head index is
+    clamped to ``[0, K-1]`` so an ``infer_steps`` that overshoots the trained
+    head count repeats the last (quality) head rather than raising — the test
+    command warns on the mismatch (see ``cmd_test_turbo``).
+    """
+    for network in iter_step_expert_networks(model):
+        set_idx = getattr(network, "set_step_index", None)
+        if not callable(set_idx):
+            continue
+        K = 1
+        for lora in getattr(network, "unet_loras", []):
+            K = max(K, int(getattr(lora, "K", 1)))
+        set_idx(min(step, K - 1))
 
 
 def compute_and_set_hydra_fei(model: Any, z: torch.Tensor) -> None:

@@ -12,12 +12,18 @@ Centralizes:
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Reference-image extensions probed by the test-* commands that take a REF_IMAGE
+# (EasyControl / IP-Adapter / DirectEdit). Shared so the shipped and experimental
+# inference modules agree on what counts as an image.
+_REF_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _python_exe() -> str:
@@ -63,13 +69,20 @@ def _path_overrides() -> dict:
     if _PATH_OVERRIDES_CACHE is not None:
         return _PATH_OVERRIDES_CACHE
     try:
-        from library.config.io import load_path_overrides
-
-        _PATH_OVERRIDES_CACHE = load_path_overrides(
-            preset=_preset(),
-            method=os.environ.get("METHOD") or None,
-            methods_subdir=os.environ.get("METHODS_SUBDIR") or "methods",
+        from library.config.io import (
+            load_path_overrides,
+            load_path_overrides_from_config,
         )
+
+        config_file = os.environ.get("CONFIG_FILE")
+        if config_file:
+            _PATH_OVERRIDES_CACHE = load_path_overrides_from_config(config_file)
+        else:
+            _PATH_OVERRIDES_CACHE = load_path_overrides(
+                preset=_preset(),
+                method=os.environ.get("METHOD") or None,
+                methods_subdir=os.environ.get("METHODS_SUBDIR") or "methods",
+            )
     except Exception as e:  # noqa: BLE001 — fall back silently to defaults
         print(f"warn: could not read base.toml path overrides: {e}", file=sys.stderr)
         _PATH_OVERRIDES_CACHE = {}
@@ -150,7 +163,7 @@ def _load_subset_configs() -> list[dict] | None:
 
 def bespoke_preset_flags(preset: str) -> list[str]:
     """Translate ``configs/presets.toml[<preset>]`` into CLI flags for the
-    bespoke distillation loops (``scripts/distill_mod/distill.py`` / ``distill_turbo.py``)
+    bespoke distillation loops (``scripts/distill_mod/distill.py`` / ``scripts/distill_turbo/distill.py``)
     that bypass ``train.py``'s config merge chain.
 
     Honored keys:
@@ -245,6 +258,24 @@ def latest_hydra() -> Path:
         )
         sys.exit(1)
     return outputs[0]
+
+
+def _random_ref_image(directory: Path) -> str | None:
+    """Pick a random image under ``directory`` (recursive), or ``None`` if empty.
+
+    Source layouts (``post_image_dataset/resized/``, ``easycontrol-dataset/``)
+    nest images under per-artist subdirs, so recurse rather than only scanning
+    top-level files. Shared by the EasyControl / IP-Adapter / DirectEdit test
+    commands as the fallback reference when no REF_IMAGE is supplied.
+    """
+    if not directory.is_dir():
+        return None
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
+    if not pool:
+        return None
+    pick = random.choice(pool)
+    print(f"  > Random ref: {pick}")
+    return str(pick)
 
 
 def _has_console() -> bool:
@@ -557,6 +588,14 @@ def build_launch_cmd(*args: str, python_exe: str | None = None) -> list[str]:
     py = python_exe or PY
     if not os.environ.get("ANIMA_ACCELERATE_LAUNCH"):
         return [py, "train.py", *args]
+    # Forward the user's --mixed_precision to the launcher so it matches the
+    # Accelerator() train.py builds (defaults to bf16 when unset on the CLI).
+    mixed_precision = "bf16"
+    for i, a in enumerate(args):
+        if a == "--mixed_precision" and i + 1 < len(args):
+            mixed_precision = args[i + 1]
+        elif a.startswith("--mixed_precision="):
+            mixed_precision = a.split("=", 1)[1]
     return [
         py,
         "-m",
@@ -565,7 +604,7 @@ def build_launch_cmd(*args: str, python_exe: str | None = None) -> list[str]:
         "--num_cpu_threads_per_process",
         "3",
         "--mixed_precision",
-        "bf16",
+        mixed_precision,
         "train.py",
         *args,
     ]
@@ -667,6 +706,32 @@ def _queue_submit(
     )
 
 
+def queue_command(label: str, argv: list[str]) -> None:
+    """Enqueue a bespoke-loop distillation command on the local daemon.
+
+    The training daemon is generic over "run this argv" via its ``kind="command"``
+    job path (the same one preprocess/mask use). The bespoke loops
+    (``scripts/distill_turbo`` / ``scripts/distill_spd``) bypass ``train.py``, so
+    they can't ride the train-job ``_queue_submit`` path — they submit a plain
+    command job instead. ``argv`` is run by the daemon as
+    ``[venv_python, *argv]`` from the repo root, so pass the module form
+    (``["-m", "scripts.distill_turbo.distill", ...]``). Preset/CLI flags must be
+    baked into ``argv`` here: the command-job path does no config merging.
+    """
+    from scripts.daemon import client as _daemon_client
+
+    cl = _daemon_client.ensure_daemon()
+    resp = cl.submit_command(label=label, argv=list(argv))
+    job_id = resp.get("job_id")
+    print(
+        f"queued job {job_id} (label={label}). daemon: {cl.base}\n"
+        f"  make daemon-attach JOB={job_id}   # follow this job's output\n"
+        f"  make daemon-attach                # follow queue/lifecycle events\n"
+        f"  make daemon-kill JOB={job_id}     # cancel it\n"
+        f"  make daemon-terminate             # stop the daemon + discard queue"
+    )
+
+
 def train(
     method: str, extra, preset: str | None = None, methods_subdir: str | None = None
 ):
@@ -741,9 +806,9 @@ INFERENCE_BASE = [
     "--infer_steps",
     "28",
     "--flow_shift",
-    "1.0",
+    "3.0",
     "--sampler",
-    "er_sde",
+    "euler",
     "--guidance_scale",
     "4.0",
     "--seed",

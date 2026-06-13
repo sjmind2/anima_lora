@@ -73,6 +73,22 @@ def _sigma_sinusoidal_features(
     return torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)
 
 
+def _fei_temperature(fei: torch.Tensor, tau: float) -> torch.Tensor:
+    """Hardwired-FEI freq gate: ``π_f = normalize(FEI ** (1/τ))``.
+
+    Used by the ChimeraHydra ``freq_router_mode="fei"`` path, which routes the
+    freq pool directly by the FEI band-simplex instead of a learned MLP. FEI
+    is already a normalized simplex, so τ=1.0 returns it unchanged
+    (``softmax(log p) = p``). τ<1 sharpens the low/high crossover, τ>1 flattens
+    it. The power form (rather than ``softmax(log FEI / τ)``) avoids ``log(0)``
+    on the high-σ steps where ``e_low ≈ 0`` (``0 ** (1/τ) = 0``).
+    """
+    if abs(tau - 1.0) < 1e-8:
+        return fei
+    p = fei.clamp_min(0).pow(1.0 / max(tau, 1e-6))
+    return p / p.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # σ feature cache
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,3 +241,83 @@ def _clear_routing_weights(module: torch.nn.Module) -> None:
     """Reset to uniform 1/E without rebinding the pointer."""
     E = int(module._routing_weights.shape[-1])
     module._routing_weights.fill_(1.0 / max(E, 1))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-module method surface
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class RouterStateMixin:
+    """Shared σ / FEI / routing-weights *method surface* for the routing-aware
+    LoRA variants (HydraLoRA / OrthoHydra / StackedExperts).
+
+    The free functions above own the buffer mechanics — pointer-stable rebind,
+    the grad-carrying ``_routing_weights`` slot-assign contract (NO ``.detach()``
+    / ``.copy_()`` so ``∂L/∂α`` reaches the GlobalRouter, FeRA eq. 6-7, 11).
+    What was still pasted verbatim into each class was the thin method wrapping;
+    this mixin holds it once, so a future router source is a one-place edit.
+
+    Each setter is **buffer-presence-guarded** (``hasattr``): a module that
+    registered only a subset of the buffers inherits the full surface as safe
+    no-ops. StackedExperts (``_routing_weights`` only, no σ/FEI) is the case
+    that matters — its ``set_sigma`` / ``set_fei`` become no-ops, exactly
+    equivalent to never defining them (the network keys its ``_*_aware_loras``
+    lists on *buffer* presence — ``network.py::_wire_shared_*`` — and every
+    external caller probes by method name and tolerates a no-op). The
+    ``_routing_weights`` guard also subsumes the old
+    ``getattr(self, "use_global_router", False)`` check: that buffer is
+    registered iff ``use_global_router`` on Hydra/OrthoHydra, and always on
+    StackedExperts, so ``hasattr`` is the exact, layout-agnostic condition.
+
+    Chimera carries two routing buffers (π_c / π_f) and a different method
+    surface — it keeps ``_ChimeraRoutingMixin`` instead.
+    """
+
+    def set_sigma(
+        self, sigmas: torch.Tensor, sigma_features: torch.Tensor | None = None
+    ) -> None:
+        if not hasattr(self, "_sigma"):
+            return
+        _set_sigma_feature_cache(self, sigmas, sigma_features)
+
+    def clear_sigma(self) -> None:
+        if not hasattr(self, "_sigma"):
+            return
+        _clear_sigma_feature_cache(self)
+
+    def set_fei(self, fei: torch.Tensor) -> None:
+        if not hasattr(self, "_fei"):
+            return
+        _set_fei_feature_cache(self, fei)
+
+    def clear_fei(self) -> None:
+        if not hasattr(self, "_fei"):
+            return
+        _clear_fei_feature_cache(self)
+
+    def set_routing_weights(self, weights: torch.Tensor) -> None:
+        if not hasattr(self, "_routing_weights"):
+            return
+        _set_routing_weights(self, weights)
+
+    def clear_routing_weights(self) -> None:
+        if not hasattr(self, "_routing_weights"):
+            return
+        _clear_routing_weights(self)
+
+    def _register_router_io_buffers(self, num_experts: int) -> None:
+        """Register the σ / FEI / routing-weights placeholder buffers shared by
+        the per-Linear-router variants (Hydra / OrthoHydra).
+
+        Reads ``self.sigma_feature_dim`` / ``self.fei_feature_dim`` /
+        ``self.use_global_router`` (all assigned before this call). The routing
+        buffer is registered only under the global router — its presence is
+        exactly what the ``set_routing_weights`` guard above keys on. σ-band
+        partition and the chimera dual-pool buffers stay in each class (their
+        registration is interleaved with class-specific validation / layout).
+        """
+        _register_sigma_feature_cache(self, self.sigma_feature_dim)
+        _register_fei_feature_cache(self, self.fei_feature_dim)
+        if self.use_global_router:
+            _register_routing_weights_buffer(self, num_experts)

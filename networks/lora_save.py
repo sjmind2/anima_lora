@@ -9,13 +9,17 @@ ordering layer that calls them and writes the resulting file(s).
 Ordering of the conversion pipeline is load-bearing:
 
   1. ``ChimeraHydraLoRAModule.distill_save_state_dict``
-     (gated on co-located ``.S_q_c`` + ``.S_q_f``)
+     (gated on co-located ``.Q_basis_c`` + ``.Q_basis_f`` — covers both the
+     Cayley and OrthoInit chimera parameterizations)
   2. ``StackedExpertsLoRAModule.distill_save_state_dict``
      (gated on 3-D ``.S_p`` AND 3-D ``.S_q``)
   3. ``OrthoHydraLoRAModule.distill_save_state_dict``
      (gated on 3-D ``.S_p`` AND 2-D ``.S_q``)
   4. ``OrthoLoRAModule.distill_save_state_dict``
      (gated on 2-D ``.S_p``)
+  4b. ``OrthoInitLoRAModule.distill_save_state_dict``
+     (gated on ``.P_init`` — a name no other variant uses, so order vs the
+     ``.S_p``-keyed steps above is independent; placed here for readability)
   5. legacy sig-type OrthoLoRA → standard LoRA
      (gated on ``.base_lambda``; kept here because it touches the
      deprecated ``lora_deprecated.OrthoLoRAModule`` save layout that no
@@ -41,6 +45,7 @@ from networks.lora_modules import (
     ChimeraHydraLoRAModule,
     HydraLoRAModule,
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
 )
@@ -386,6 +391,7 @@ def save_network_weights(
     StackedExpertsLoRAModule.distill_save_state_dict(state_dict, dtype)
     OrthoHydraLoRAModule.distill_save_state_dict(state_dict, dtype)
     OrthoLoRAModule.distill_save_state_dict(state_dict, dtype)
+    OrthoInitLoRAModule.distill_save_state_dict(state_dict, dtype)
     _convert_legacy_ortho_to_lora(state_dict, dtype)
 
     # Variant dispatch.

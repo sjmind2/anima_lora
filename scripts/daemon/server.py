@@ -7,15 +7,21 @@ server). Served by ``ThreadingHTTPServer`` so a parked SSE stream just holds one
 blocked thread.
 
 Endpoints
+    GET  /                  → README.md (self-description for agentic callers)
+    GET  /tools             → [tool, …]  machine-readable manifest (JSON-Schema)
     POST /jobs              {method, preset, methods_subdir, overrides, extra} → {job_id}
                             or {kind:"command", label, argv, extra_env,
                                  chain_train?}                                 → {job_id}
     GET  /jobs              → [job, …]
     GET  /jobs/{id}         → job (+ latest progress event, stale_for)
+    GET  /jobs/{id}/progress → filtered progress.jsonl events
+                            ?events=step,val&since_step=N&every_nth=N&last_n=N
     POST /jobs/{id}/stop    → {job}
+    POST /queue/start       → {ok, paused:false}  (resume a paused queue)
+    POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
     GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, active_job}
+    GET  /health            → {ok, pid, port, root, active_job, paused}
     POST /shutdown          {kill_jobs} → {ok}
 """
 
@@ -28,6 +34,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -39,6 +46,240 @@ logger = logging.getLogger("anima.daemon")
 _JOB_RE = re.compile(r"^/jobs/(?P<id>[^/]+)$")
 _JOB_STOP_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/stop$")
 _JOB_LOGS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/logs$")
+_JOB_PROGRESS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/progress$")
+
+_README = Path(__file__).resolve().parent / "README.md"
+
+# Machine-readable self-description served at GET /tools — one entry per
+# operation, JSON-Schema ``input_schema`` so a thin MCP bridge (or any LLM tool
+# loop) can register these directly. Each tool names the underlying HTTP
+# ``method`` + ``path`` so a caller can hit the endpoint itself. Kept in sync
+# with the handlers below by hand; it is small and rarely changes. The prose
+# walkthrough is GET / (README.md).
+TOOLS = [
+    {
+        "name": "submit_training",
+        "description": (
+            "Enqueue a train.py run built from method + preset + overrides. "
+            "Runs when it reaches the front of the serial queue. Returns {job_id, state}."
+        ),
+        "method": "POST",
+        "path": "/jobs",
+        "input_schema": {
+            "type": "object",
+            "required": ["method"],
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "description": "Method/adapter config name (e.g. 'lora', 'chimera', 'easycontrol').",
+                },
+                "preset": {
+                    "type": "string",
+                    "default": "default",
+                    "description": "Hardware preset: default | fast_16gb | low_vram | half.",
+                },
+                "methods_subdir": {
+                    "type": "string",
+                    "description": "Config subdir, e.g. 'gui-methods' for the clean per-variant tree. Omit for 'methods'.",
+                },
+                "overrides": {
+                    "type": "object",
+                    "description": '{key: value} → --key value CLI overrides, e.g. {"network_dim": 32, "max_train_epochs": 64}.',
+                },
+                "extra": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra CLI args appended verbatim.",
+                },
+                "config_snapshot": {
+                    "type": "object",
+                    "description": "A fully-merged config dict to pin instead of re-resolving the base→preset→method→overrides chain at launch.",
+                },
+                "config_file": {
+                    "type": "string",
+                    "description": "Path to a config snapshot file (alternative to config_snapshot).",
+                },
+                "start": {
+                    "type": "boolean",
+                    "description": "true → run now (resume queue); false → enqueue but hold the queue paused; omit → leave the gate as-is.",
+                },
+            },
+        },
+    },
+    {
+        "name": "submit_command",
+        "description": (
+            "Enqueue a plain `python <argv>` task (preprocess, mask, a distill loop). "
+            "Optionally carries a chain_train spec the daemon auto-enqueues on success "
+            "(how 'preprocess → train' survives the caller closing). Returns {job_id, state}."
+        ),
+        "method": "POST",
+        "path": "/jobs",
+        "input_schema": {
+            "type": "object",
+            "required": ["label", "argv"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "command",
+                    "description": "Must be 'command'.",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Display label (doubles as the job's 'method' field).",
+                },
+                "argv": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Argv run under the anima venv, e.g. ['tasks.py', 'preprocess-config', …].",
+                },
+                "extra_env": {
+                    "type": "object",
+                    "description": "Extra environment variables for the subprocess.",
+                },
+                "chain_train": {
+                    "type": "object",
+                    "description": "Training spec {method, preset, methods_subdir, overrides} auto-enqueued when this command finishes successfully.",
+                },
+                "config_snapshot": {
+                    "type": "object",
+                    "description": "Config dict to pin (forwarded to the chained train job).",
+                },
+                "config_file": {
+                    "type": "string",
+                    "description": "Config snapshot file path (alternative to config_snapshot).",
+                },
+                "start": {
+                    "type": "boolean",
+                    "description": "true → run now; false → enqueue paused; omit → leave gate as-is.",
+                },
+            },
+        },
+    },
+    {
+        "name": "list_jobs",
+        "description": "List all jobs (full records, submission order). Each has state ∈ queued|running|done|error|stopped.",
+        "method": "GET",
+        "path": "/jobs",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_job",
+        "description": (
+            "Fetch one job record plus live fields: 'latest' (last progress.jsonl event, "
+            "train jobs only) and 'stale_for' (seconds since last progress tick). Poll this for completion."
+        ),
+        "method": "GET",
+        "path": "/jobs/{id}",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Job id from submit_*."}
+            },
+        },
+    },
+    {
+        "name": "get_progress",
+        "description": (
+            "Query a train job's structured progress.jsonl — events are "
+            "run_start | step (loss/lr/metrics) | val (cmmd) | ckpt | log "
+            "(mirrored WARNING+ records) | run_end. Filters keep the payload "
+            "small on long runs; returns {job_id, state, count, events}. "
+            "This is the surface to debug/analyze a run from (loss curve, "
+            "warnings, checkpoints) — stdout is only for raw crash output."
+        ),
+        "method": "GET",
+        "path": "/jobs/{id}/progress",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Job id from submit_*."},
+                "events": {
+                    "type": "string",
+                    "description": "Comma-separated ev kinds to keep, e.g. 'step,val' or 'log,run_end'. Omit for all.",
+                },
+                "since_step": {
+                    "type": "integer",
+                    "description": "Keep events at/after this global_step (step-less events inherit the preceding step).",
+                },
+                "every_nth": {
+                    "type": "integer",
+                    "description": "Thin step events to every n-th (latest step always kept).",
+                },
+                "last_n": {
+                    "type": "integer",
+                    "default": 200,
+                    "description": "Trailing cap on returned events.",
+                },
+            },
+        },
+    },
+    {
+        "name": "stop_job",
+        "description": "Abort a running or queued job (tree-kills the process). Returns {job_id, state}.",
+        "method": "POST",
+        "path": "/jobs/{id}/stop",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string", "description": "Job id to stop."}},
+        },
+    },
+    {
+        "name": "tail_logs",
+        "description": (
+            "SSE stream of a job's combined stdout+stderr from the start of the file; "
+            "ends with a {ev:'eof', state} event once the job is terminal and drained. "
+            "There is no blocking 'wait' call — tail this or poll get_job."
+        ),
+        "method": "GET",
+        "path": "/jobs/{id}/logs",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string", "description": "Job id to tail."}},
+        },
+    },
+    {
+        "name": "pause_queue",
+        "description": "Hold the queue gate — queued jobs wait until start_queue. Submissions still accepted.",
+        "method": "POST",
+        "path": "/queue/pause",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "start_queue",
+        "description": "Resume a paused queue — the worker launches queued jobs in order.",
+        "method": "POST",
+        "path": "/queue/start",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "health",
+        "description": "Daemon liveness: {ok, pid, port, root, active_job, paused}. 'root' is the checkout it belongs to.",
+        "method": "GET",
+        "path": "/health",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "shutdown",
+        "description": "Stop the daemon. Destructive: kill_jobs=true (default) tree-kills the running job too.",
+        "method": "POST",
+        "path": "/shutdown",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kill_jobs": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Kill the running job on the way down.",
+                }
+            },
+        },
+    },
+]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -55,6 +296,14 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, text: str, *, content_type: str, status: int = 200) -> None:
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -95,8 +344,12 @@ class _Handler(BaseHTTPRequestHandler):
     # ----- routing -----
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
-        if path == "/health":
+        path, _, query = self.path.partition("?")
+        if path in ("/", "/readme"):
+            self._handle_readme()
+        elif path == "/tools":
+            self._send_json(TOOLS)
+        elif path == "/health":
             self._handle_health()
         elif path == "/jobs":
             self._handle_list()
@@ -104,6 +357,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_events()
         elif m := _JOB_LOGS_RE.match(path):
             self._handle_logs(m.group("id"))
+        elif m := _JOB_PROGRESS_RE.match(path):
+            self._handle_progress(m.group("id"), query)
         elif m := _JOB_RE.match(path):
             self._handle_get(m.group("id"))
         else:
@@ -113,6 +368,12 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/jobs":
             self._handle_submit()
+        elif path == "/queue/start":
+            self.manager.resume()
+            self._send_json({"ok": True, "paused": False})
+        elif path == "/queue/pause":
+            self.manager.pause()
+            self._send_json({"ok": True, "paused": True})
         elif path == "/shutdown":
             self._handle_shutdown()
         elif m := _JOB_STOP_RE.match(path):
@@ -122,6 +383,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ----- handlers -----
 
+    def _handle_readme(self) -> None:
+        try:
+            text = _README.read_text(encoding="utf-8")
+        except OSError:
+            # README not shipped alongside (e.g. a trimmed vendor tree) — point
+            # the caller at the machine-readable manifest instead.
+            self._send_json({"error": "README.md not found", "tools": "/tools"}, 404)
+            return
+        self._send_text(text, content_type="text/markdown; charset=utf-8")
+
     def _handle_health(self) -> None:
         active = self.manager.active_job()
         self._send_json(
@@ -129,12 +400,17 @@ class _Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "pid": os.getpid(),
                 "port": self.server.server_address[1],
+                "root": str(config.ROOT),
                 "active_job": active.id if active else None,
+                "paused": self.manager.is_paused(),
             }
         )
 
     def _handle_submit(self) -> None:
         body = self._read_json()
+        # ``start`` (optional): True → run now (resume the queue), False → add to
+        # the queue but hold it paused, omitted/None → leave the gate as-is.
+        start = body.get("start")
         if (body.get("kind") or "train") == "command":
             argv = body.get("argv")
             if not isinstance(argv, list) or not argv:
@@ -145,6 +421,9 @@ class _Handler(BaseHTTPRequestHandler):
                 argv=[str(a) for a in argv],
                 extra_env=body.get("extra_env") or {},
                 chain_train=body.get("chain_train") or None,
+                config_snapshot=body.get("config_snapshot") or None,
+                config_file=body.get("config_file") or None,
+                start=start,
             )
             self._send_json({"job_id": job.id, "state": job.state}, 201)
             return
@@ -156,8 +435,11 @@ class _Handler(BaseHTTPRequestHandler):
             method=method,
             preset=body.get("preset") or "default",
             methods_subdir=body.get("methods_subdir"),
+            config_snapshot=body.get("config_snapshot") or None,
+            config_file=body.get("config_file") or None,
             overrides=body.get("overrides") or {},
             extra=body.get("extra") or [],
+            start=start,
         )
         self._send_json({"job_id": job.id, "state": job.state}, 201)
 
@@ -173,6 +455,43 @@ class _Handler(BaseHTTPRequestHandler):
         out["latest"] = tail.last_event(job.progress_path)
         out["stale_for"] = self.manager.stale_for(job)
         self._send_json(out)
+
+    def _handle_progress(self, job_id: str, query: str) -> None:
+        job = self.manager.get(job_id)
+        if job is None:
+            self._send_json({"error": "no such job", "job_id": job_id}, 404)
+            return
+        params = urllib.parse.parse_qs(query)
+
+        def _int(name: str, default=None):
+            raw = (params.get(name) or [None])[0]
+            try:
+                return int(raw) if raw is not None else default
+            except ValueError:
+                return default
+
+        raw_events = (params.get("events") or [None])[0]
+        kinds = (
+            [s.strip() for s in raw_events.split(",") if s.strip()]
+            if raw_events
+            else None
+        )
+        evs = tail.read_events(
+            job.progress_path,
+            events=kinds,
+            since_step=_int("since_step"),
+            every_nth=_int("every_nth"),
+            last_n=_int("last_n", 200),
+        )
+        self._send_json(
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "progress_path": job.progress_path,
+                "count": len(evs),
+                "events": evs,
+            }
+        )
 
     def _handle_stop(self, job_id: str) -> None:
         job = self.manager.stop(job_id)

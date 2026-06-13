@@ -417,3 +417,24 @@ def scan_dataset_bucket_distribution(
             for name in BUCKET_FAMILIES
         },
     }
+
+
+def snap_sample_size(width: int, height: int) -> Tuple[int, int]:
+    """Snap a requested sample (W, H) to the DiT's 16px pixel grid."""
+    return max(64, width - width % 16), max(64, height - height % 16)
+
+
+def token_counts_for_sample_prompts(prompts) -> set:
+    """Distinct DiT token counts the training sample prompts will request.
+
+    ``prompts`` are ``train_util.load_prompts`` dicts; width/height default to
+    512, matching ``_sample_image_inference``.
+    """
+    counts: set = set()
+    for prompt_dict in prompts:
+        w, h = snap_sample_size(
+            int(prompt_dict.get("width", 512)),
+            int(prompt_dict.get("height", 512)),
+        )
+        counts.add((w // 16) * (h // 16))
+    return counts

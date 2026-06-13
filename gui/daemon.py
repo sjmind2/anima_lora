@@ -23,9 +23,29 @@ from scripts.daemon import client as _client
 from scripts.daemon import config as _cfg
 from scripts.daemon.jobs import STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
 
-# Re-export so callers don't reach into scripts.daemon themselves.
-ensure_daemon = _client.ensure_daemon
-is_running = _client.is_running
+
+class DaemonUnavailable(RuntimeError):
+    """No root-matching daemon is currently running.
+
+    Raised by the passive (non-spawning) query path so a monitor can show an
+    "unavailable" state instead of booting a daemon as a side effect.
+    """
+
+
+def _current_health() -> Optional[dict]:
+    health = _client.DaemonClient().health()
+    if health and _client.daemon_matches_root(health, _cfg.ROOT):
+        return health
+    return None
+
+
+def ensure_daemon(*, timeout: float = 60.0):
+    """Return a daemon client for this checkout, never a sibling checkout."""
+    return _client.ensure_daemon(timeout=timeout, expected_root=_cfg.ROOT)
+
+
+def is_running() -> bool:
+    return _current_health() is not None
 
 
 def ensure_daemon_quietly(*, timeout: float = 20.0) -> bool:
@@ -49,20 +69,30 @@ def submit_training(
     method: str,
     preset: str,
     methods_subdir: Optional[str],
+    config_snapshot: Optional[dict] = None,
+    config_file: Optional[str] = None,
+    overrides: Optional[dict] = None,
     extra: Optional[list[str]] = None,
+    start: Optional[bool] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a training job.
 
     Mirrors what ``tasks.py lora-gui <variant>`` would have launched inline:
     ``method`` is the gui-methods variant stem and ``methods_subdir`` is
-    ``"gui-methods"``. Returns the daemon's ``{job_id, state}`` response.
+    ``"gui-methods"``. ``start`` controls the queue gate: ``True`` (the main
+    Train button) runs it now, ``False`` (the queue dropdown) holds it until
+    "Start Queue". Returns the daemon's ``{job_id, state}`` response.
     """
     cl = ensure_daemon()
     return cl.submit(
         method=method,
         preset=preset,
         methods_subdir=methods_subdir,
+        config_snapshot=config_snapshot or None,
+        config_file=config_file,
+        overrides=overrides or {},
         extra=extra or [],
+        start=start,
     )
 
 
@@ -72,6 +102,9 @@ def submit_command(
     argv: list[str],
     extra_env: Optional[dict] = None,
     chain_train: Optional[dict] = None,
+    config_snapshot: Optional[dict] = None,
+    config_file: Optional[str] = None,
+    start: Optional[bool] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a plain task job.
 
@@ -82,7 +115,9 @@ def submit_command(
     ``chain_train`` (``{method, preset, methods_subdir}``) makes the daemon
     enqueue that training job itself once this one finishes successfully — the
     "preprocess → train" auto-chain then completes even if the GUI closes
-    mid-way. Returns the daemon's ``{job_id, state}`` response.
+    mid-way. ``start`` controls the queue gate: ``True`` (a main Run action)
+    runs it now, ``False`` (the "add to queue" dropdown) holds it until "Start
+    Queue". Returns the daemon's ``{job_id, state}`` response.
     """
     cl = ensure_daemon()
     return cl.submit_command(
@@ -90,6 +125,9 @@ def submit_command(
         argv=list(argv),
         extra_env=extra_env or {},
         chain_train=chain_train or None,
+        config_snapshot=config_snapshot or None,
+        config_file=config_file,
+        start=start,
     )
 
 
@@ -98,13 +136,56 @@ def stop_job(job_id: str) -> dict:
     return _client.DaemonClient().stop(job_id)
 
 
+def start_queue() -> None:
+    """Resume a paused queue (the Queue tab's "Start Queue" button)."""
+    _client.DaemonClient().start_queue()
+
+
+def pause_queue() -> None:
+    """Hold the queue so newly-added jobs wait for "Start Queue"."""
+    _client.DaemonClient().pause_queue()
+
+
+def list_jobs() -> list:
+    """Return all daemon jobs for this checkout, starting the daemon if needed."""
+    return ensure_daemon(timeout=20.0).list_jobs()
+
+
+def list_jobs_passive() -> list:
+    """List jobs only if a root-matching daemon is already up.
+
+    Unlike :func:`list_jobs`, this never spawns a daemon and never blocks waiting
+    for one to boot — it is for passive monitors (the Queue tab) that poll on a
+    timer and must not start a daemon merely by being viewed, nor freeze the UI
+    thread on a slow/failed daemon launch. Raises :class:`DaemonUnavailable` when
+    no matching daemon answers ``/health``.
+    """
+    if _current_health() is None:
+        raise DaemonUnavailable("no training daemon is running for this checkout")
+    return _client.DaemonClient().list_jobs()
+
+
+def queue_snapshot_passive() -> tuple[list, bool]:
+    """``(jobs, paused)`` for the Queue tab — passive, never spawns a daemon.
+
+    One ``/health`` probe (also the root-match check) plus the job list, so the
+    tab gets the queue's pause state without an extra round-trip. Raises
+    :class:`DaemonUnavailable` when no matching daemon answers ``/health``.
+    """
+    health = _current_health()
+    if health is None:
+        raise DaemonUnavailable("no training daemon is running for this checkout")
+    jobs = _client.DaemonClient().list_jobs()
+    return jobs, bool(health.get("paused"))
+
+
 def active_job_id() -> Optional[str]:
     """The daemon's currently-running job id, or ``None`` (daemon down/idle).
 
     Used on tab construction to re-attach the UI to a job that's still running
     from a previous GUI session (or that the ComfyUI node / CLI submitted).
     """
-    health = _client.DaemonClient().health()
+    health = _current_health()
     return health.get("active_job") if health else None
 
 
@@ -150,6 +231,15 @@ def read_job_kind(job_id: str) -> str:
     return data.get("kind") or "train"
 
 
+def read_job_label(job_id: str) -> Optional[str]:
+    """Display label of a command job (its ``method`` field doubles as the
+    label — see ``scripts/daemon/jobs.Job``). Lets a tab re-claim *its own*
+    command job (e.g. ``exp-spd``) on GUI reopen without grabbing another tab's.
+    ``None`` for a missing/unreadable record."""
+    data = _read_job_record(job_id)
+    return data.get("method") if data else None
+
+
 def _read_job_record(job_id: str) -> Optional[dict]:
     try:
         return json.loads(
@@ -157,6 +247,24 @@ def _read_job_record(job_id: str) -> Optional[dict]:
         )
     except (OSError, ValueError):
         return None
+
+
+def read_job_started_at(job_id: str) -> Optional[float]:
+    """Wall-clock epoch when the daemon began running ``job_id`` (falling back to
+    its submit time, then ``None`` for a missing/legacy record).
+
+    Used as a floor for the training-sample gallery: only previews written at or
+    after this time belong to the current run, so a fresh launch never surfaces
+    the previous run's stale sample PNGs — they accumulate under
+    ``<output_dir>/sample`` with timestamped names and are never deleted.
+    """
+    data = _read_job_record(job_id)
+    if not data:
+        return None
+    started = data.get("started_at")
+    if started is None:
+        started = data.get("submitted_at")
+    return started if isinstance(started, (int, float)) else None
 
 
 def read_job_chain_variant(job_id: str) -> Optional[str]:

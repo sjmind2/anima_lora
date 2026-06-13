@@ -63,6 +63,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 
+from bench._anima import DEFAULT_DIT
 from library.anima import weights as anima_utils
 from library.log import setup_logging
 from networks import lora_anima
@@ -79,9 +80,7 @@ def parse_args():
         help="Optional LoRA adapter to attach before collecting stats. "
         "Omit to analyze the base DiT only.",
     )
-    p.add_argument(
-        "--dit", default="models/diffusion_models/anima-base-v1.0.safetensors"
-    )
+    p.add_argument("--dit", default=DEFAULT_DIT)
     p.add_argument(
         "--dataset_dir",
         default="post_image_dataset/lora",
@@ -94,6 +93,13 @@ def parse_args():
         action="store_true",
         help="Pick exactly one stem per immediate subdir of --dataset_dir "
         "(one per artist). Overrides --num_samples.",
+    )
+    p.add_argument(
+        "--per_artist_n",
+        type=int,
+        default=1,
+        help="With --per_artist, pick up to this many stems per artist bucket "
+        "(without replacement). Default 1.",
     )
     p.add_argument(
         "--sigmas",
@@ -172,7 +178,7 @@ def dump_channel_stats_safetensors(stats, out_path, prefix="lora_unet_"):
     )
 
 
-def find_sample_stems(dataset_dir, n, seed, per_artist=False):
+def find_sample_stems(dataset_dir, n, seed, per_artist=False, per_artist_n=1):
     # Walk recursively — post-2026-04 the dataset is nested by artist subdir.
     te_files = sorted(
         glob.glob(
@@ -213,8 +219,10 @@ def find_sample_stems(dataset_dir, n, seed, per_artist=False):
         picked = []
         for artist in sorted(by_artist.keys()):
             bucket = by_artist[artist]
-            idx = int(rng.integers(0, len(bucket)))
-            picked.append(bucket[idx])
+            k = min(per_artist_n, len(bucket))
+            idxs = rng.choice(len(bucket), size=k, replace=False)
+            for i in sorted(idxs.tolist()):
+                picked.append(bucket[i])
         return picked
 
     if len(stems) > n:
@@ -390,7 +398,11 @@ def main():
     torch.manual_seed(args.seed)
 
     stems = find_sample_stems(
-        args.dataset_dir, args.num_samples, args.seed, per_artist=args.per_artist
+        args.dataset_dir,
+        args.num_samples,
+        args.seed,
+        per_artist=args.per_artist,
+        per_artist_n=args.per_artist_n,
     )
     logger.info(f"selected {len(stems)} samples: {[s[0] for s in stems]}")
 
@@ -536,6 +548,7 @@ def main():
             "dit": args.dit,
             "num_samples": len(stems),
             "per_artist": bool(args.per_artist),
+            "per_artist_n": args.per_artist_n,
             "sample_stems": [s[0] for s in stems],
             "sigmas": sigmas,
             "n_forward_passes": n_forward,

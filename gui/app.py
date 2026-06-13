@@ -6,16 +6,18 @@ import sys
 from pathlib import Path
 
 import toml
-from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QStackedWidget,
     QTabWidget,
@@ -32,11 +34,14 @@ from gui.i18n import (
     save_language,
     t,
 )
-from gui.tabs.adapter_tab import EasyControlTab, IPAdapterTab, SPDTrainTab
 from gui.tabs.config_tab import ConfigTab
+from gui.tabs.easycontrol_tab import EasyControlTab
 from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
+from gui.tabs.methods_tab import MethodsTab
 from gui.tabs.preprocess_tab import PreprocessingTab
+from gui.tabs.queue_tab import QueueTab
+from gui.tensorboard import TensorBoardTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
     check_for_update_async,
@@ -61,6 +66,10 @@ def _guidebook_path() -> Path:
 
 
 LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文", "ja": "日本語"}
+
+# Keeps the live MainWindow alive across the in-place rebuild that applies a
+# language change (main() seeds it; MainWindow._reload_ui swaps it).
+_WINDOW: MainWindow | None = None
 
 
 def _dark(app: QApplication):
@@ -175,6 +184,131 @@ class GuidebookDialog(QDialog):
         lay.addLayout(btn_bar)
 
 
+def _mcp_paths() -> tuple[Path, Path]:
+    """(venv python, MCP bridge script) for THIS checkout — real absolute
+    paths, not the <repo> placeholder the docs use (scripts/daemon/README.md)."""
+    venv_python = (
+        _REPO_ROOT
+        / ".venv"
+        / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    )
+    return venv_python, _REPO_ROOT / "scripts" / "daemon" / "mcp.py"
+
+
+def _mcp_add_command() -> str:
+    """The `claude mcp add` one-liner for Claude Code."""
+
+    def q(p: Path) -> str:
+        return f'"{p}"' if " " in str(p) else str(p)
+
+    venv_python, bridge = _mcp_paths()
+    return f"claude mcp add anima-daemon -- {q(venv_python)} {q(bridge)}"
+
+
+def _mcp_json_config() -> str:
+    """The client-agnostic mcpServers JSON block (Claude Desktop, OpenClaw, …).
+    json.dumps so Windows backslashes come out escaped and paste-able."""
+    import json
+
+    venv_python, bridge = _mcp_paths()
+    cfg = {
+        "mcpServers": {
+            "anima-daemon": {"command": str(venv_python), "args": [str(bridge)]}
+        }
+    }
+    return json.dumps(cfg, indent=2)
+
+
+class SettingsDialog(QDialog):
+    """App settings: language + MCP server registration for agent clients."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("settings_title"))
+        self.setMinimumWidth(560)
+        # Set when the user picks a new language and opts into an immediate
+        # reload; MainWindow checks it after exec() and rebuilds itself.
+        self.reload_requested = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel(t("language")))
+        self.lang_combo = QComboBox()
+        for code in available_languages():
+            self.lang_combo.addItem(LANG_NAMES.get(code, code), code)
+        self.lang_combo.setCurrentIndex(available_languages().index(current_language()))
+        self.lang_combo.currentIndexChanged.connect(self._change_lang)
+        self.lang_combo.setFixedWidth(120)
+        lang_row.addWidget(self.lang_combo)
+        lang_row.addStretch()
+        lay.addLayout(lang_row)
+
+        mcp_group = QGroupBox(t("settings_mcp_header"))
+        mcp_lay = QVBoxLayout(mcp_group)
+        self._add_command_block(
+            mcp_lay, t("settings_mcp_desc"), _mcp_add_command(), height=64
+        )
+        self._add_command_block(
+            mcp_lay, t("settings_mcp_desc_json"), _mcp_json_config(), height=140
+        )
+        lay.addWidget(mcp_group)
+
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch()
+        close = QPushButton(t("settings_close"))
+        close.clicked.connect(self.close)
+        btn_bar.addWidget(close)
+        lay.addLayout(btn_bar)
+
+    def _add_command_block(
+        self, layout: QVBoxLayout, desc: str, text: str, height: int
+    ) -> None:
+        """A word-wrapped description, a read-only monospace box, and a copy
+        button that flashes confirmation."""
+        label = QLabel(desc)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        edit = QPlainTextEdit(text)
+        edit.setReadOnly(True)
+        mono = QFont("Consolas", 9)
+        mono.setStyleHint(QFont.Monospace)
+        edit.setFont(mono)
+        edit.setFixedHeight(height)
+        layout.addWidget(edit)
+
+        copy_row = QHBoxLayout()
+        copy_row.addStretch()
+        btn = QPushButton(t("settings_mcp_copy"))
+        btn.clicked.connect(lambda: self._copy(text, btn))
+        copy_row.addWidget(btn)
+        layout.addLayout(copy_row)
+
+    def _copy(self, text: str, btn: QPushButton) -> None:
+        QApplication.clipboard().setText(text)
+        btn.setText(t("settings_mcp_copied"))
+        QTimer.singleShot(1500, lambda: btn.setText(t("settings_mcp_copy")))
+
+    def _change_lang(self, idx: int):
+        lang = self.lang_combo.itemData(idx)
+        # save_language also flips the in-process language, so the prompt
+        # below (and a rebuilt MainWindow) already render in the new language.
+        save_language(lang)
+        choice = QMessageBox.question(
+            self,
+            t("settings_lang_apply_title"),
+            t("settings_lang_apply_question"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if choice == QMessageBox.Yes:
+            self.reload_requested = True
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -187,7 +321,7 @@ class MainWindow(QMainWindow):
         main_lay = QVBoxLayout(central)
         main_lay.setContentsMargins(0, 0, 0, 0)
 
-        # Language selector bar
+        # Top button bar (guidebook / models / update / overlays / settings)
         lang_bar = QHBoxLayout()
         if ICON_PATH.exists():
             icon_label = QLabel()
@@ -234,86 +368,116 @@ class MainWindow(QMainWindow):
         )
         lang_bar.addWidget(self.issues_btn)
 
-        self.experimental_btn = QPushButton(t("experimental_features"))
-        self.experimental_btn.setToolTip(t("experimental_features_tooltip"))
-        self.experimental_btn.setCheckable(True)
-        # Two visual states: idle (purple, advertises the toggle) vs active
-        # (orange, signals "you're currently in experimental mode — click to
-        # return"). Style is reapplied in `_update_experimental_btn_style`.
-        self._experimental_idle_style = (
-            "QPushButton { background:#8e44ad; color:white; "
-            "font-weight:bold; padding:4px 12px; border:1px solid #8e44ad; "
+        # The Queue view is a top-bar toggle because the daemon job queue is
+        # global — it spans every method, so it lives as an overlay over the
+        # tab set rather than a tab inside it. Like TensorBoard; the two
+        # overlays are mutually exclusive.
+        self.queue_btn = QPushButton(t("tab_queue"))
+        self.queue_btn.setCheckable(True)
+        self._queue_idle_style = (
+            "QPushButton { background:#5d6d7e; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #5d6d7e; "
             "border-radius:3px; }"
-            "QPushButton:hover { background:#9b59b6; }"
+            "QPushButton:hover { background:#6b7c8c; }"
         )
-        self._experimental_active_style = (
-            "QPushButton { background:#e67e22; color:white; "
-            "font-weight:bold; padding:4px 12px; border:1px solid #e67e22; "
+        self._queue_active_style = (
+            "QPushButton { background:#34495e; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #34495e; "
             "border-radius:3px; }"
-            "QPushButton:hover { background:#f39c12; }"
+            "QPushButton:hover { background:#3d566e; }"
         )
-        self.experimental_btn.toggled.connect(self._toggle_experimental)
-        lang_bar.addWidget(self.experimental_btn)
+        self.queue_btn.toggled.connect(self._toggle_queue_view)
+        lang_bar.addWidget(self.queue_btn)
+
+        # TensorBoard is a top-bar toggle because the run list is shared across
+        # every method — a single global view rather than a per-tab duplicate.
+        # Toggling it on swaps the whole tab area for the TensorBoard panel;
+        # toggling off returns to the tab set.
+        self.tensorboard_btn = QPushButton(t("tab_tensorboard"))
+        self.tensorboard_btn.setCheckable(True)
+        self._tensorboard_idle_style = (
+            "QPushButton { background:#2471a3; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #2471a3; "
+            "border-radius:3px; }"
+            "QPushButton:hover { background:#2e86c1; }"
+        )
+        self._tensorboard_active_style = (
+            "QPushButton { background:#117864; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #117864; "
+            "border-radius:3px; }"
+            "QPushButton:hover { background:#148f77; }"
+        )
+        self.tensorboard_btn.toggled.connect(self._toggle_tensorboard)
+        lang_bar.addWidget(self.tensorboard_btn)
 
         lang_bar.addStretch()
-        lang_bar.addWidget(QLabel(t("language")))
-        self.lang_combo = QComboBox()
-        for code in available_languages():
-            self.lang_combo.addItem(LANG_NAMES.get(code, code), code)
-        self.lang_combo.setCurrentIndex(available_languages().index(current_language()))
-        self.lang_combo.currentIndexChanged.connect(self._change_lang)
-        self.lang_combo.setFixedWidth(100)
-        lang_bar.addWidget(self.lang_combo)
+        self.settings_btn = QPushButton(t("settings_btn"))
+        self.settings_btn.setToolTip(t("settings_btn_tooltip"))
+        self.settings_btn.clicked.connect(self._open_settings)
+        lang_bar.addWidget(self.settings_btn)
         main_lay.addLayout(lang_bar)
 
-        # Two parallel tab sets share a QStackedWidget so the experimental
-        # button swaps the visible tab bar in place — same window, no popup.
-        # Both sets stay alive across switches so subprocess state and log
-        # buffers survive toggling between modes.
-        # Standard set: the official adapter families — plain LoRA (with
-        # hardware variants), T-LoRA (stacked with OrthoLoRA by default, plus
-        # a low-VRAM sibling), HydraLoRA, and ReFT. Postfix and the
-        # image-conditioning adapters (IP-Adapter / EasyControl) live behind
-        # the experimental toggle.
+        # One tab set holds everything; the TensorBoard / Queue overlays share
+        # a QStackedWidget with it so toggling swaps the visible view in place
+        # — same window, no popup. All widgets stay alive across switches so
+        # subprocess state and log buffers survive toggling.
+        # The TensorBoard runs panel is a single shared instance (the run list
+        # is method-agnostic). It's reached via the top-bar TensorBoard toggle
+        # rather than a tab. Both ConfigTab and MethodsTab keep a reference to
+        # its `.panel` so either can sync the log dir on variant switch /
+        # launch / run_start.
+        self._tb_tab = TensorBoardTab()
+
+        # Built before ConfigTab so the Train auto-chain can flush this tab's
+        # GUI preprocess settings to the selected method before it preprocesses.
+        self._preprocess_tab = PreprocessingTab()
+
         self.tabs = QTabWidget()
         self.tabs.addTab(
-            ConfigTab(methods=["lora", "locon", "loha", "lokr", "tlora", "hydralora", "reft"]),
+            ConfigTab(
+                methods=["lora", "locon", "loha", "lokr", "tlora", "hydralora", "reft"],
+                tb_panel=self._tb_tab.panel,
+                preprocess_tab=self._preprocess_tab,
+            ),
             t("tab_config"),
         )
-        self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
+        self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
+        # Experimental tabs sit at the end of the same set (the old top-bar
+        # toggle that swapped a separate tab bar is gone). MethodsTab folds
+        # every trainable experimental method behind one dropdown — FeRA /
+        # ChimeraHydra / Soft Tokens (flat train.py methods) plus SPD / Turbo
+        # (bespoke distill loops) — so they don't need a tab each. EasyControl
+        # has its own preprocess/dataset lifecycle, so it keeps a dedicated tab.
+        self.tabs.addTab(MethodsTab(tb_panel=self._tb_tab.panel), t("tab_experimental"))
+        self.tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
 
-        # Experimental set: FeRA + ChimeraHydra + image-conditioning adapters.
-        # The first tab hosts a ConfigTab whose method picker exposes FeRA and
-        # ChimeraHydra (LoRA-family author-faithful research variants kept
-        # behind the experimental gate). IP-Adapter and EasyControl have their
-        # own preprocess/dataset lifecycles, so they keep dedicated tabs.
-        self.experimental_tabs = QTabWidget()
-        self.experimental_tabs.addTab(
-            ConfigTab(methods=["fera", "chimera"]),
-            t("tab_methods"),
-        )
-        self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
-        self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
-        self.experimental_tabs.addTab(SPDTrainTab(), t("tab_spd"))
+        # The Queue view is a global overlay reached via the top-bar toggle
+        # (like TensorBoard), not a tab — the daemon queue spans every method.
+        # Lives in the stack below.
+        self._queue_tab = QueueTab()
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)
-        self.tab_stack.addWidget(self.experimental_tabs)
+        self.tab_stack.addWidget(self._tb_tab)
+        self.tab_stack.addWidget(self._queue_tab)
         main_lay.addWidget(self.tab_stack)
         self.setCentralWidget(central)
 
-        self._update_experimental_btn_style(False)
+        self._update_tensorboard_btn_style(False)
+        self._update_queue_btn_style(False)
 
     def closeEvent(self, event):
         # Without this, closing the window leaves training subprocesses
         # (accelerate → train.py) orphaned and still holding VRAM.
-        for tabs in (self.tabs, self.experimental_tabs):
-            for i in range(tabs.count()):
-                cleanup = getattr(tabs.widget(i), "cleanup_subprocess", None)
-                if callable(cleanup):
-                    cleanup()
+        for i in range(self.tabs.count()):
+            cleanup = getattr(self.tabs.widget(i), "cleanup_subprocess", None)
+            if callable(cleanup):
+                cleanup()
+        # The shared TensorBoard + Queue views live in the stack, not a tab set.
+        self._tb_tab.cleanup_subprocess()
+        self._queue_tab.cleanup_subprocess()
         super().closeEvent(event)
 
     def _show_update_available(self, latest_tag: str) -> None:
@@ -325,13 +489,43 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#d97706; }"
         )
 
-    def _toggle_experimental(self, on: bool):
-        self.tab_stack.setCurrentWidget(self.experimental_tabs if on else self.tabs)
-        self._update_experimental_btn_style(on)
+    def _clear_overlay_toggle(self, btn: QPushButton, style_fn) -> None:
+        """Silently un-check an overlay toggle (TensorBoard / Queue) and repaint
+        it, without re-firing its toggled handler."""
+        if btn.isChecked():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+            style_fn(False)
 
-    def _update_experimental_btn_style(self, on: bool):
-        self.experimental_btn.setStyleSheet(
-            self._experimental_active_style if on else self._experimental_idle_style
+    def _toggle_tensorboard(self, on: bool):
+        if on:
+            # TensorBoard and Queue are mutually-exclusive overlays.
+            self._clear_overlay_toggle(self.queue_btn, self._update_queue_btn_style)
+            self.tab_stack.setCurrentWidget(self._tb_tab)
+        else:
+            self.tab_stack.setCurrentWidget(self.tabs)
+        self._update_tensorboard_btn_style(on)
+
+    def _update_tensorboard_btn_style(self, on: bool):
+        self.tensorboard_btn.setStyleSheet(
+            self._tensorboard_active_style if on else self._tensorboard_idle_style
+        )
+
+    def _toggle_queue_view(self, on: bool):
+        if on:
+            # Queue and TensorBoard are mutually-exclusive overlays.
+            self._clear_overlay_toggle(
+                self.tensorboard_btn, self._update_tensorboard_btn_style
+            )
+            self.tab_stack.setCurrentWidget(self._queue_tab)
+        else:
+            self.tab_stack.setCurrentWidget(self.tabs)
+        self._update_queue_btn_style(on)
+
+    def _update_queue_btn_style(self, on: bool):
+        self.queue_btn.setStyleSheet(
+            self._queue_active_style if on else self._queue_idle_style
         )
 
     def _open_guidebook(self):
@@ -344,34 +538,47 @@ class MainWindow(QMainWindow):
         dlg = GuidebookDialog(path, self)
         dlg.show()
 
-    def _change_lang(self, idx: int):
-        lang = self.lang_combo.itemData(idx)
-        save_language(lang)
-        QMessageBox.information(
-            self,
-            "Language" if lang == "en" else "언어",
-            "Please restart the application to apply the language change."
-            if current_language() == "en"
-            else "언어 변경을 적용하려면 앱을 다시 시작해주세요.",
-        )
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec()
+        if dlg.reload_requested:
+            self._reload_ui()
+
+    def _reload_ui(self):
+        """Rebuild the main window in place to apply a language change — every
+        string is resolved at construction, so a fresh window is the cleanest
+        way to retranslate. The daemon owns running jobs, so only local UI
+        state (unsaved edits, overlay subprocesses) resets; closeEvent reaps
+        the old window's TensorBoard/Queue children as usual. New window is
+        shown before the old closes so quitOnLastWindowClosed never fires."""
+        global _WINDOW
+        new = MainWindow()
+        new.setGeometry(self.geometry())
+        new.show()
+        _WINDOW = new
+        self.close()
 
 
 def _ensure_source_image_dir() -> None:
     """Create the training source dir on launch so first-time users hit an
     empty folder rather than a confusing "no images found" error from the
-    preprocess pipeline. Path comes from base.toml's `source_image_dir`
-    so preset/method overrides are respected; falls back to `image_dataset/`.
+    preprocess pipeline. Path comes from `source_image_dir` (now in
+    configs/preprocess.toml; a legacy copy in base.toml still wins, mirroring
+    load_path_overrides); falls back to `image_dataset/`.
     """
     src = "image_dataset"
-    base_path = _REPO_ROOT / "configs" / "base.toml"
-    try:
-        if base_path.exists():
-            raw = toml.loads(base_path.read_text(encoding="utf-8"))
-            cfg_src = raw.get("source_image_dir")
-            if isinstance(cfg_src, str) and cfg_src.strip():
-                src = cfg_src
-    except (OSError, toml.TomlDecodeError):
-        pass
+    # preprocess.toml supplies the default; a legacy key in base.toml overrides
+    # it (read second), matching load_path_overrides' precedence.
+    for fname in ("preprocess.toml", "base.toml"):
+        cfg_path = _REPO_ROOT / "configs" / fname
+        try:
+            if cfg_path.exists():
+                raw = toml.loads(cfg_path.read_text(encoding="utf-8"))
+                cfg_src = raw.get("source_image_dir")
+                if isinstance(cfg_src, str) and cfg_src.strip():
+                    src = cfg_src
+        except (OSError, toml.TomlDecodeError):
+            pass
     src_path = Path(src)
     if not src_path.is_absolute():
         src_path = _REPO_ROOT / src_path
@@ -393,6 +600,7 @@ def main():
     # the queue, the Train button, and re-attach are ready immediately. Best-
     # effort: a failure here never blocks the GUI from opening.
     gui_daemon.ensure_daemon_quietly()
-    win = MainWindow()
-    win.show()
+    global _WINDOW
+    _WINDOW = MainWindow()
+    _WINDOW.show()
     sys.exit(app.exec())

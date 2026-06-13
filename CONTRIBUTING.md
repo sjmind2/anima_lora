@@ -20,21 +20,28 @@ Five areas where outside contributions would have the biggest impact right now. 
 
 Per-block cond LoRA on self-attn + FFN with a logit-bias gate. DiT frozen; trains a handful of cond LoRA blocks plus a scalar gate. The architecture is naturally contribution-friendly: each control type is one independent adapter, no method changes required. See [`docs/experimental/easycontrol.md`](docs/experimental/easycontrol.md). The wall right now is the **adapter zoo** around it.
 
-- **Trained adapters** — canny, depth, pose, lineart, scribble, segmentation, … each one a self-contained PR with model card, training config, and samples. Hosted under a HuggingFace collection (planned: `anima-easycontrol`). *[Tier 1.5 — bench numbers and side-by-side samples carry the PR; no new method code]*
-- **Per-task dataset spec** — one doc per control type covering pair format, recommended size (~2k pairs), where to source signal images. Currently undocumented. *[Tier 1]*
+**There is already one shipped control task to copy: colorize** (`easycontrol_adapters/colorization/`). It's the worked template for everything below — a per-task project that builds its own *condition* (mangafied B&W → color) while reusing the shipped network unchanged. A new control type follows the same mold rather than inventing structure:
+
+- a **project dir** under `easycontrol_adapters/<task>/` (the condition builder + `prep.py` + a README), exactly like `easycontrol_adapters/colorization/`;
+- a **method config** `configs/methods/<task>.toml` (+ a `configs/gui-methods/<task>.toml` GUI variant), selected at runtime by the **`EASYADAPTER=<task>`** env var — *not* a `make easycontrol-<task>` target. The existing `make easycontrol[-preprocess] EASYADAPTER=<task>` and `make test-easycontrol EASYADAPTER=<task>` targets already dispatch on it;
+- a **dataset blueprint** `configs/datasets/<task>.toml` wiring the `cond_cache_dir` (and `text_cache_dir` if the task reshapes the text channel, as colorize does).
+
+Read colorize's [README](easycontrol_adapters/colorization/README.md) before starting a new one — its caption policy, cond-noise, and inference-settings notes generalize. Concretely, the zoo still needs:
+
+- **Trained adapters** — canny, depth, pose, lineart, scribble, segmentation, … each one a self-contained PR in colorize's shape (project dir + `configs/methods/<task>.toml` + model card + samples). Hosted under a HuggingFace collection (planned: `anima-easycontrol`). *[Tier 1.5 — bench numbers and side-by-side samples carry the PR; no new method code]*
+- **Per-task dataset spec** — one doc per control type covering pair format, recommended size (~2k pairs), where to source signal images. colorize's README is the only one written so far. *[Tier 1]*
 - **Toy datasets** — 200-pair CC-licensed bundles per control type so a contributor can validate the pipeline before committing to a full dataset. *[Tier 1]*
-- **One-command training aliases** — `make easycontrol-canny`, `make easycontrol-depth`, … as per-task preset configs in `configs/methods/easycontrol/`. *[Tier 1]*
 - **Control-fidelity eval harness** — held-out ~100-pair sets per control type that re-extract the signal from generation (canny→canny, depth→depth, …) and report a fidelity metric vs the input. Lets adapter PRs be reviewed on numbers rather than vibes. The current `bench/easycontrol/` directory has equivalence + smoke scripts only; the harness slot is empty. *[Tier 1.5]*
 
 ### 2. Turbo LoRA (Decoupled DMD distillation)
 
-Distill 28-step Anima @ CFG=4 into a 4–8 step generator using **co-LoRA** (LoRA for both the student and the fake score model on the same frozen DiT). The deployment story is that `turbo_anima_lora.safetensors` stacks on top of any existing concept LoRA at inference, the same way LCM-LoRA composes with style LoRAs. See [`docs/proposal/turbo_anima_dmd_lora.md`](docs/proposal/turbo_anima_dmd_lora.md) — Decoupled DMD reference: Liu et al., arXiv:2511.22677.
+Distill 28-step Anima @ CFG=4 into a 4–8 step generator using **co-LoRA** (LoRA for both the student and the fake score model on the same frozen DiT). The deployment story is that `turbo_anima_lora.safetensors` stacks on top of any existing concept LoRA at inference, the same way LCM-LoRA composes with style LoRAs. See [`docs/experimental/dpdmd.md`](docs/experimental/dpdmd.md) (ops) and [`docs/structure/dpdmd.md`](docs/structure/dpdmd.md) (structure/math) — the shipped method is DP-DMD (Wu et al., arXiv:2602.03139); the CA-decoupled DMD2 it replaced is Liu et al., arXiv:2511.22677.
 
 Status: proposal only — no code, no checkpoints, no bench. The proposal is fully scoped (file-level plan, phased validation, risk register) and is waiting on an implementer.
 
 What's missing — this is one Tier 2 PR by definition (new method + paper + `bench/turbo/` + docs/methods entry + `make exp-turbo` / `make exp-test-turbo`), but it splits cleanly along phase boundaries:
 
-- **Phase 0: single-prompt overfit (~1 day).** Implement `networks/methods/turbo_dmd.py` (two LoRA networks, attachment toggle), `scripts/distill_turbo.py` (CA + DM gradient assembly, two optimizer states, the renoise primitive), `configs/methods/turbo.toml`, `make exp-turbo`. Prove the loop converges on one prompt at batch 1, 2k iterations. *[Tier 2 — drop a `bench/turbo/results/<ts>-phase0/` with teacher@28 vs student@4 side-by-side on a fixed seed]*
+- **Phase 0: single-prompt overfit (~1 day).** Implement `networks/methods/turbo_dmd.py` (two LoRA networks, attachment toggle), `scripts/distill_turbo/` (CA + DM gradient assembly, two optimizer states, the renoise primitive), `configs/methods/turbo.toml`, `make exp-turbo`. Prove the loop converges on one prompt at batch 1, 2k iterations. *[Tier 2 — drop a `bench/turbo/results/<ts>-phase0/` with teacher@28 vs student@4 side-by-side on a fixed seed]*
 - **Phase 1: 100-prompt sweep (~3 days).** Image Reward + HPS v2.1 + per-aspect breakdown (1024², 832×1248, 1248×832). Pass = student IR ≥ 80% of teacher, no aspect below 60%. *[Tier 2 continuation]*
 - **Phase 2: full HPS bench (~1 week).** 1k COCO-prompt sample, all 4 schedule configs from the paper's Table 1 as an ablation, replicates the paper's Decoupled-Hybrid claim on Anima. *[Tier 1.5 once Phase 1 has landed]*
 - **Phase 3: composition test (~2 days).** (turbo only) vs (concept LoRA @ 28) vs (turbo + concept @ 4) on three existing concept checkpoints. Validates the deployment story. *[Tier 1.5]*
@@ -43,7 +50,7 @@ If Phase 1 fails after one rank bump, the proposal explicitly says kill it — d
 
 ### 3. DCW calibration
 
-DCW v4 (`make dcw` → `fusion_head.safetensors`) ships. The wall is calibration coverage: each released LoRA needs its own fusion head, and several v4 controller paths are stubbed. See [`docs/methods/dcw.md`](docs/methods/dcw.md) "Limitations / open questions".
+DCW v4 (`make dcw` → `fusion_head.safetensors`) ships. The wall is calibration coverage: each released LoRA needs its own fusion head, and several v4 controller paths are stubbed. See [`docs/inference/dcw.md`](docs/inference/dcw.md) "Limitations / open questions".
 
 - **σ̂² channel re-train (3-seed rerun).** Prototype fails Gate B on the variance head. Default is to ship with `--dcw_v4_disable_shrinkage` until this clears. Run `make dcw` across 3 independent seeds, retrain `train_fusion_head.py` with the combined pool, re-evaluate Gate B. If it still fails, document the failure and harden the disable flag as permanent. *[Tier 1.5 — bench script exists, the contribution is the seed sweep + write-up]*
 - **Tiled inference path.** v4 controller currently no-ops under tiled VAE/DiT. The single-tile `c_pool` / `g_obs` is ill-defined at tile boundaries. Two paths: (a) compute one global `c_pool` / `g_obs` before tiling and broadcast it across tiles, (b) keep the no-op and document. Either is a valid PR; (a) is preferred. *[Tier 1.5]*
@@ -79,7 +86,7 @@ Translatable content lives in four places, each with its own contribution shape 
 
 **(b) Per-field tooltips — `gui/explanations/__init__.py`.** Two dict-of-dicts power the form-field help: `FIELD_HELP` (config-form tooltips, ~50 keys) and `PREPROCESS_FIELD_HELP` (Preprocessing tab knobs, ~10 keys). Each entry is `{"en": "...", "ko": "..."}`. Add your language code as a sibling key in every entry you want translated. `field_help()` / `preprocess_field_help()` fall back to `"en"` for missing language keys. These are the strings users see when they click a form-row label, so translation quality matters more than for transient buttons — keep technical terms (LoRA, MoE, σ-bucket, VAE) untranslated. *[Tier 1]*
 
-**(c) Long-form method guides — `gui/explanations/guides/<name>.<lang>.html`.** Right-panel HTML blocks for method variants and the Preprocessing tab. Filename convention is `<name>.<lang>.html`; the loader (`_read_guide` in `gui/explanations/__init__.py`) auto-falls back to `.en.html` when the language version is absent. Names currently present: `lora`, `tlora`, `hydralora`, `fera`, `reft`, `postfix`, `preprocess`, plus the shared snippets `_apply_note` and `_not_mergeable`. To translate, drop in `<name>.<code>.html` files alongside the English ones — no code change required. Preserve any `<a href="…">`, `<code>`, and color-coded `<span>` markup; the GUI's QTextBrowser renders these. *[Tier 1]*
+**(c) Long-form method guides — `gui/explanations/guides/<name>.<lang>.html`.** Right-panel HTML blocks for method variants and the Preprocessing tab. Filename convention is `<name>.<lang>.html`; the loader (`_read_guide` in `gui/explanations/__init__.py`) auto-falls back to `.en.html` when the language version is absent. Names currently present: `lora`, `tlora`, `hydralora`, `fera`, `postfix`, `preprocess`, plus the shared snippets `_apply_note` and `_not_mergeable`. To translate, drop in `<name>.<code>.html` files alongside the English ones — no code change required. Preserve any `<a href="…">`, `<code>`, and color-coded `<span>` markup; the GUI's QTextBrowser renders these. *[Tier 1]*
 
 **(d) Docs and structure images — `docs/`.**
 - `docs/guidelines/가이드북.md` is the end-to-end onboarding doc and only exists in Korean. An English translation (or any other language) would significantly widen the audience. The `guidebook_tooltip` string in `gui/i18n/en.py` currently points users at the Korean file — once a translation lands, wire the Guidebook button (in `gui/app.py`) to pick the right file based on `current_language()`.
@@ -139,8 +146,9 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
    - For a kernel rewrite: a numerical-equivalence test against the previous path within a stated tolerance.
    - For a schedule revision: a test that the new schedule reduces to the old one under a documented config flag, so the change can be A/B'd.
    - For a memory optimization: an assertion on peak allocator usage on a small fixture, if feasible.
+   - For a gated feature (off-by-default flag): both directions — an inertness test (flag off ⇒ identical training) **and** a liveness signal (flag on ⇒ measurably on). Aux losses get the latter for free from the `LossComposer` liveness ledger (the `LIVENESS:` audit in `library/training/losses.py`); any other producer that can silently skip should emit a `<name>/active` metric.
 
-   Add the test to `tests/`, following the patterns in `test_network_registry.py` and `test_lora_custom_autograd.py`. If exact equivalence is impossible (e.g. a deliberately different algorithm), state the tolerance and what would constitute a regression.
+   Add the test to `tests/`, following the patterns in `test_network_registry.py` and `test_lora_dtype_policy.py`. If exact equivalence is impossible (e.g. a deliberately different algorithm), state the tolerance and what would constitute a regression.
 
 3. **Documentation update.** Update the relevant `docs/methods/<name>.md`, `docs/optimizations/<name>.md`, or section of `CLAUDE.md` to reflect the new behavior. No new top-level doc unless the change introduces a user-visible flag that warrants one.
 
@@ -156,7 +164,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
 **Requirements:**
 
-1. **Paper reference.** New methods exist because someone published a result that justifies the complexity. The PR description must cite the paper (title, authors, venue, arXiv id) and the upstream code if any. Method docs follow the same format as the existing ones — see `docs/methods/reft.md` (shipped) and `docs/experimental/easycontrol.md` (experimental) for the shape. Stable methods land in `docs/methods/<name>.md`; unstable / unmerged-into-shipped methods land in `docs/experimental/<name>.md`.
+1. **Paper reference.** New methods exist because someone published a result that justifies the complexity. The PR description must cite the paper (title, authors, venue, arXiv id) and the upstream code if any. Method docs follow the same format as the existing ones — see `docs/methods/hydra-lora.md` (shipped) and `docs/experimental/easycontrol.md` (experimental) for the shape. Stable methods land in `docs/methods/<name>.md`; unstable / unmerged-into-shipped methods land in `docs/experimental/<name>.md`.
 
    Hand-rolled methods without prior art are not categorically rejected, but the bar is higher: in the absence of a paper, the bench results have to carry the argument alone, and reviewers will be skeptical. If you are confident, propose the method in an issue first.
 
@@ -214,7 +222,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
 5. **Make/`tasks.py` entry points.** A new method needs `make <name>` and matching `python tasks.py <name>` invocations, plus a `test-<name>` target that runs `inference.py` against a checkpoint produced by the method. Follow the patterns in the `Makefile`.
 
-6. **Mergeability statement.** If the method produces weights that fold into the base DiT (LoRA family), confirm that `make merge` works and ship a merge-equivalence check in the bench. If it does not (ReFT / Hydra moe / postfix / prefix / IP-Adapter / EasyControl), say so explicitly in the doc and update `scripts/merge_to_dit.py`'s refusal list.
+6. **Mergeability statement.** If the method produces weights that fold into the base DiT (LoRA family), confirm that `make merge` works and ship a merge-equivalence check in the bench. If it does not (Hydra moe / postfix / prefix / IP-Adapter / EasyControl), say so explicitly in the doc and update `scripts/merge_to_dit.py`'s refusal list.
 
 7. **Empirical result.** The PR must show the method works on Anima specifically. Cite a bench run from `bench/<method_name>/results/<timestamp>/` and link to a small set of side-by-side images (3–6 seeds is fine) demonstrating the claimed effect. "It compiles and trains without crashing" is not a result — both `LoRA + this` and `LoRA alone` need to be in the comparison.
 

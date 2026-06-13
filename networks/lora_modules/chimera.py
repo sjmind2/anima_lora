@@ -2,13 +2,13 @@
 #
 # Two independent HydraLoRAs (Tian et al., NeurIPS'24; arXiv:2404.19245) glued
 # at the residual — that's the chimera. The content half routes K_c B-heads
-# off pooled rank-R text features (HydraLoRA's per-layer router on lx). The
-# frequency half routes K_f B-heads off the network-level FreqRouter fed FEI
-# of z_t (FeRA, arXiv:2511.17979). T-LoRA's rank mask (Liu et al.;
-# TimeStep Master, arXiv:2503.07416) modulates the content half only — the
-# freq half stays full-rank at every t, giving an asymmetric "core expert
-# always on" / "context expert rank-modulated" split inspired by TimeStep
-# Master's asymmetric mixture.
+# off the pooled post-LLM-adapter ``crossattn_emb`` (prompt content) via the
+# network-level ContentRouter. The frequency half routes K_f B-heads off the
+# network-level FreqRouter fed FEI of z_t (FeRA, arXiv:2511.17979). T-LoRA's
+# rank mask (Liu et al.; TimeStep Master, arXiv:2503.07416) modulates the
+# content half only — the freq half stays full-rank at every t, giving an
+# asymmetric "core expert always on" / "context expert rank-modulated" split
+# inspired by TimeStep Master's asymmetric mixture.
 #
 # Per Linear:
 #
@@ -28,8 +28,14 @@
 #     into (K_c, out, r) → P_bases_c, next K_f·r partitioned into
 #     (K_f, out, r) → P_bases_f. Every P_bases_c[k].col_space ⊥ every
 #     P_bases_f[j].col_space.
-#   This is strictly stronger than the prior 1-A chimera, which gave only
-#   output-side orthogonality (B-pool subspaces) while sharing one A.
+#
+# Both pools are network-routed and centered-gate by construction (the only
+# shipped configuration): each pool's gate is recentered to ``π − 1/K`` in the
+# forward and λ_c/λ_f start at ``lambda_init`` (>0). ΔW = 0 at init (base
+# preserved exactly) while each pool's disjoint per-expert P-subspaces still
+# feed its router a nonzero step-0 gradient. Both routers live at the network
+# level (``ContentRouter`` / ``FreqRouter`` in ``LoRANetwork``) and write π_c /
+# π_f into the slot-assigned buffers below; there is no per-Linear router.
 
 import logging
 from typing import Dict, List, Optional
@@ -38,32 +44,152 @@ import torch
 
 from networks.attn_fuse import match_fused_spec
 from networks.lora_modules.base import BaseLoRAModule, _absorb_channel_scale
-from networks.lora_modules.custom_autograd import lora_down_project
 from networks.lora_modules.lora import defuse_standard_qkv
 
 logger = logging.getLogger(__name__)
 
 
-class ChimeraHydraLoRAModule(BaseLoRAModule):
-    """ChimeraHydra training-time module: two Cayley A's, two B-pools,
-    one per-Linear content router, one shared freq buffer.
+class _ChimeraRoutingMixin:
+    """Shared dual-pool routing plumbing for the train + inference modules.
 
-    Concretely two HydraLoRAs in parallel — the content half is the
-    HydraLoRA paper's "1 A → many Bs + per-layer router on lx", the freq
-    half is the same shape but routed by the network-level FreqRouter
-    (built in ``LoRANetwork``) reading FEI(z_t). T-LoRA's rank mask is
-    folded into the content branch's effective P only — the freq branch
-    keeps full rank at every t (TimeStep Master-style asymmetric pool).
+    Both chimera classes carry two gate buffers — ``_content_routing_weights``
+    (π_c, written by the network-level ContentRouter) and
+    ``_freq_routing_weights`` (π_f, written by the network-level FreqRouter) —
+    and combine the two pools' up-projections identically. The slot-assign
+    contract (NO ``.detach()``, NO ``.copy_()`` — the buffer must carry the
+    router's ``grad_fn`` so ``∂L/∂π`` reaches the router parameters) lives here
+    once, mirroring ``router_state._set_routing_weights`` and the matching
+    methods on ``HydraLoRAModule``.
+    """
 
-    The shared SVD of the base weight gives both pools their bases:
-    distinct singular-vector slices on each side ⇒ A_c.row_space ⊥
-    A_f.row_space and B_c[*].col_space ⊥ B_f[*].col_space, structurally,
-    at step 0. Cayley rotates each within its assigned subspace.
+    def _register_routing_buffers(self, K_c: int, K_f: int) -> None:
+        # Uniform 1/K placeholders, overwritten per-step by the network-level
+        # routers via direct slot assignment. Non-persistent — re-derived on
+        # construction.
+        self.register_buffer(
+            "_content_routing_weights",
+            torch.full((1, K_c), 1.0 / max(K_c, 1), dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_freq_routing_weights",
+            torch.full((1, K_f), 1.0 / max(K_f, 1), dtype=torch.float32),
+            persistent=False,
+        )
+        # Cached (B, K_c+K_f) gate read by ``LoRANetwork._get_chimera_balance_
+        # loss`` (slices at K_c into independent per-pool Switch losses).
+        self._last_gate = None
+
+    def set_freq_routing_weights(self, weights: torch.Tensor) -> None:
+        """Slot-assign the freq pool's gates (preserves grad_fn)."""
+        self._freq_routing_weights = self._coerce_gate(
+            weights, self._freq_routing_weights
+        )
+
+    def clear_freq_routing_weights(self) -> None:
+        """Reset to uniform 1/K_f without rebinding the pointer."""
+        K_f = int(self._freq_routing_weights.shape[-1])
+        self._freq_routing_weights.fill_(1.0 / max(K_f, 1))
+
+    def set_content_routing_weights(self, weights: torch.Tensor) -> None:
+        """Slot-assign π_c from the network-level ContentRouter (preserves
+        grad_fn — same contract as :meth:`set_freq_routing_weights`)."""
+        self._content_routing_weights = self._coerce_gate(
+            weights, self._content_routing_weights
+        )
+
+    def clear_content_routing_weights(self) -> None:
+        K_c = int(self._content_routing_weights.shape[-1])
+        self._content_routing_weights.fill_(1.0 / max(K_c, 1))
+
+    @staticmethod
+    def _coerce_gate(weights: torch.Tensor, buf: torch.Tensor) -> torch.Tensor:
+        w = weights.to(dtype=buf.dtype, device=buf.device)
+        if w.dim() == 1:
+            w = w.unsqueeze(0)
+        return w
+
+    @staticmethod
+    def _broadcast_gate(pi: torch.Tensor, batch: int) -> torch.Tensor:
+        """(K,) / (1, K) → (batch, K); already-batched passes through."""
+        if pi.dim() == 1:
+            pi = pi.unsqueeze(0)
+        if pi.shape[0] == 1 and batch > 1:
+            pi = pi.expand(batch, -1)
+        return pi
+
+    def _content_gate_raw(self, batch: int) -> torch.Tensor:
+        """π_c broadcast to the batch, fp32 (the einsum casts at its boundary)."""
+        return self._broadcast_gate(self._content_routing_weights, batch).float()
+
+    def _freq_gate_raw(self, batch: int) -> torch.Tensor:
+        """π_f broadcast to the batch in its native dtype (grad_fn intact)."""
+        return self._broadcast_gate(self._freq_routing_weights, batch)
+
+    def _full_gate(self, pi_c_raw: torch.Tensor) -> torch.Tensor:
+        """(B, K_c+K_f) raw (uncentered) simplex for the per-pool balance loss.
+
+        ``LoRANetwork._get_chimera_balance_loss`` slices at
+        ``num_experts_content`` to recover the two halves.
+        """
+        pi_f = self._broadcast_gate(self._freq_routing_weights, pi_c_raw.shape[0])
+        pi_f = pi_f.to(pi_c_raw.dtype)
+        if pi_f.shape[0] != pi_c_raw.shape[0]:
+            pi_f = pi_f.expand(pi_c_raw.shape[0], -1)
+        return torch.cat([pi_c_raw, pi_f], dim=-1)
+
+    @staticmethod
+    def _center(pi: torch.Tensor, num_experts: int) -> torch.Tensor:
+        """Recenter a gate to ``π − 1/K`` (NOT in-place — preserves grad_fn so
+        the FreqRouter / ContentRouter still receive gradient). A uniform gate
+        then contributes exactly 0, keeping ΔW=0 at init."""
+        return pi - (1.0 / num_experts)
+
+    @staticmethod
+    def _combine_up(lx_c, lx_f, comb_c, comb_f, scale):
+        """Cat both pools along the rank axis → ONE bmm (only one full
+        hidden-size tensor live at a time). ``scale`` is shared (rank_dropout
+        returns the same scalar for both pools), so it folds out of the sum.
+        """
+        orig_shape = lx_c.shape
+        B = orig_shape[0]
+        lx_cat = torch.cat(
+            [lx_c.reshape(B, -1, orig_shape[-1]), lx_f.reshape(B, -1, orig_shape[-1])],
+            dim=-1,
+        )  # (B, L, 2r)
+        comb_cat = torch.cat([comb_c, comb_f], dim=-1)  # (B, out, 2r)
+        out = torch.bmm(lx_cat, comb_cat.transpose(1, 2))
+        return (out * scale).reshape(*orig_shape[:-1], -1)
+
+
+class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
+    """ChimeraHydra training-time module: two Cayley A's, two B-pools, both
+    network-routed (content via ContentRouter, freq via FreqRouter).
+
+    Concretely two HydraLoRAs in parallel — same shape on each side, the
+    content half routed by the pooled ``crossattn_emb`` and the freq half by
+    FEI(z_t). T-LoRA's rank mask is folded into the content branch's effective
+    P only — the freq branch keeps full rank at every t (TimeStep Master-style
+    asymmetric pool).
+
+    The shared SVD of the base weight gives both pools their bases: distinct
+    singular-vector slices on each side ⇒ A_c.row_space ⊥ A_f.row_space and
+    B_c[*].col_space ⊥ B_f[*].col_space, structurally, at step 0. Cayley
+    rotates each within its assigned subspace.
+
+    ``use_ortho_init=True`` swaps each pool's frozen-basis + Cayley
+    parameterization for **trainable** fp32 SVD-seeded bases (``Q_basis_*`` /
+    ``P_bases_*`` become Parameters, ``S_*`` and the Cayley solve drop out). ΔW
+    is then uncapped — it can leave the principal 2r-subspace, the fix for
+    "chimera-ortho feels weak" — while keeping the W₀-aligned warm start.
+    Pool orthogonality holds at init and is free to drift thereafter. ΔW=0 at
+    init is unaffected (it comes from the centered uniform gate, not the basis).
 
     Save distills Cayley → free-form per pool (see
-    :meth:`distill_save_state_dict` / :meth:`build_moe_state_dict` below);
-    load rebuilds a ``ChimeraHydraInferenceModule`` rather than
-    re-instantiating this class.
+    :meth:`distill_save_state_dict` / :meth:`build_moe_state_dict` below); the
+    OrthoInit path is the same distill with R = I. Either way load rebuilds a
+    ``ChimeraHydraInferenceModule`` rather than re-instantiating this class —
+    the on-disk ``*_chimera.safetensors`` layout is identical.
     """
 
     def __init__(
@@ -79,7 +205,8 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         num_experts_content: int = 3,
         num_experts_freq: int = 3,
         channel_scale=None,
-        use_global_content_router: bool = False,
+        lambda_init: float = 0.0,
+        use_ortho_init: bool = False,
     ):
         super().__init__(
             lora_name,
@@ -97,10 +224,6 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
                 f"ChimeraHydra requires both pools non-empty: "
                 f"K_c={num_experts_content}, K_f={num_experts_freq}"
             )
-        # When True, the per-Linear ``self.router`` is skipped and π_c
-        # arrives via slot-assign on ``_content_routing_weights`` (network-
-        # level ContentRouter — same contract as the freq pool).
-        self.use_global_content_router = bool(use_global_content_router)
 
         K_c = int(num_experts_content)
         K_f = int(num_experts_freq)
@@ -158,47 +281,45 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
             Q_basis_c = Q_shared.clone()
             Q_basis_f = Q_shared.clone()
             P_shared = U[:, :r].clone().contiguous()
-            P_bases_c_init = (
-                P_shared.unsqueeze(0).expand(K_c, -1, -1).contiguous()
-            )
-            P_bases_f_init = (
-                P_shared.unsqueeze(0).expand(K_f, -1, -1).contiguous()
-            )
+            P_bases_c_init = P_shared.unsqueeze(0).expand(K_c, -1, -1).contiguous()
+            P_bases_f_init = P_shared.unsqueeze(0).expand(K_f, -1, -1).contiguous()
         del U, _S_vals, V, W
         self._disjoint_basis = disjoint
+        self.use_ortho_init = bool(use_ortho_init)
 
-        # Frozen subspace bases (one per pool).
-        self.register_buffer("Q_basis_c", Q_basis_c.cpu())
-        self.register_buffer("Q_basis_f", Q_basis_f.cpu())
-        self.register_buffer("P_bases_c", P_bases_c_init.cpu())  # (K_c, out, r)
-        self.register_buffer("P_bases_f", P_bases_f_init.cpu())  # (K_f, out, r)
-
-        # Cayley(0) = I → at init each effective basis equals its frozen
-        # buffer. Per-pool S parameters are independent.
-        self.S_q_c = torch.nn.Parameter(torch.zeros(r, r))
-        self.S_q_f = torch.nn.Parameter(torch.zeros(r, r))
-        self.S_p_c = torch.nn.Parameter(torch.zeros(K_c, r, r))
-        self.S_p_f = torch.nn.Parameter(torch.zeros(K_f, r, r))
-
-        # Per-pool λ: ΔW=0 at step 0 (zero-init) and the two pools have
-        # independent magnitudes through training (no shared scaling).
-        self.lambda_c = torch.nn.Parameter(torch.zeros(1, r))
-        self.lambda_f = torch.nn.Parameter(torch.zeros(1, r))
-
-        # Per-Linear content router: pooled rank-R lx_c → K_c. The freq
-        # router lives at the network level (one FreqRouter shared across
-        # all chimera Linears) and writes π_f via the slot-assigned
-        # ``_freq_routing_weights`` buffer below. Skipped entirely under
-        # global mode — π_c arrives via ``_content_routing_weights`` from
-        # the network-level ContentRouter, so the per-Linear router would
-        # be dead weight and inflate the on-disk checkpoint.
-        if not self.use_global_content_router:
-            self.router = torch.nn.Linear(r, K_c, bias=True)
-            with torch.no_grad():
-                torch.nn.init.normal_(self.router.weight, std=0.01)
-                self.router.bias.zero_()
+        if self.use_ortho_init:
+            # OrthoInit: the SVD bases become TRAINABLE fp32 parameters (no
+            # frozen buffer, no Cayley). ΔW can leave the principal 2r-subspace
+            # — the fix for "chimera-ortho feels weak" (the Cayley path caps
+            # colspace(ΔW) ⊆ top-2r(W₀)) — while keeping the W₀-aligned warm
+            # start. ΔW=0 at init still holds via the centered uniform gate
+            # (so λ_c/λ_f need not be 0). Pool orthogonality holds at init and
+            # is then free to drift, exactly as OrthoInitLoRAModule intends.
+            self.Q_basis_c = torch.nn.Parameter(Q_basis_c.cpu().float())
+            self.Q_basis_f = torch.nn.Parameter(Q_basis_f.cpu().float())
+            self.P_bases_c = torch.nn.Parameter(P_bases_c_init.cpu().float())
+            self.P_bases_f = torch.nn.Parameter(P_bases_f_init.cpu().float())
         else:
-            self.router = None
+            # Frozen subspace bases (one per pool).
+            self.register_buffer("Q_basis_c", Q_basis_c.cpu())
+            self.register_buffer("Q_basis_f", Q_basis_f.cpu())
+            self.register_buffer("P_bases_c", P_bases_c_init.cpu())  # (K_c, out, r)
+            self.register_buffer("P_bases_f", P_bases_f_init.cpu())  # (K_f, out, r)
+
+            # Cayley(0) = I → at init each effective basis equals its frozen
+            # buffer. Per-pool S parameters are independent.
+            self.S_q_c = torch.nn.Parameter(torch.zeros(r, r))
+            self.S_q_f = torch.nn.Parameter(torch.zeros(r, r))
+            self.S_p_c = torch.nn.Parameter(torch.zeros(K_c, r, r))
+            self.S_p_f = torch.nn.Parameter(torch.zeros(K_f, r, r))
+
+        # Per-pool λ: independent magnitudes through training (no shared
+        # scaling). Centered-gate starts λ at ``lambda_init`` (>0): the
+        # recentered gate keeps ΔW=0 at init while feeding both routers a
+        # step-0 gradient.
+        lam0 = float(lambda_init)
+        self.lambda_c = torch.nn.Parameter(torch.full((1, r), lam0))
+        self.lambda_f = torch.nn.Parameter(torch.full((1, r), lam0))
 
         # Channel-scale absorption: SmoothQuant-style x rebalance happens
         # ONCE at the input (via inv_scale), then both A_c and A_f need
@@ -206,60 +327,34 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         # _scale handles Q_basis_c + registers inv_scale; we then manually
         # apply the same column-scale to Q_basis_f.
         if channel_scale is not None:
-            self._register_channel_scale(self.Q_basis_c, channel_scale)
-            _absorb_channel_scale(self.Q_basis_f, channel_scale)
+            # ``.data`` for the OrthoInit Parameters (in-place column rescale);
+            # the buffers in the frozen path pass through directly.
+            q_c = self.Q_basis_c.data if self.use_ortho_init else self.Q_basis_c
+            q_f = self.Q_basis_f.data if self.use_ortho_init else self.Q_basis_f
+            self._register_channel_scale(q_c, channel_scale)
+            _absorb_channel_scale(q_f, channel_scale)
 
-        # Frozen bases → bf16 (saved-for-backward halved). Cayley solve
-        # stays fp32 (orthogonality invariant: R^T R = I to ~1e-7 fp32 vs
-        # ~1e-2 bf16 per OrthoLoRA rationale).
-        self.Q_basis_c = self.Q_basis_c.to(torch.bfloat16)
-        self.Q_basis_f = self.Q_basis_f.to(torch.bfloat16)
-        self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
-        self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
-
-        # Default off; the factory flips this to True when
-        # ``use_custom_down_autograd=true`` is in the config (see
-        # ``factory.py``). Forward branches on the flag — when on, both
-        # pools' down-projects go through ``lora_down_project`` and the
-        # rebalanced ``x_lora`` (B, L, in) is not materialized per Linear.
-        self.use_custom_down_autograd = False
+        if not self.use_ortho_init:
+            # Frozen bases → bf16 (saved-for-backward halved). Cayley solve
+            # stays fp32 (orthogonality invariant: R^T R = I to ~1e-7 fp32 vs
+            # ~1e-2 bf16 per OrthoLoRA rationale). OrthoInit keeps the fp32
+            # master (Adam state precision) — the bases are trained directly.
+            self.Q_basis_c = self.Q_basis_c.to(torch.bfloat16)
+            self.Q_basis_f = self.Q_basis_f.to(torch.bfloat16)
+            self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
+            self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
 
         # Pre-allocated identity for the batched Cayley solve. (E_c + E_f
-        # + 2) skew-symmetric matrices share one fp32 LU+TRSM call.
-        self.register_buffer(
-            "_eye_r",
-            torch.eye(r, dtype=torch.float32),
-            persistent=False,
-        )
+        # + 2) skew-symmetric matrices share one fp32 LU+TRSM call. OrthoInit
+        # has no Cayley solve, so the buffer is skipped entirely.
+        if not self.use_ortho_init:
+            self.register_buffer(
+                "_eye_r",
+                torch.eye(r, dtype=torch.float32),
+                persistent=False,
+            )
 
-        # Freq pool's gate buffer. Uniform 1/K_f placeholder; the
-        # network-level FreqRouter overwrites via direct slot assignment
-        # in ``set_freq_routing_weights`` (NO .detach(), NO .copy_() —
-        # grad_fn must survive so ∂L/∂π_f reaches the FreqRouter
-        # parameters). Non-persistent — re-derived on construction.
-        placeholder = torch.full(
-            (1, K_f), 1.0 / max(K_f, 1), dtype=torch.float32
-        )
-        self.register_buffer("_freq_routing_weights", placeholder, persistent=False)
-
-        # Content pool's gate buffer for the global-router path. Same
-        # slot-assign contract as ``_freq_routing_weights``. Registered
-        # unconditionally so ``_wire_shared_content_buffers`` on the
-        # network side can identify chimera modules by buffer presence;
-        # under per-Linear (default) mode the buffer is read but the
-        # ``_compute_content_gate`` path overwrites π_c with its own
-        # softmax so the buffer value never reaches forward.
-        content_placeholder = torch.full(
-            (1, K_c), 1.0 / max(K_c, 1), dtype=torch.float32
-        )
-        self.register_buffer(
-            "_content_routing_weights", content_placeholder, persistent=False
-        )
-
-        # Cached gate (B, K_c+K_f) for the per-pool balance loss.
-        # _last_gate is read by ``LoRANetwork._get_chimera_balance_loss``
-        # which slices at K_c into independent Switch losses per pool.
-        self._last_gate = None
+        self._register_routing_buffers(K_c, K_f)
 
     @staticmethod
     def _cayley(S: torch.Tensor) -> torch.Tensor:
@@ -275,73 +370,6 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
             eye = eye.unsqueeze(0).expand_as(A)
         return torch.linalg.solve(eye + A, eye - A)
 
-    def set_freq_routing_weights(self, weights: torch.Tensor) -> None:
-        """Slot-assign the freq pool's gates (preserves grad_fn).
-
-        Direct slot assignment (NO .detach(), NO .copy_()) — the buffer
-        must carry the FreqRouter's grad_fn so ∂L_denoise/∂π_f reaches
-        FreqRouter parameters. Mirrors ``router_state._set_routing_weights``
-        and ``HydraLoRAModule.set_freq_routing_weights``.
-        """
-        buf = self._freq_routing_weights
-        w = weights.to(dtype=buf.dtype, device=buf.device)
-        if w.dim() == 1:
-            w = w.unsqueeze(0)
-        self._freq_routing_weights = w
-
-    def clear_freq_routing_weights(self) -> None:
-        """Reset to uniform 1/K_f without rebinding the pointer."""
-        K_f = int(self._freq_routing_weights.shape[-1])
-        self._freq_routing_weights.fill_(1.0 / max(K_f, 1))
-
-    def set_content_routing_weights(self, weights: torch.Tensor) -> None:
-        """Slot-assign π_c from the network-level ContentRouter.
-
-        Mirrors :meth:`set_freq_routing_weights`. Direct slot assignment
-        (NO .detach(), NO .copy_()) so ``∂L_denoise/∂π_c`` reaches
-        ContentRouter parameters through the same path the freq router
-        uses. Only meaningful when ``use_global_content_router`` is True;
-        per-Linear modules ignore the buffer in forward.
-        """
-        buf = self._content_routing_weights
-        w = weights.to(dtype=buf.dtype, device=buf.device)
-        if w.dim() == 1:
-            w = w.unsqueeze(0)
-        self._content_routing_weights = w
-
-    def clear_content_routing_weights(self) -> None:
-        K_c = int(self._content_routing_weights.shape[-1])
-        self._content_routing_weights.fill_(1.0 / max(K_c, 1))
-
-    def _compute_content_gate(self, lx_c: torch.Tensor) -> torch.Tensor:
-        """RMS-pool lx_c over the sequence axis (matches HydraLoRA), then
-        per-Linear router → softmax → π_c (B, K_c).
-
-        Pooling on lx_c (NOT lx_f or x): the content router's job is to
-        partition CONTENT B-heads, so the load-bearing signal is the
-        content-side latent. Pooling lx_f would cross-couple the two
-        pools and defeat the chimera's input-separation argument.
-        """
-        if lx_c.dim() >= 3:
-            B = lx_c.shape[0]
-            pooled = lx_c.reshape(B, -1, lx_c.shape[-1]).pow(2).mean(dim=1).sqrt()
-        else:
-            pooled = lx_c
-        pooled = pooled.to(self.router.weight.dtype)
-        logits = self.router(pooled)  # (B, K_c)
-        return torch.softmax(logits, dim=-1)
-
-    def _full_gate(self, pi_c: torch.Tensor) -> torch.Tensor:
-        """Construct the (B, K_c+K_f) gate cached in ``_last_gate`` for
-        the per-pool balance loss. ``LoRANetwork._get_chimera_balance_loss``
-        slices at ``num_experts_content`` to get the two halves.
-        """
-        pi_f = self._freq_routing_weights
-        if pi_f.dim() == 1:
-            pi_f = pi_f.unsqueeze(0)
-        pi_f = pi_f.to(pi_c.dtype).expand(pi_c.shape[0], -1)
-        return torch.cat([pi_c, pi_f], dim=-1)
-
     def forward(self, x):
         org_forwarded = self.org_forward(x)
 
@@ -351,83 +379,76 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        work = self.P_bases_c.dtype  # bf16
-
-        # One batched (2 + K_c + K_f, r, r) Cayley solve covers both A's
-        # and both B-pools' rotations. Single LU+TRSM kernel launch.
-        skew = torch.cat(
-            [
-                self.S_q_c.unsqueeze(0),
-                self.S_q_f.unsqueeze(0),
-                self.S_p_c,
-                self.S_p_f,
-            ],
-            dim=0,
-        )
-        A = skew - skew.transpose(-2, -1)
-        R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
         K_c = self.num_experts_content
         K_f = self.num_experts_freq
-        R_q_c = R[0].to(work)
-        R_q_f = R[1].to(work)
-        R_p_c = R[2 : 2 + K_c].to(work)
-        R_p_f = R[2 + K_c : 2 + K_c + K_f].to(work)
+        # bf16 for the Cayley (frozen-basis) path; fp32 for OrthoInit, whose
+        # trainable bases are the fp32 master (mantissa-precise bottleneck,
+        # mirroring OrthoInitLoRAModule).
+        work = self.P_bases_c.dtype
 
-        Q_eff_c = R_q_c @ self.Q_basis_c  # (r, in)
-        Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
+        if self.use_ortho_init:
+            # Trainable bases, no rotation: A_eff/B_eff ARE the parameters.
+            Q_eff_c = self.Q_basis_c  # (r, in)
+            Q_eff_f = self.Q_basis_f  # (r, in)
+            R_p_c = R_p_f = None  # P_eff read straight from the bases below
+        else:
+            # One batched (2 + K_c + K_f, r, r) Cayley solve covers both A's
+            # and both B-pools' rotations. Single LU+TRSM kernel launch.
+            skew = torch.cat(
+                [
+                    self.S_q_c.unsqueeze(0),
+                    self.S_q_f.unsqueeze(0),
+                    self.S_p_c,
+                    self.S_p_f,
+                ],
+                dim=0,
+            )
+            A = skew - skew.transpose(-2, -1)
+            R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
+            R_q_c = R[0].to(work)
+            R_q_f = R[1].to(work)
+            R_p_c = R[2 : 2 + K_c].to(work)
+            R_p_f = R[2 + K_c : 2 + K_c + K_f].to(work)
+
+            Q_eff_c = R_q_c @ self.Q_basis_c  # (r, in)
+            Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
 
         # Single rank-cat down-projection for both pools. The two pools share
         # the same input ``x`` but have distinct ``Q_eff``; running them as
         # two separate matmuls makes backward materialize TWO ``(B, L, in)``
         # ``grad_x`` tensors that autograd then sums. On wide-input Linears
-        # (``mlp.layer2``, in=8192) that doubled fp32 transient cost ~62 MiB
-        # /module → ~1.7 GiB across 28 blocks. Concatenating ``Q_eff`` along
-        # the rank axis computes ``grad_x`` ONCE; the split is a free view.
-        # Mirrors the up-side rank-cat bmm below (``lx_cat`` / ``P_combined_cat``).
-        # Bit-identical to the per-pool calls — see
+        # (``mlp.layer2``, in=8192) that doubled transient cost ~31 MiB/module
+        # → ~0.9 GiB across 28 blocks. Concatenating ``Q_eff`` along the rank
+        # axis computes ``grad_x`` ONCE; the split is a free view. Bit-identical
+        # to the per-pool calls — see
         # ``test_chimera_down_proj_rank_cat_matches_separate``.
+        #
+        # GEMMs run in the adapter compute dtype (``work``: bf16 for the Cayley
+        # frozen-basis path, fp32 for OrthoInit's trainable master bases) — NOT
+        # ``x.dtype``. ``x`` arrives fp32 from the AdaLN LayerNorm under
+        # autocast(bf16), so keying off it upcast the down GEMM + ``_rebalance``
+        # activation (``inv_scale``) to fp32 and OOMed; autocast re-casts the
+        # GEMM to bf16 regardless. Bit-identical to the retired fp32-bottleneck
+        # path under autocast (see bench/lora_fp32_bottleneck); OrthoInit still
+        # gets its intended fp32 bottleneck via ``work``.
+        comp = work
         r = self.lora_dim
         Q_eff_cat = torch.cat([Q_eff_c, Q_eff_f], dim=0)  # (2r, in)
-        if self.use_custom_down_autograd and self.training:
-            # ``ScaledLoRADownProjectFn`` folds ``inv_scale`` into ``Q_eff_cat``
-            # at the fp32 matmul (both pools share the same per-input-channel
-            # ``inv_scale``), so no rebalanced ``(B, L, in)`` bf16 activation is
-            # materialized; saved-for-backward aliases the same ``x`` the
-            # original Linear already pinned. With ``inv_scale`` kept fp32 the
-            # custom path differs from the bf16 legacy ``_rebalance`` path only
-            # by bf16 rounding — see the allclose contract in
-            # ``test_chimera_channel_scale_flag_on_matches_legacy_gradients``.
-            inv = self.inv_scale if self._has_channel_scale else None
-            lx_down_cat = lora_down_project(x, Q_eff_cat, inv).to(work)
-        else:
-            x_lora = self._rebalance(x.to(work))
-            lx_down_cat = torch.nn.functional.linear(x_lora, Q_eff_cat)
+        x_lora = self._rebalance(x.to(comp))
+        lx_down_cat = torch.nn.functional.linear(x_lora, Q_eff_cat.to(comp))
         lx_c = lx_down_cat[..., :r]
         lx_f = lx_down_cat[..., r:]
 
-        # Content router. Global-router path reads the broadcast buffer
-        # written by the network-level ContentRouter (slot-assigned with
-        # grad_fn intact); the per-Linear default re-pools lx_c through
-        # the local softmax (pre-λ; zero-init λ would zero the router
-        # input at step 0 and freeze the router gradient).
-        if self.use_global_content_router:
-            pi_c = self._content_routing_weights
-            if pi_c.dim() == 1:
-                pi_c = pi_c.unsqueeze(0)
-            # Broadcast along the batch axis when the buffer is (1, K_c)
-            # at init or when the router fires on a single FEI/text input.
-            if pi_c.shape[0] == 1 and lx_c.shape[0] > 1:
-                pi_c = pi_c.expand(lx_c.shape[0], -1)
-            # Match the per-Linear path's fp32 contract — downstream einsum
-            # casts to ``work`` (bf16) at the boundary either way.
-            pi_c = pi_c.float()
-        else:
-            pi_c = self._compute_content_gate(lx_c)  # (B, K_c) fp32
+        # Content gate: broadcast π_c from the network-level ContentRouter
+        # (slot-assigned with grad_fn intact). Cache the RAW (uncentered)
+        # simplex for the per-pool balance loss BEFORE recentering.
+        pi_c = self._content_gate_raw(lx_c.shape[0])  # (B, K_c) fp32
         if self.training:
-            # Plain STORE_ATTR — see HydraLoRAModule.forward for the
-            # rationale; @compiler.disable would force a graph break and
-            # explode saved-for-backward memory under torch.compile.
+            # Plain STORE_ATTR — see HydraLoRAModule.forward for the rationale;
+            # @compiler.disable would force a graph break and explode
+            # saved-for-backward memory under torch.compile.
             self._last_gate = self._full_gate(pi_c)
+        pi_c = self._center(pi_c, K_c)
 
         # λ application + T-LoRA mask (content only). Freq branch keeps
         # full rank at every t — by construction the freq pool's job is
@@ -446,38 +467,30 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         # Per-pool gate-weighted P_combined; one bmm per pool over the
         # B/L axis. Cast π at the einsum boundary so bf16 × fp32 doesn't
         # promote P_combined back to fp32 (would inflate saved activation).
-        P_eff_c = self.P_bases_c @ R_p_c  # (K_c, out, r)
-        P_eff_f = self.P_bases_f @ R_p_f  # (K_f, out, r)
+        if self.use_ortho_init:
+            P_eff_c = self.P_bases_c  # (K_c, out, r)
+            P_eff_f = self.P_bases_f  # (K_f, out, r)
+        else:
+            P_eff_c = self.P_bases_c @ R_p_c  # (K_c, out, r)
+            P_eff_f = self.P_bases_f @ R_p_f  # (K_f, out, r)
 
-        pi_c_w = pi_c.to(work)
-        pi_f = self._freq_routing_weights
-        if pi_f.dim() == 1:
-            pi_f = pi_f.unsqueeze(0)
-        pi_f_w = pi_f.to(work).expand(pi_c_w.shape[0], -1)
+        pi_c_w = pi_c.to(comp)
+        pi_f_w = self._center(self._freq_gate_raw(lx_c.shape[0]), K_f).to(comp)
 
-        P_combined_c = torch.einsum("bc,cor->bor", pi_c_w, P_eff_c)
-        P_combined_f = torch.einsum("bf,for->bor", pi_f_w, P_eff_f)
+        P_combined_c = torch.einsum("bc,cor->bor", pi_c_w, P_eff_c.to(comp))
+        P_combined_f = torch.einsum("bf,for->bor", pi_f_w, P_eff_f.to(comp))
 
-        orig_shape = lx_c.shape
-        B = orig_shape[0]
-        lx_c_3d = lx_c.reshape(B, -1, orig_shape[-1])
-        lx_f_3d = lx_f.reshape(B, -1, orig_shape[-1])
-        # Cat along the rank axis and run ONE bmm instead of two — only one
-        # full hidden-size tensor is live at a time. scale_c == scale_f always
-        # (both come from ``_apply_rank_dropout`` which returns the same scalar
-        # for both calls), so the shared scale folds out of the sum.
-        lx_cat = torch.cat([lx_c_3d, lx_f_3d], dim=-1)          # (B, L, 2r)
-        P_combined_cat = torch.cat(
-            [P_combined_c, P_combined_f], dim=-1
-        )                                                       # (B, out, 2r)
-        out = torch.bmm(lx_cat, P_combined_cat.transpose(1, 2))
-        out = (out * scale_c).reshape(*orig_shape[:-1], -1)
+        out = self._combine_up(
+            lx_c.to(comp), lx_f.to(comp), P_combined_c, P_combined_f, scale_c
+        )
 
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)
 
     def regularization(self):
-        """No-op: Cayley guarantees orthogonality structurally on both A's."""
-        zero = torch.tensor(0.0, device=self.S_p_c.device)
+        """No-op on both paths: Cayley guarantees orthogonality structurally,
+        and OrthoInit deliberately leaves the bases unconstrained (SVD as a
+        warm start, not a cage). ``P_bases_c`` exists under either layout."""
+        zero = torch.tensor(0.0, device=self.P_bases_c.device)
         return zero, zero
 
     # ------------------------------------------------------------------
@@ -504,20 +517,23 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         per-pool ups into per-expert ``.lora_ups_{c,f}.{i}.weight`` keys
         and per-component q/k/v splits.
         """
+        # Discriminator: co-located ``.Q_basis_c`` + ``.Q_basis_f`` (the ``_c``/
+        # ``_f`` suffix pair is chimera-only — OrthoLoRA fallbacks use a bare
+        # ``.Q_basis``). Covers BOTH the Cayley path (frozen bf16 buffers +
+        # ``.S_q_c``) and the OrthoInit path (trainable fp32 bases, no ``S_*``).
         prefixes = set()
         for key in list(state_dict.keys()):
-            if not key.endswith(".S_q_c"):
+            if not key.endswith(".Q_basis_c"):
                 continue
-            prefix = key[: -len(".S_q_c")]
-            if state_dict.get(f"{prefix}.S_q_f") is None:
+            prefix = key[: -len(".Q_basis_c")]
+            if state_dict.get(f"{prefix}.Q_basis_f") is None:
                 continue
             prefixes.add(prefix)
 
         for prefix in prefixes:
-            S_q_c = state_dict[f"{prefix}.S_q_c"]
-            S_q_f = state_dict[f"{prefix}.S_q_f"]
-            S_p_c = state_dict[f"{prefix}.S_p_c"]  # (K_c, r, r)
-            S_p_f = state_dict[f"{prefix}.S_p_f"]  # (K_f, r, r)
+            # OrthoInit chimera carries no Cayley skew params; its trainable
+            # bases ARE the effective factors (R = I).
+            ortho_init = state_dict.get(f"{prefix}.S_q_c") is None
             Q_basis_c = state_dict[f"{prefix}.Q_basis_c"]
             Q_basis_f = state_dict[f"{prefix}.Q_basis_f"]
             P_bases_c = state_dict[f"{prefix}.P_bases_c"]  # (K_c, out, r)
@@ -527,24 +543,31 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
             alpha = state_dict.get(f"{prefix}.alpha")
             save_dtype = dtype if dtype is not None else P_bases_c.dtype
 
-            R_q_c = cls._cayley(S_q_c.float())
-            R_q_f = cls._cayley(S_q_f.float())
-            R_p_c = cls._cayley(S_p_c.float())
-            R_p_f = cls._cayley(S_p_f.float())
-            Q_eff_c = R_q_c @ Q_basis_c.float()  # (r, in)
-            Q_eff_f = R_q_f @ Q_basis_f.float()
-            P_eff_c = P_bases_c.float() @ R_p_c  # (K_c, out, r)
-            P_eff_f = P_bases_f.float() @ R_p_f
+            if ortho_init:
+                Q_eff_c = Q_basis_c.float()  # (r, in)
+                Q_eff_f = Q_basis_f.float()
+                P_eff_c = P_bases_c.float()  # (K_c, out, r)
+                P_eff_f = P_bases_f.float()
+            else:
+                S_q_c = state_dict[f"{prefix}.S_q_c"]
+                S_q_f = state_dict[f"{prefix}.S_q_f"]
+                S_p_c = state_dict[f"{prefix}.S_p_c"]  # (K_c, r, r)
+                S_p_f = state_dict[f"{prefix}.S_p_f"]  # (K_f, r, r)
+                R_q_c = cls._cayley(S_q_c.float())
+                R_q_f = cls._cayley(S_q_f.float())
+                R_p_c = cls._cayley(S_p_c.float())
+                R_p_f = cls._cayley(S_p_f.float())
+                Q_eff_c = R_q_c @ Q_basis_c.float()  # (r, in)
+                Q_eff_f = R_q_f @ Q_basis_f.float()
+                P_eff_c = P_bases_c.float() @ R_p_c  # (K_c, out, r)
+                P_eff_f = P_bases_f.float() @ R_p_f
 
             def _split(P_eff, Q_eff, lam):
                 lam_1d = lam.squeeze(0).float()
                 lam_sqrt = lam_1d.abs().sqrt()
                 lam_sign = lam_1d.sign()
                 lora_down = (
-                    (Q_eff * lam_sqrt.unsqueeze(1))
-                    .to(save_dtype)
-                    .cpu()
-                    .contiguous()
+                    (Q_eff * lam_sqrt.unsqueeze(1)).to(save_dtype).cpu().contiguous()
                 )
                 lora_up_weight = (
                     (P_eff * (lam_sqrt * lam_sign).unsqueeze(0).unsqueeze(0))
@@ -571,8 +594,6 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
             ):
                 state_dict.pop(f"{prefix}.{suffix}", None)
 
-            # ``router.weight`` / ``router.bias`` are kept as-is (already
-            # the K_c-narrowed content router).
             state_dict[f"{prefix}.lora_down_c.weight"] = lora_down_c
             state_dict[f"{prefix}.lora_up_c_weight"] = lora_up_c_weight
             state_dict[f"{prefix}.lora_down_f.weight"] = lora_down_f
@@ -595,12 +616,12 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
           2. Per-pool fused-qkv defuse on attention prefixes. Both pools
              share the prefix (chimera = one module per Linear), so when
              the prefix ends in a fused frag we split BOTH pools'
-             (lora_down + ups stack) per component. ``router.*`` /
-             ``alpha`` / ``inv_scale`` clone into each split component.
+             (lora_down + ups stack) per component. ``alpha`` / ``inv_scale``
+             clone into each split component.
 
-        Top-level ``freq_router.*`` keys pass through untouched (they
-        don't carry a ``lora_unet_*`` prefix and don't match any fused
-        frag suffix).
+        Top-level ``content_router.*`` / ``freq_router.*`` keys pass through
+        untouched (they don't carry a ``lora_unet_*`` prefix and don't match
+        any fused frag suffix).
 
         After the per-pool split, the remaining fused-qkv prefixes are
         the OrthoLoRA fallbacks for attention projections excluded
@@ -643,16 +664,13 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
             down_c = sd.pop(f"{prefix}.lora_down_c.weight")
             down_f = sd.pop(f"{prefix}.lora_down_f.weight")
             alpha = sd.pop(f"{prefix}.alpha", None)
-            router_w = sd.pop(f"{prefix}.router.weight", None)
-            router_b = sd.pop(f"{prefix}.router.bias", None)
             inv_scale = sd.pop(f"{prefix}.inv_scale", None)
 
             ups_c_keys = sorted(
                 (
                     k
                     for k in list(sd.keys())
-                    if k.startswith(f"{prefix}.lora_ups_c.")
-                    and k.endswith(".weight")
+                    if k.startswith(f"{prefix}.lora_ups_c.") and k.endswith(".weight")
                 ),
                 key=lambda k: int(
                     k.removeprefix(f"{prefix}.lora_ups_c.").removesuffix(".weight")
@@ -662,8 +680,7 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
                 (
                     k
                     for k in list(sd.keys())
-                    if k.startswith(f"{prefix}.lora_ups_f.")
-                    and k.endswith(".weight")
+                    if k.startswith(f"{prefix}.lora_ups_f.") and k.endswith(".weight")
                 ),
                 key=lambda k: int(
                     k.removeprefix(f"{prefix}.lora_ups_f.").removesuffix(".weight")
@@ -689,10 +706,6 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
                     )
                 if alpha is not None:
                     sd[f"{new_prefix}.alpha"] = alpha.clone()
-                if router_w is not None:
-                    sd[f"{new_prefix}.router.weight"] = router_w.clone()
-                if router_b is not None:
-                    sd[f"{new_prefix}.router.bias"] = router_b.clone()
                 if inv_scale is not None:
                     sd[f"{new_prefix}.inv_scale"] = inv_scale.clone()
 
@@ -704,26 +717,29 @@ class ChimeraHydraLoRAModule(BaseLoRAModule):
         return sd
 
 
-class ChimeraHydraInferenceModule(BaseLoRAModule):
+class ChimeraHydraInferenceModule(_ChimeraRoutingMixin, BaseLoRAModule):
     """Free-form inference form of ChimeraHydra, loaded from a distilled
     ``*_chimera.safetensors``.
 
     Mirrors the training class's per-Linear shape but with explicit
     per-pool (lora_down, stacked lora_up) instead of Cayley-rotated SVD
-    bases — produced by ``_convert_chimera_dual_a_to_hydra`` at save time.
+    bases — produced by :meth:`ChimeraHydraLoRAModule.distill_save_state_dict`
+    at save time.
 
     Buffer / parameter inventory:
       * ``lora_down_c.weight`` (r, in)        — content A
-      * ``lora_up_c_weight``  (K_c, out, r)  — content B stack
-      * ``router.weight``      (K_c, r)       — content router
-      * ``router.bias``        (K_c,)
+      * ``lora_up_c_weight``  (K_c, out, r)   — content B stack
       * ``lora_down_f.weight`` (r, in)        — freq A
-      * ``lora_up_f_weight``  (K_f, out, r)  — freq B stack
-      * ``_freq_routing_weights`` (1, K_f) buffer  — slot-written by
-        the network-level FreqRouter
+      * ``lora_up_f_weight``  (K_f, out, r)   — freq B stack
+      * ``_content_routing_weights`` (1, K_c) buffer — slot-written by the
+        network-level ContentRouter
+      * ``_freq_routing_weights`` (1, K_f) buffer    — slot-written by the
+        network-level FreqRouter
 
-    No T-LoRA mask is applied at inference (consistent with all other
-    LoRA-family inference modules — see
+    Both pools' gates are recentered to ``π − 1/K`` before the combine
+    (λ is folded symmetrically into the saved ups, so the centered combine
+    reproduces the trained forward exactly). No T-LoRA mask is applied at
+    inference (consistent with all other LoRA-family inference modules — see
     ``[[project_tlora_inference_full_rank]]``).
     """
 
@@ -740,7 +756,6 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
         num_experts_content: int = 3,
         num_experts_freq: int = 3,
         channel_scale=None,
-        use_global_content_router: bool = False,
     ):
         super().__init__(
             lora_name,
@@ -763,7 +778,6 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
         self.num_experts_freq = K_f
         self.num_experts = K_c + K_f
         self.in_dim = in_dim
-        self.use_global_content_router = bool(use_global_content_router)
 
         # Free-form down-projections (one per pool). Initialized empty;
         # actual weights overwritten by load_state_dict.
@@ -772,69 +786,14 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
         # Stacked B's, fused (K_*, out, r). Loader expands per-expert
         # ``.lora_ups_*.{i}.weight`` into these stacks before calling
         # load_state_dict — see factory.create_network_from_weights.
-        self.lora_up_c_weight = torch.nn.Parameter(
-            torch.zeros(K_c, out_dim, r)
-        )
-        self.lora_up_f_weight = torch.nn.Parameter(
-            torch.zeros(K_f, out_dim, r)
-        )
-        # Content router: identical shape to HydraLoRAModule's K_c-narrowed
-        # router (see hydra.py for the chimera-load contract). Absent under
-        # global mode — π_c is broadcast from the network-level ContentRouter.
-        if not self.use_global_content_router:
-            self.router = torch.nn.Linear(r, K_c, bias=True)
-        else:
-            self.router = None
+        self.lora_up_c_weight = torch.nn.Parameter(torch.zeros(K_c, out_dim, r))
+        self.lora_up_f_weight = torch.nn.Parameter(torch.zeros(K_f, out_dim, r))
 
         if channel_scale is not None:
             self._register_channel_scale(self.lora_down_c.weight.data, channel_scale)
             _absorb_channel_scale(self.lora_down_f.weight.data, channel_scale)
 
-        placeholder = torch.full(
-            (1, K_f), 1.0 / max(K_f, 1), dtype=torch.float32
-        )
-        self.register_buffer("_freq_routing_weights", placeholder, persistent=False)
-        content_placeholder = torch.full(
-            (1, K_c), 1.0 / max(K_c, 1), dtype=torch.float32
-        )
-        self.register_buffer(
-            "_content_routing_weights", content_placeholder, persistent=False
-        )
-        self._last_gate = None
-
-    def set_freq_routing_weights(self, weights: torch.Tensor) -> None:
-        """Slot-assign the freq pool's gates. Same protocol as the
-        training class — see that docstring."""
-        buf = self._freq_routing_weights
-        w = weights.to(dtype=buf.dtype, device=buf.device)
-        if w.dim() == 1:
-            w = w.unsqueeze(0)
-        self._freq_routing_weights = w
-
-    def clear_freq_routing_weights(self) -> None:
-        K_f = int(self._freq_routing_weights.shape[-1])
-        self._freq_routing_weights.fill_(1.0 / max(K_f, 1))
-
-    def set_content_routing_weights(self, weights: torch.Tensor) -> None:
-        """Inference twin of ChimeraHydraLoRAModule.set_content_routing_weights."""
-        buf = self._content_routing_weights
-        w = weights.to(dtype=buf.dtype, device=buf.device)
-        if w.dim() == 1:
-            w = w.unsqueeze(0)
-        self._content_routing_weights = w
-
-    def clear_content_routing_weights(self) -> None:
-        K_c = int(self._content_routing_weights.shape[-1])
-        self._content_routing_weights.fill_(1.0 / max(K_c, 1))
-
-    def _compute_content_gate(self, lx_c: torch.Tensor) -> torch.Tensor:
-        if lx_c.dim() >= 3:
-            B = lx_c.shape[0]
-            pooled = lx_c.reshape(B, -1, lx_c.shape[-1]).pow(2).mean(dim=1).sqrt()
-        else:
-            pooled = lx_c
-        pooled = pooled.to(self.router.weight.dtype)
-        return torch.softmax(self.router(pooled), dim=-1)
+        self._register_routing_buffers(K_c, K_f)
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)
@@ -850,19 +809,15 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
         lx_c = torch.nn.functional.linear(x_f32, self.lora_down_c.weight.float())
         lx_f = torch.nn.functional.linear(x_f32, self.lora_down_f.weight.float())
 
-        if self.use_global_content_router:
-            pi_c = self._content_routing_weights
-            if pi_c.dim() == 1:
-                pi_c = pi_c.unsqueeze(0)
-            if pi_c.shape[0] == 1 and lx_c.shape[0] > 1:
-                pi_c = pi_c.expand(lx_c.shape[0], -1)
-            pi_c = pi_c.float()
-        else:
-            pi_c = self._compute_content_gate(lx_c)  # (B, K_c)
-        pi_f = self._freq_routing_weights
-        if pi_f.dim() == 1:
-            pi_f = pi_f.unsqueeze(0)
-        pi_f = pi_f.to(pi_c.dtype).expand(pi_c.shape[0], -1)
+        # Centered-gate parity with training: subtract per-pool 1/K. λ is
+        # already baked into the saved ups, so this reproduces the trained
+        # ``Σ (π[k] - 1/K)·B[k]`` combine exactly.
+        pi_c = self._center(
+            self._content_gate_raw(lx_c.shape[0]), self.num_experts_content
+        )
+        pi_f = self._center(
+            self._freq_gate_raw(lx_c.shape[0]).float(), self.num_experts_freq
+        )
 
         if self.dropout is not None and self.training:
             lx_c = torch.nn.functional.dropout(lx_c, p=self.dropout)
@@ -878,17 +833,6 @@ class ChimeraHydraInferenceModule(BaseLoRAModule):
             "bf,for->bor", pi_f.float(), self.lora_up_f_weight.float()
         )
 
-        orig_shape = lx_c.shape
-        B = orig_shape[0]
-        lx_c_3d = lx_c.reshape(B, -1, orig_shape[-1])
-        lx_f_3d = lx_f.reshape(B, -1, orig_shape[-1])
-        # Cat along the rank axis → one bmm instead of two. Peak full hidden-
-        # size fp32 tensor count drops from 2 (out_c, out_f) to 1. scale_c ==
-        # scale_f at inference (rank_dropout is training-only), so the shared
-        # scale folds out of the sum.
-        lx_cat = torch.cat([lx_c_3d, lx_f_3d], dim=-1)          # (B, L, 2r)
-        comb_cat = torch.cat([comb_c, comb_f], dim=-1)          # (B, out, 2r)
-        out = torch.bmm(lx_cat, comb_cat.transpose(1, 2))
-        out = (out * scale_c).reshape(*orig_shape[:-1], -1)
+        out = self._combine_up(lx_c, lx_f, comb_c, comb_f, scale_c)
 
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)

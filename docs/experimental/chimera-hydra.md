@@ -1,6 +1,16 @@
 # ChimeraHydra — dual-A additive routing for timestep-aware MoE
 
-Proposal: [`docs/proposal/chimera_hydra.md`](../proposal/chimera_hydra.md).
+> **Shipped configuration (2026-05, code consolidation).** The implementation
+> now ships a single chimera variant: the content pool is routed by the
+> **network-level ContentRouter on pooled `crossattn_emb`** (NOT the per-Linear
+> `lx_c` softmax this doc's "Content half" section originally described), and
+> **both pools are always centered-gate**. The per-Linear content router
+> (`content_router_source="input"`), its `content_router_init_std` knob, and the
+> non-centered path were removed; `content_router_source` / `chimera_centered_gate`
+> are no longer config knobs. Checkpoints stamped with the retired per-Linear
+> content router no longer load. The prose below describes the original design
+> space — read the "Content half" / per-Linear router parts as historical
+> motivation, not the current code.
 
 ## Why "chimera"
 
@@ -104,6 +114,12 @@ This is **strictly stronger** than the previous 1-A version, which gave only out
 
 **Narrow-layer fallback.** When `min(out, in) < max(K_c+K_f, 2)·r` (rare on Anima's mlp.layer1/2 targets — `in≈3072`, `(K_c+K_f)·r = 192` at default), both pools fall back to replicating the top-r singular slice. Pool-orthogonality is lost; pools start identical and rely on Cayley divergence.
 
+### OrthoInit option (`use_ortho_init=true`)
+
+Cayley keeps `colspace(ΔW) ⊆ top-2r(W₀)` for the whole run — the "chimera-ortho feels weak" cap (see [[project_orthoinit_variant]]). Setting `use_ortho_init=true` alongside the chimera flag flips each pool's `Q_basis_{c,f}` / `P_bases_{c,f}` from **frozen buffers + Cayley skew** to **trainable fp32 Parameters** (no `S_*`, no `_eye_r`, fp32 master kept for Adam). ΔW can then leave the principal 2r-subspace — full LoRA expressivity per pool — while keeping the W₀-aligned warm start. Pool orthogonality holds *at init* (same SVD partition above) and is free to drift thereafter; this is the per-pool trainable-basis route, **not** a joint Stiefel on `[P_c|P_f]`.
+
+`ΔW=0` at init is unaffected — it comes from the centered uniform gate (`π − 1/K`), not the basis, so `λ_init > 0` is fine. Save distills with `R = I` to the **identical** `*_chimera.safetensors` free-form layout (the save discriminator keys on `.Q_basis_c`, covering both parameterizations), so inference / loading / merge / ComfyUI need no OrthoInit awareness. Implemented as a flag-branch inside `ChimeraHydraLoRAModule` (forward, `__init__`, `distill_save_state_dict`); threaded `resolver → chimera_hydra spec → cfg.use_ortho_init → network.py`. Tests: `tests/test_lora_dtype_policy.py::test_chimera_ortho_init_*`.
+
 ## T-LoRA per-half composition
 
 `use_timestep_mask = true` applies the rank mask `mask_t(σ)` to the **content half only**. The freq half keeps full rank at every t.
@@ -121,7 +137,7 @@ ChimeraHydra is a fourth dispatch cell on top of the shared-A row, opt-in via `u
 
 | Variant | `use_moe_style` | `route_per_layer` | `router_source` | Extra |
 |---|---|---|---|---|
-| Plain LoRA / OrthoLoRA / T-LoRA / ReFT | `False` | — | `"none"` | — |
+| Plain LoRA / OrthoLoRA / T-LoRA | `False` | — | `"none"` | — |
 | HydraLoRA (paper) | `"shared_A"` | `True` | `"input"` | — |
 | σ-router on Hydra | `"shared_A"` | `True` | `"sigma"` | — |
 | FEI-on-Hydra (`lora.toml` default) | `"shared_A"` | `True` | `"fei"` | — |
@@ -176,6 +192,8 @@ Total at default `chimera.toml` regex (`*mlp.layer[12]`) on Anima's 28 blocks ×
 | Param | Default | Notes |
 |---|---|---|
 | `use_chimera_hydra` | `true` | Activation flag. Triggers all three-axis pins + builds the FreqRouter. |
+| `freq_router_mode` | `"fei"` | Freq-pool routing. **`"fei"`** (default) hardwires `π_f = normalize(FEI**(1/τ))` — no learned router, no σ-features, no freq balance loss; requires `K_f == fei_feature_dim`. **`"learned"`** builds the FreqRouter MLP over `concat(FEI, σ-features)`. See [§Freq routing mode](#freq-routing-mode-learned-vs-hardwired-fei). |
+| `freq_router_tau` | `1.0` | Temperature on the hardwired FEI gate (`"fei"` mode only). `1.0` = raw FEI passthrough; `<1` sharpens the low/high crossover, `>1` flattens it. Inert under `"learned"`. |
 | `num_experts_content` (`K_c`) | 4 | Content pool size. |
 | `num_experts_freq` (`K_f`) | 2 | Freq pool size. Both pools share `network_dim` for now (per-pool rank knob is intentionally unexposed — add if a bench shows asymmetry helps). |
 | `network_dim` (rank) | 32 | Per-pool rank `r` (same for both halves). SVD partition needs `min(out, in) ≥ max(K_c+K_f, 2)·r` for free orthogonality; at default that's 192, well below typical Anima MLP `in≈3072`. |
@@ -195,6 +213,23 @@ Total at default `chimera.toml` regex (`*mlp.layer[12]`) on Anima's 28 blocks ×
 | `use_timestep_mask` | `true` | T-LoRA. Applied to the **content half only** inside the chimera forward. |
 | `min_rank` | `8` | T-LoRA floor — content half retains at least this many ranks at every t. |
 | `router_targets` | `.*(mlp\\.layer[12])$` | Regex matching which Linears become chimera leaves. Non-matching layers fall back to OrthoLoRA at training, plain LoRA at inference (after the OrthoLoRA → LoRA save-time distill). |
+
+## Freq routing mode: learned vs hardwired FEI
+
+`freq_router_mode` controls how the freq pool's gate `π_f` is produced. The default is now **`"fei"`** (hardwired), with `"learned"` (the original FreqRouter MLP) kept as a fallback.
+
+**Why hardwired is the default.** FEI (`library/runtime/fei.py::compute_fei_2band`) already returns a *normalized 2-simplex* `(e_low, e_high)`, and the freq pool is `K_f = 2`. So FEI is literally a routing distribution over `{low-expert, high-expert}` — the learned MLP was mapping a 2-simplex back onto a 2-simplex.
+
+The archived FEI trace (`_archive/bench/fera/results/20260515-1112-anima-base-v1.0-low_div4/fei_traces.png`, the `fei_sigma_low_div=4.0` run that matches production) settles the router-vs-hardwired question:
+
+- At high σ (early steps) FEI is **deterministic** — `e_low ≈ 0.0002, std ≈ 3e-5` across 4 prompts × 2 seeds. All-high; nothing to learn.
+- At low/mid σ FEI carries **real per-prompt signal**: at σ=0.5, prompt 0 sits at `e_low ≈ 0.08` while prompt 2 is at `e_low ≈ 0.36` — a 4.5× spread *at the same timestep* (`std ≈ 0.16` at σ=0.43). FEI is **not** σ in disguise in the back half of denoising.
+
+Both facts favor hardwiring. The per-prompt signal lives in FEI itself, and FEI is recomputed per-sample from `z_t` each step, so `π_f = FEI` keeps 100% of that signal. The learned router's only added value was a reshape over inputs (`FEI + σ`) no richer than FEI — and σ is the *non-discriminating* half (identical across prompts at a given step). Hardwiring also makes `expert_0 ≡ low band, expert_1 ≡ high band` true by construction (no router collapse possible) and rebuts the "freq pool just duplicates T-LoRA's timestep schedule" concern — the per-prompt spread is exactly what a pure-`t` mask cannot see.
+
+**Tradeoffs of `"fei"`.** (1) It locks `K_f` to the FEI band count (`num_experts_freq == fei_feature_dim`, enforced at config time) — a feature, since it forces the freq pool to be a genuine band-split. (2) It drops the freq balance loss (`balance_w_freq` is forced to 0 — a fixed-function gate has no router params to balance) and the σ-feature fusion. Expert utilization is then *frequency-faithful* rather than load-balanced — at high σ the gate is ~99% high-expert by design, and across a batch sampling all σ both experts still train.
+
+**Implementation.** `freq_router_mode="fei"` leaves `network.freq_router = None`; `LoRANetwork.set_fei` broadcasts `_fei_temperature(FEI, τ)` straight to each module's `_freq_routing_weights` (detached — no grad_fn, like the T-LoRA mask). Stamped to `ss_chimera_freq_router_mode` / `ss_chimera_freq_router_tau`; an absent stamp loads as `"learned"`, so pre-2026-05-27 checkpoints are unaffected. This makes the `C-fei` falsification (§Risks) moot for the router itself — there is no router to absorb or miss the signal.
 
 ## Save format
 
@@ -250,7 +285,7 @@ ss_router_source               = "input"
 | `gradient_checkpointing` | ✅ | The adapter is a thin Linear-replacement; checkpointing at block granularity wraps it correctly. |
 | Modulation guidance | ✅ orthogonal | AdaLN path is untouched. |
 | T-LoRA | ✅ | Built-in (per-half asymmetric masking — content rank-modulated, freq full-rank). |
-| OrthoLoRA / ReFT | ⚠ partial | `use_ortho=true` is the chimera default. ReFT is designed against shared-A / plain-LoRA layouts; verify on a small bench before stacking. |
+| OrthoLoRA | ✅ | `use_ortho=true` is the chimera default. |
 | DCW (scalar / v4) | ✅ orthogonal | Sampler-level correction; composes with anything upstream of the Euler step. |
 | ComfyUI | ❌ | The 2-A on-disk layout (`lora_ups_c.{i}` + `lora_ups_f.{j}` + dual `lora_down_{c,f}` per Linear) is NOT what the `comfyui-hydralora` node currently understands (it expects the legacy 1-A Hydra-MoE shape). Existing tests under `tests/test_chimera_node_loader.py` exercise the legacy synthetic layout, not the new emitter. ComfyUI loader needs ~150 lines of new code to read the 2-A keys + broadcast `π_f` per step. |
 | Static merge into DiT | ❌ | `scripts/merge_to_dit.py` refuses MoE methods by default (router is sample-dependent). `--allow-partial` would drop the chimera portion entirely. |

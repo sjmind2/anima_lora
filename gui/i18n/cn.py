@@ -10,18 +10,45 @@ STRINGS: dict[str, str] = {
     # Window / tabs
     "window_title": "Anima LoRA",
     "tab_config": "训练配置",
-    "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
-    "tab_methods": "方法",
-    "tab_images": "数据集",
+    "tab_turbo": "Turbo",
+    "tab_experimental": "实验功能",
+    "tab_images": "数据集Viewer",
     "tab_merge": "合并",
+    "tab_queue": "队列状况",
     "tab_preprocess": "预处理",
+    "tab_tensorboard": "TensorBoard",
     # PreprocessingTab
     "preprocess_intro": (
         "配置标注随机化和气泡蒙版,然后按需运行每个步骤。"
         "训练配置选项卡的「训练」按钮在没有缓存时会用默认设置自动运行预处理 —— "
         "本选项卡用于细调和单独重跑某个步骤。"
+    ),
+    "preprocess_image_prep": "图像预处理 (调整大小 / 过滤)",
+    "preprocess_source_image_dir": "源图像目录:",
+    "preprocess_source_image_dir_tip": (
+        "所选 GUI method 的基础原始图像根目录（默认来自 configs/preprocess.toml；"
+        "编辑结果保存到对应 variant）。运行时 path_scope 会追加到此路径之上，"
+        "因此此处显示的是未加作用域的根目录，而非最终的作用域路径。"
+        "若只想预处理目录树的一部分且不改变文件保存位置，请使用下方预处理路径过滤器。"
+    ),
+    "preprocess_path_pattern": "预处理路径过滤器:",
+    "preprocess_path_pattern_tip": (
+        "先应用 path_scope 来确定实际源图像根目录。例如 path_scope=data_group1 时，"
+        "预处理根目录是 image_dataset/data_group1。此过滤器再按该根目录的相对路径匹配。"
+        "'*'（或空白）处理全部；'1/*' 只处理 data_group1/1；"
+        "'1/*|2/*' 处理两个子文件夹。"
+    ),
+    "preprocess_drop_lowres": "丢弃低分辨率图像",
+    "preprocess_drop_lowres_tip": (
+        "跳过小于下方像素阈值的源图像，使其不进入调整大小 / VAE / 文本缓存。"
+        "取消勾选可保留所有图像，无论大小。"
+    ),
+    "preprocess_min_pixels": "最小像素数 (过滤阈值):",
+    "preprocess_min_pixels_tip": (
+        "低分辨率过滤器的像素数阈值。500000 = 0.5MP。"
+        "当「丢弃低分辨率图像」未勾选时忽略。"
     ),
     "preprocess_text_caching": "缓存 (VAE + 文本)",
     "preprocess_caption_shuffle_variants": "每条标注的随机变体数 (N):",
@@ -39,11 +66,34 @@ STRINGS: dict[str, str] = {
         "当随机变体数 ≤ 0 时忽略。"
     ),
     "preprocess_run_te": "运行缓存 (VAE + 文本)",
+    "preprocess_run_pe": "运行 PE 缓存",
+    "preprocess_add_to_queue": "加入队列",
+    "preprocess_queued": "已将 {label} 加入队列 (任务 {job_id}) — 可在队列标签页查看。",
     "preprocess_masking_sam": "SAM3 蒙版 (对话气泡)",
     "preprocess_masking_mit": "MIT 蒙版 (漫画文字)",
     "preprocess_sam_prompts": "SAM 提示词 (每行一个):",
     "preprocess_sam_prompts_tip": (
         "SAM3 要查找的文本提示词,每行一个。默认值: 'speech bubble' 和 'text bubble'。"
+    ),
+    "preprocess_sam_focus_prompts": "SAM 焦点提示词 (每行一个):",
+    "preprocess_sam_focus_prompts_tip": (
+        "反转极性: 指定要保留的主体。设置后,蒙版将仅对该主体进行训练,"
+        "其余全部忽略 (例如 'girl' 会使背景全部被忽略)。"
+        "与上方提示词合成 —— 最终可训练区域为焦点主体去除忽略区域后的部分。"
+        "留空则使用默认的仅忽略模式。"
+    ),
+    "preprocess_sam_rule": "蒙版规则",
+    "preprocess_sam_add_rule": "+ 添加规则",
+    "preprocess_sam_add_rule_tip": (
+        "再添加一条蒙版规则。每条规则通过路径模式定位图像子集,"
+        "模式匹配同一图像的多条规则将相互合成。"
+    ),
+    "preprocess_sam_remove_rule": "删除规则",
+    "preprocess_sam_rule_path_pattern": "路径模式 (此规则):",
+    "preprocess_sam_rule_path_pattern_tip": (
+        "指定此规则适用的图像 —— 以数据集根目录为基准对各图像路径进行"
+        "fnmatch 匹配 ('|' 作 OR 组合)。例: 'character_a/*'。"
+        "留空或 '*' 可匹配所有图像 (通配默认规则)。"
     ),
     "preprocess_sam_threshold": "SAM 阈值 (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
@@ -81,10 +131,12 @@ STRINGS: dict[str, str] = {
     "preprocess_status_resized": "已调整大小的图像: {n}",
     "preprocess_status_caches": "缓存 — latents: {lat}, text: {te}, PE: {pe}",
     "preprocess_status_masks": "蒙版: {masks}",
-    "preprocess_status_no_resized": "尚无已调整大小的图像 —— 请先在训练配置选项卡运行预处理。",
+    "preprocess_status_no_resized": "尚无已调整大小的图像。",
+    "preprocess_open_dataset_dir": "打开cache文件夹",
+    "preprocess_open_dataset_dir_tooltip": "在文件管理器中打开 post_image_dataset/ 文件夹（已调整大小的图像 + 缓存）。",
     "preprocess_log_placeholder": "预处理输出将显示在此处……",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "持久化这些设置 (写入 configs/sam_mask.yaml + GUI 设置)。",
+    "preprocess_save_settings_tip": "将这些设置保存到所选 GUI method 配置。运行遮罩时，当前配置的遮罩设置会随任务一起提交。",
     "preprocess_settings_saved": "预处理设置已保存。",
     "preprocess_invalid_float": "{field} 的数字无效: {value}",
     "preprocess_already_running": "已有预处理步骤在运行。",
@@ -93,17 +145,31 @@ STRINGS: dict[str, str] = {
     "save": "保存",
     "save_dirty_tooltip": "表单有未保存的编辑。点击保存将写入 variant 文件 (训练 / 预处理会在跳过时自动保存)。",
     "train": "训练",
+    "train_tooltip": "立即训练当前变体。打开下拉菜单可改为加入守护进程队列 (不立即开始，先排队)。",
+    "train_busy_use_queue": "此标签页已绑定一个任务。请使用训练下拉菜单将另一个任务排在其后，或先停止当前任务。",
+    "queue": "加入队列",
+    "queue_tooltip": "将当前变体加入守护进程队列而不绑定此标签页，以便继续排队更多变体。",
+    "queue_train_preprocess": "加入队列: 训练 + 预处理",
+    "queue_train_only": "加入队列: 仅训练",
+    "queue_preprocess_only": "加入队列: 仅预处理",
     "test": "测试",
     "stop": "停止",
     "log_placeholder": "训练输出将显示在此处……",
+    "copy_log": "复制",
+    "copy_log_tooltip": "将完整训练日志复制到剪贴板",
+    "copy_log_done": "已复制",
     "from_base": "继承自 base.toml",
     "saved": "已保存",
     "saved_file": "已保存 {name}",
     "invalid_toml": "无效的 TOML",
+    "config_bad_keys_header": "未知的数据集键 — 删除这些键之前训练将会失败:",
+    "config_remove_keys_btn": "删除",
+    "config_remove_keys_confirm": "从配置文件中删除这 {n} 个过时的键?\n\n{keys}",
+    "config_remove_keys_none": "未删除任何键(磁盘上对应的行可能已更改)。",
     "error": "错误",
     "accelerate_not_found": "在 PATH 中找不到 accelerate",
     "preprocess": "预处理",
-    "preprocess_required": "训练前请先运行预处理。",
+    "preprocess_required": "训练开始前会先运行预处理。",
     "preprocess_existing_caches_title": "将复用现有缓存",
     "preprocess_existing_caches_body": (
         "以下路径已存在缓存文件:\n  {cache_dir}\n\n"
@@ -124,22 +190,17 @@ STRINGS: dict[str, str] = {
         "请取消并先运行预处理。\n\n"
         "用现有缓存继续训练吗?"
     ),
-    "stale_cache_title": "过时的数据集缓存",
-    "stale_cache_body": (
-        "以下路径下有 {n} 个 VAE 隐变量缓存:\n  {cache_dir}\n\n"
-        "这些文件的分辨率已不在当前桶表 "
-        "(4032 / 4200 token 数系列) 中:\n\n{examples}\n\n"
-        "这些缓存是在旧的桶布局下生成的 —— 训练时会跳过或将其归入错误的桶。"
-        "请取消并重新运行预处理 (使用「覆盖」选项) 以重新生成缓存。\n\n"
-        "仍然使用过时缓存继续训练吗?"
-    ),
-    "train_autopreprocess_log": (
-        "未找到预处理缓存 —— 将先运行预处理,然后自动开始训练。\n"
-    ),
+    "train_autopreprocess_log": ("未找到预处理缓存 —— 训练开始前会先运行预处理。\n"),
     "train_preprocessing": "预处理中……",
     "no_lora_for_test": "output/ckpt/ 中没有可测试的 LoRA。请先运行训练。",
     "test_output_title": "最新测试输出",
     "test_output_empty": "output/tests/ 为空。",
+    "sample_output_title": "最新训练样本",
+    "sample_output_empty": "暂无样本 —— 随着训练生成，它们会出现在输出目录的 sample/ 文件夹中。",
+    "sample_prompt_edit_button": "编辑样本提示词……",
+    "sample_prompt_dialog_title": "样本提示词",
+    "sample_prompt_summary_none": "无样本提示词",
+    "sample_prompt_summary_count": "{n} 条提示词 · {first}",
     "finished": "--- 完成 (退出码 {code}) ---",
     "starting": "启动中…… (加载 torch / accelerate)",
     "daemon_submitting": "正在向训练守护进程提交任务……",
@@ -147,6 +208,39 @@ STRINGS: dict[str, str] = {
     "daemon_queued": "已将任务 {job_id} 排入训练守护进程。\n",
     "daemon_reattached": "已重新连接到运行中的任务 {job_id} (在之前的会话中启动)。\n",
     "daemon_job_finished": "--- 任务 {job_id} {state} ---",
+    "queue_submitting": "正在将 {variant} 加入训练守护进程队列……",
+    "queue_added_train": "已将 {variant} 作为训练任务 {job_id} 加入队列。\n",
+    "queue_added_preprocess": "已将 {variant} 作为预处理任务 {job_id} 加入队列；完成后将自动链接训练。\n",
+    "queue_refresh": "刷新",
+    "queue_start": "开始队列",
+    "queue_pause": "暂停队列",
+    "queue_start_tooltip": "开始运行排队的作业（通过队列下拉菜单添加的作业），一次运行一个。",
+    "queue_pause_tooltip": "挂起队列——正在运行的作业继续，但在按下“开始队列”之前不会启动下一个排队作业。",
+    "queue_stop_selected": "停止所选",
+    "queue_copy_output": "复制输出",
+    "queue_status": "运行/等待 {live} 个 / 共 {total} 个",
+    "queue_status_paused": "运行/等待 {live} 个 / 共 {total} 个 — 队列已暂停",
+    "queue_daemon_unavailable": "守护进程不可用",
+    "queue_detail_placeholder": "选择一个队列项目以查看详情。",
+    "queue_log_placeholder": "所选任务的输出将显示在此处……",
+    "queue_log_missing": "(暂无输出日志。)",
+    "queue_log_read_failed": "(无法读取输出日志: {err})",
+    "queue_log_truncated": "--- 仅显示最后 {mb} MB 的输出 ---\n",
+    "queue_detail_id": "id: {job_id}",
+    "queue_detail_state": "状态: {state}",
+    "queue_detail_kind": "类型: {kind}",
+    "queue_detail_method": "对象: {method}",
+    "queue_detail_submitted": "添加时间: {time}",
+    "queue_detail_started": "开始时间: {time}",
+    "queue_detail_ended": "结束时间: {time}",
+    "queue_detail_from_chain": "from_chain: true",
+    "queue_detail_chain": "链接训练: {method}",
+    "queue_detail_chained_id": "链接任务: {job_id}",
+    "queue_detail_pid": "pid: {pid}",
+    "queue_detail_error": "错误: {error}",
+    "queue_detail_status_detail": "详情: {detail}",
+    "queue_detail_config": "配置快照: {path}",
+    "queue_detail_stdout": "stdout: {path}",
     "daemon_job_failed": "--- Job {job_id} {state}: {error} ---",
     "daemon_error_cause": "↳ 可能原因: {summary}",
     "train_queued": "训练 (已排队)",
@@ -191,18 +285,10 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "变体 '{name}' 已存在。",
     "basic_section": "基本",
     "advanced_section": "高级 (点击展开)",
-    # AdapterTab (IP-Adapter / EasyControl)
-    "adapter_source_dir": "源数据集:",
-    "adapter_cache_dir": "缓存目录:",
-    "adapter_n_pairs": "{n} 张图像 / {c} 条标注配对",
-    "adapter_n_caches": "已缓存 {n} 项",
-    "adapter_preprocess": "预处理 (调整大小 + VAE + 文本)",
-    "adapter_preprocess_pe": "预处理 (调整大小 + VAE + 文本 + PE)",
-    "adapter_train": "训练",
-    "adapter_stop": "停止",
-    "adapter_log_placeholder": "运行输出将显示在此处……",
-    "adapter_no_dataset": "源数据集目录不存在。请创建该目录并放入图像 + 标注配对。",
-    "adapter_open_dir": "打开目录",
+    # SPD / Turbo 蒸馏配置标签页 (gui/tabs/distill_tab.py)
+    "distill_general_section": "通用",
+    "distill_job_running": "此标签页已有任务正在运行。",
+    "distill_config_missing": "无法读取配置文件: {err}",
     "n_images": "{n} 张图像",
     # ImageViewerTab
     "directory": "目录:",
@@ -251,24 +337,43 @@ STRINGS: dict[str, str] = {
     ),
     # Language
     "language": "语言:",
+    # Settings dialog
+    "settings_btn": "⚙ 设置",
+    "settings_btn_tooltip": "应用设置 —— 语言、MCP 服务器注册",
+    "settings_title": "设置",
+    "settings_mcp_header": "MCP 服务器（智能体接入）",
+    "settings_mcp_desc": "将本地训练守护进程暴露给 MCP 客户端（Claude Code、Claude Desktop 等）。"
+    "在终端中运行以下命令即可注册到 Claude Code:",
+    "settings_mcp_desc_json": "其他 MCP 客户端（Claude Desktop、OpenClaw 等）"
+    "使用等效的 JSON 配置:",
+    "settings_mcp_copy": "复制",
+    "settings_mcp_copied": "已复制 ✓",
+    "settings_close": "关闭",
+    "settings_lang_apply_title": "语言",
+    "settings_lang_apply_question": "现在重新加载界面以应用新语言吗？\n\n"
+    "标签页中未保存的编辑将丢失。排队/运行中的训练任务在守护进程中运行，不受影响。\n\n"
+    "选择“否”则在下次启动时生效。",
     # Guidebook
     "guidebook": "📖 指南书",
     "guidebook_tooltip": "打开中文综合指南 (docs/guidelines/指南书.md)",
     "guidebook_missing": "在 {path} 找不到指南",
     "guidebook_open_external": "用系统查看器打开",
     "guidebook_close": "关闭",
+    # EasyControl 适配器指南（自建控制任务）
+    "adapter_guide": "📘 适配器指南",
+    "adapter_guide_tooltip": "如何构建你自己的 EasyControl 适配器 (easycontrol_adapters/ADAPTER_GUIDE.md)",
+    "easycontrol_descriptor_note": "此控制任务是一个具有多表结构的独立描述符，在左侧以原始 TOML 形式编辑:<br><br>• <b>name</b> — 输出标识符；重路由所有衍生的缓存/输出路径。<br>• <code>[staging]</code> — 用于生成条件树的数据生成阶段。<br>• <code>[preprocess]</code> — 针对已暂存树的 VAE/TE 缓存参数。<br>• <code>[training]</code> — 叠加到基础 EasyControl 方法的覆盖项。<br>• <code>[general]</code> / <code>[[datasets]]</code> — train.py 读取的数据集蓝图。<br>• <code>[variant]</code> — 此下拉项的 GUI 元数据。<br><br><b>预处理</b>按钮会合成条件树并缓存；<b>训练</b>会将此描述符的 <code>[training]</code> 覆盖项叠加后训练基础 EasyControl 方法。两个操作在 GUI 关闭后仍会继续执行。",
+    "easycontrol_descriptor_form_header": "正在编辑描述符 <b>{path}</b>。下方的参数表以表单形式编辑；保存时将变更值写回，同时保留注释和 <code>[[datasets]]</code> 蓝图。蓝图与 <code>[variant]</code> 元数据不在此处显示 —— 如需编辑请直接修改文件。点击字段名称可查看帮助。",
+    "ec_desc_group_top": "描述符",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "模型",
-    "models_btn_tooltip": "下载或重新下载模型检查点 (Anima 基础、SAM3、MIT、IP-Adapter 编码器)",
+    "models_btn_tooltip": "下载或重新下载模型检查点 (Anima 基础、SAM3、MIT、PE 视觉编码器)",
     "update_btn": "更新",
     "update_btn_tooltip": "从 GitHub 拉取最新 anima_lora 版本并运行 uv sync",
     "update_btn_available": "更新 ●",
     "update_btn_available_tooltip": "有新版本 {v} 可用 — 点击查看发布说明",
     "report_issue": "提交问题",
     "report_issue_tooltip": "在浏览器中打开 GitHub 问题追踪",
-    "experimental_features": "🧪 实验功能",
-    "experimental_features_tooltip": "打开 Postfix 和 IP-Adapter / EasyControl 选项卡 (图像条件方法)",
-    "experimental_features_title": "实验功能",
     # Models dialog
     "models_title": "下载模型",
     "models_intro": "在下方选择模型组,或使用「全部下载」获取标准套件 "
@@ -281,11 +386,24 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + 文本编码器 + VAE",
     "model_sam3": "SAM3 — 对话气泡蒙版",
     "model_mit": "MIT — 漫画文字蒙版",
-    "model_pe": "PE-Core-L14-336 — IP-Adapter 视觉编码器",
+    "model_pe": "PE-Core-L14-336 — 视觉编码器 (CMMD 验证 / DCW)",
     "models_done_title": "下载完成",
     "models_done_message": "模型下载成功。文件保存在 models/ 下。",
     "models_failed_title": "下载失败",
     "models_failed_message": "下载以退出码 {code} 退出。详情请查看日志。",
+    # HuggingFace 认证（模型对话框）
+    "models_hf_token_placeholder": "粘贴你的 HuggingFace 令牌 (hf_…)",
+    "models_hf_authenticate": "认证",
+    "models_hf_token_hint": "用于受限/限速下载（例如 SAM3）。"
+    '请在 <a href="https://huggingface.co/settings/tokens">'
+    "huggingface.co/settings/tokens</a> 创建令牌，并在 "
+    '<a href="https://huggingface.co/facebook/sam3">huggingface.co/facebook/sam3</a> 申请 SAM3 访问权限。',
+    "models_hf_token_present": "✓ 已保存 HuggingFace 令牌。",
+    "models_hf_not_authenticated": "未认证 — 粘贴令牌以启用受限下载。",
+    "models_hf_token_empty": "请先粘贴令牌。",
+    "models_hf_authenticating": "正在认证…",
+    "models_hf_logged_in": "✓ 已登录为 {name}。",
+    "models_hf_login_failed": "认证失败：{err}",
     # Update dialog
     "update_title": "更新 anima_lora",
     "update_warning": "更新会从 GitHub 拉取最新版本并覆盖工作树 "
@@ -316,10 +434,8 @@ STRINGS: dict[str, str] = {
     "merge_no_adapter_msg": "未选择适配器或文件不存在。",
     "merge_no_selection": "从列表中选择一个检查点以扫描它。",
     "merge_verdict_ready": "✓ 可合并",
-    "merge_verdict_partial": "△ 部分合并 —— LoRA 可合并,ReFT 将被丢弃",
     "merge_verdict_hydra": "✗ HydraLoRA moe —— 层级局部路由无法合并",
     "merge_verdict_postfix_only": "✗ 仅 postfix/prefix —— 不是权重增量",
-    "merge_verdict_reft_only": "✗ 仅 ReFT —— 块级钩子,没有可合并的 LoRA",
     "merge_verdict_unknown": "? 未识别的适配器键",
     "merge_options": "合并选项",
     "merge_base_dit": "基础 DiT:",
@@ -328,7 +444,7 @@ STRINGS: dict[str, str] = {
     "merge_dtype": "保存 dtype:",
     "merge_out": "输出:",
     "merge_out_placeholder": "(自动: <adapter>_merged.safetensors)",
-    "merge_allow_partial": "允许部分合并 (丢弃 ReFT / Hydra / postfix 键)",
+    "merge_allow_partial": "允许部分合并 (丢弃 Hydra / postfix 键)",
     "merge_allow_partial_tip": "即使适配器包含不可合并的组件也继续。被丢弃的组件不会出现在合并后的 DiT 中。",
     "merge_button": "合并到 DiT",
     "merge_log_placeholder": "合并输出将显示在此处……",
@@ -366,4 +482,22 @@ STRINGS: dict[str, str] = {
     "prior_loss_weight": "先验损失权重",
     "prior_loss_weight_tooltip": "正则化图片的损失权重（1.0 = 等权，更低 = 影响更小）",
     "reg_scan_no_dir": "未指定正则化源目录或目录为空。",
+    # Multi-scale target_res tiers
+    "target_res_danger_tooltip": "高开销档位：{edge}px 每张图像约使用 {tokens} 个 token，并额外增加一张已编译的块图（编译更慢、显存更高）。仅在确实需要该分辨率时才启用。",
+    # TensorBoard panel
+    "tb_panel_title": "TensorBoard 运行列表",
+    "tb_open": "打开 TensorBoard",
+    "tb_stop": "停止服务器",
+    "tb_remove": "删除",
+    "tb_view": "查看",
+    "tb_view_tip": "仅打开此运行的 TensorBoard。",
+    "tb_no_runs": "暂无运行记录，开始训练后列表将自动填充。",
+    "tb_status_running": "正在端口 {port} 上运行",
+    "tb_status_stopped": "",
+    "tb_not_installed": "未安装 tensorboard，请运行: pip install tensorboard",
+    "tb_current_run_label": "（当前）",
+    "tb_open_current": "查看当前训练",
+    "tb_open_current_tip": "仅打开正在进行的训练运行的 TensorBoard。",
+    "tb_open_current_idle_tip": "训练进行中时可用。",
+    "tb_appear_hint": "如果运行未显示在列表中，请尝试点击 TensorBoard 的刷新（更新）按钮。",
 }

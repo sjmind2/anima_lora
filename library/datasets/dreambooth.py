@@ -18,10 +18,48 @@ from library.datasets.subsets import (
     DreamBoothSubset,
     ImageInfo,
     filter_paths_by_glob,
+    folder_repeat_count,
     split_train_val,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Colorization targets are sourced from post_image_dataset/resized/, whose images
+# carry no .txt sidecar — the caption master lives in image_dataset/. To drop pure
+# B&W pages from the colorize set (they have no color to learn, and would teach the
+# adapter "B&W in → B&W out"), scan the master once for a standalone `monochrome`
+# tag and exclude those stems at enumeration. Scoped to subsets that set a
+# `cond_cache_dir` (the colorize cond↔target pairing knob) — a no-op everywhere else.
+_MONOCHROME_CAPTION_MASTER = "image_dataset"
+_monochrome_stems_cache: dict = {}
+
+
+def monochrome_stems(caption_master_dir: str) -> frozenset:
+    """Stems whose caption sidecar under ``caption_master_dir`` carries a standalone
+    ``monochrome`` tag. Scanned once per dir (``os.walk`` follows the symlinked master)
+    and memoized; returns an empty set if the dir is absent."""
+    cached = _monochrome_stems_cache.get(caption_master_dir)
+    if cached is not None:
+        return cached
+    stems: set = set()
+    if os.path.isdir(caption_master_dir):
+        for dirpath, _dirnames, filenames in os.walk(
+            caption_master_dir, followlinks=True
+        ):
+            for name in filenames:
+                if not name.endswith(".txt"):
+                    continue
+                try:
+                    with open(os.path.join(dirpath, name), encoding="utf-8") as f:
+                        line = f.readline()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if any(t.strip().lower() == "monochrome" for t in line.split(",")):
+                    stems.add(os.path.splitext(name)[0])
+    result = frozenset(stems)
+    _monochrome_stems_cache[caption_master_dir] = result
+    return result
 
 
 def read_caption(img_path, caption_extension, enable_wildcard):
@@ -109,12 +147,8 @@ class DreamBoothDataset(BaseDataset):
                 pattern = getattr(subset, "path_pattern", "*") or "*"
                 if pattern != "*":
                     meta_paths = list(metas.keys())
-                    keep = filter_paths_by_glob(
-                        meta_paths, subset.image_dir, pattern
-                    )
-                    metas = {
-                        p: metas[p] for p, k in zip(meta_paths, keep) if k
-                    }
+                    keep = filter_paths_by_glob(meta_paths, subset.image_dir, pattern)
+                    metas = {p: metas[p] for p, k in zip(meta_paths, keep) if k}
                     logger.info(
                         f"path_pattern={pattern!r} kept {len(metas)}/"
                         f"{len(meta_paths)} cached entries from "
@@ -131,9 +165,7 @@ class DreamBoothDataset(BaseDataset):
                     _assert_unique_stems(img_paths, source_label=subset.image_dir)
                 pattern = getattr(subset, "path_pattern", "*") or "*"
                 if pattern != "*":
-                    keep = filter_paths_by_glob(
-                        img_paths, subset.image_dir, pattern
-                    )
+                    keep = filter_paths_by_glob(img_paths, subset.image_dir, pattern)
                     pre_n = len(img_paths)
                     img_paths = [p for p, k in zip(img_paths, keep) if k]
                     logger.info(
@@ -261,7 +293,11 @@ class DreamBoothDataset(BaseDataset):
                 # not an error — training reads the cached prompt embeddings.
                 # Key by (rel_subdir, stem) to support nested cache layouts
                 # where two images can share a stem in different subdirs.
-                cache_dir = getattr(subset, "cache_dir", None)
+                # text_cache_dir (when set) holds the TE caches instead of
+                # cache_dir, so scan there to suppress missing-.txt warnings.
+                cache_dir = getattr(subset, "text_cache_dir", None) or getattr(
+                    subset, "cache_dir", None
+                )
                 te_suffix = "_anima_te.safetensors"
                 te_cached_keys: set[tuple[str, str]] = set()
                 if cache_dir and os.path.isdir(cache_dir):
@@ -366,6 +402,32 @@ class DreamBoothDataset(BaseDataset):
                     f"images from {subset.image_dir}"
                 )
 
+            # Colorize (cond_cache_dir set): drop monochrome-tagged targets. Their
+            # tag lives only in the caption master (image_dataset/), not beside the
+            # resized targets, so match by stem against a one-time scan of the master.
+            if getattr(subset, "cond_cache_dir", None):
+                from library.env import resolve_under_home
+
+                mono = monochrome_stems(
+                    str(resolve_under_home(_MONOCHROME_CAPTION_MASTER))
+                )
+                if mono:
+                    pre = len(img_paths)
+                    kept = [
+                        (p, c, s)
+                        for p, c, s in zip(img_paths, captions, sizes)
+                        if os.path.splitext(os.path.basename(p))[0] not in mono
+                    ]
+                    if kept:
+                        img_paths, captions, sizes = (list(t) for t in zip(*kept))
+                    else:
+                        img_paths, captions, sizes = [], [], []
+                    if len(img_paths) != pre:
+                        logger.info(
+                            f"colorize: dropped {pre - len(img_paths)} monochrome-tagged "
+                            f"images from {subset.image_dir}"
+                        )
+
             return img_paths, captions, sizes
 
         logger.info("prepare images.")
@@ -393,15 +455,58 @@ class DreamBoothDataset(BaseDataset):
                 )
                 continue
 
-            if subset.is_reg:
-                num_reg_images += num_repeats * len(img_paths)
-            else:
-                num_train_images += num_repeats * len(img_paths)
+            # Kohya-style folder repeats: a `{n}_...` directory component
+            # under image_dir overrides num_repeats with n for the images
+            # inside it; `0_...` drops them from the training pool. Training
+            # only — the validation pool stays at 1 repeat (num_repeats above).
+            repeats = [num_repeats] * len(img_paths)
+            if self.is_training_dataset and getattr(
+                subset, "repeat_by_folder_name", False
+            ):
+                repeats = [
+                    n
+                    if (n := folder_repeat_count(p, subset.image_dir)) is not None
+                    else num_repeats
+                    for p in img_paths
+                ]
+                n_overridden = sum(1 for r in repeats if r != num_repeats)
+                n_dropped = sum(1 for r in repeats if r == 0)
+                if n_overridden:
+                    logger.info(
+                        f"repeat_by_folder_name: {n_overridden}/{len(img_paths)} images "
+                        f"take their repeat count from a {{n}}_* folder under "
+                        f"{subset.image_dir}"
+                        + (
+                            f" ({n_dropped} in 0_* folders dropped)"
+                            if n_dropped
+                            else ""
+                        )
+                    )
+                if n_dropped:
+                    kept = [
+                        (p, c, s, r)
+                        for p, c, s, r in zip(img_paths, captions, sizes, repeats)
+                        if r > 0
+                    ]
+                    if not kept:
+                        logger.warning(
+                            f"ignore subset with image_dir='{subset.image_dir}': "
+                            f"all images sit in 0_* folders"
+                        )
+                        continue
+                    img_paths, captions, sizes, repeats = (list(t) for t in zip(*kept))
 
-            for img_path, caption, size in zip(img_paths, captions, sizes):
+            if subset.is_reg:
+                num_reg_images += sum(repeats)
+            else:
+                num_train_images += sum(repeats)
+
+            for img_path, caption, size, image_repeats in zip(
+                img_paths, captions, sizes, repeats
+            ):
                 info = ImageInfo(
                     img_path,
-                    num_repeats,
+                    image_repeats,
                     caption,
                     subset.is_reg,
                     img_path,

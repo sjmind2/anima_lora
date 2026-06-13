@@ -7,9 +7,9 @@ This document is a comprehensive English guide for using the **Anima LoRA** trai
 ## Table of Contents
 
 1. [System Requirements](#1-system-requirements)
-2. [Installing CUDA 13.0.2](#2-installing-cuda-1302)
+2. [CUDA 13.2 (handled by the installer)](#2-cuda-132-handled-by-the-installer)
 3. [Python Environment and Repository Setup](#3-python-environment-and-repository-setup)
-4. [Hugging Face Authentication and Model Download](#4-hugging-face-authentication-and-model-download)
+4. [Model Download (Hugging Face sign-in is in the GUI)](#4-model-download-hugging-face-sign-in-is-in-the-gui)
 5. [Dataset Preparation](#5-dataset-preparation)
 6. [Preprocessing: Resize · Latents · Text Embedding Cache](#6-preprocessing-resize--latents--text-embedding-cache)
 7. [Using the GUI](#7-using-the-gui)
@@ -33,33 +33,31 @@ This document is a comprehensive English guide for using the **Anima LoRA** trai
 
 ---
 
-## 2. Installing CUDA 13.2
+## 2. CUDA 13.2 (handled by the installer)
 
-You need the latest CUDA for stable operation with PyTorch 2.x + Flash Attention 2. Download 13.2 from the NVIDIA official archive.
+**You normally don't need to do anything here.** The one-line installer in **§3** installs the **CUDA 13.2 toolkit automatically** when it isn't already present: it downloads the official NVIDIA installer, launches it (choose **"Express (Recommended)"**), waits for you to finish, then verifies that `nvcc --version` reports `release 13.2` before continuing. If 13.2 is already installed, it's detected and skipped.
 
-Download page: <https://developer.nvidia.com/cuda-13-2-0-download-archive>
+> **Driver note**: CUDA 13.x requires NVIDIA driver **595 or higher** — this is the one piece you must supply yourself. The CUDA installer can install a matching driver, but if you already have a newer one, keep it (on Linux, deselect the bundled driver in the `.run` installer's menu). Update via GeForce Experience or the NVIDIA Download Center if needed.
+>
+> **If a reboot is requested** (common on Windows): reboot, then re-run the same one-liner — CUDA is detected and the install continues from there. Set `$env:ANIMA_SKIP_CUDA='1'` (PowerShell) / `ANIMA_SKIP_CUDA=1` (shell) to skip the CUDA step entirely if you manage CUDA yourself.
 
-### 2.1 Windows Installation
+<details>
+<summary>Manual install (only if the automatic step fails)</summary>
 
-1. On the page above, select **Operating System: Windows → Architecture: x86_64 → Version: 11/10 → Installer Type: exe (local)**.
-2. Run the downloaded `cuda_13.2.1_windows.exe` → choose "Express (Recommended)" install.
-3. After installation, verify in PowerShell:
+Download 13.2 from the NVIDIA archive: <https://developer.nvidia.com/cuda-13-2-0-download-archive>
 
-   ```powershell
-   nvidia-smi
-   nvcc --version
-   ```
-
-4. If `nvcc` is not recognized, add the following to your system `Path` environment variable:
+1. On Windows, select **Operating System: Windows → Architecture: x86_64 → Version: 11/10 → Installer Type: exe (local)**, run it, and choose "Express (Recommended)".
+2. Verify in PowerShell: `nvidia-smi` and `nvcc --version`.
+3. If `nvcc` is not recognized, add to your system `Path`:
 
    ```
    C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin
    C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\libnvvp
    ```
 
-5. Reboot and verify `nvcc --version` again.
+   then reboot and verify `nvcc --version` again.
 
-> **Driver note**: CUDA 13.x requires NVIDIA driver 595 or higher. If you have an older driver, update it first via GeForce Experience or the NVIDIA Download Center.
+</details>
 
 ## 3. Python Environment and Repository Setup
 
@@ -67,18 +65,19 @@ This project uses [`uv`](https://github.com/astral-sh/uv) for dependency managem
 
 ### 3.0 One-line install (easiest, no git required) ✅
 
-Recommended for beginners. Paste this single line into PowerShell — it installs `uv` if missing, downloads the latest release, runs `uv sync`, and creates an **"Anima LoRA GUI" desktop shortcut**:
+Recommended for beginners. Paste this single line into PowerShell — it installs `uv` if missing, **installs the CUDA 13.2 toolkit if missing** (see **§2**), downloads the latest release, runs `uv sync` (Python 3.13 + torch are resolved automatically), creates an **"Anima LoRA GUI" desktop shortcut**, and **opens the GUI for you**:
 
 ```powershell
 irm https://raw.githubusercontent.com/sorryhyun/anima_lora/main/install.ps1 | iex
 ```
 
-Installs into `.\anima_lora\` (override with `$env:ANIMA_DIR`; pin a version with `$env:ANIMA_VERSION='v1.4.0'`). When it finishes:
+Installs into `.\anima_lora\` (override with `$env:ANIMA_DIR`; pin a version with `$env:ANIMA_VERSION='v1.4.0'`). **When it finishes, the GUI opens by itself** — from there:
 
-1. `cd anima_lora`
-2. Create a Hugging Face token and log in with `hf auth login` (see **§4**)
-3. Download models: `python tasks.py download-models`
-4. Double-click the **"Anima LoRA GUI"** desktop shortcut to launch (or `python tasks.py gui`)
+1. **Sign in to Hugging Face** right in the GUI — the old `hf auth login` terminal step is built in now (see **§4**).
+2. Open the **Models** dialog and download the DiT + text encoder + VAE.
+3. That's it — preprocess, train, and merge all happen in the same window.
+
+Re-launch later from the **"Anima LoRA GUI"** desktop shortcut (or `python tasks.py gui`).
 
 > This path assumes GUI-centric use and does **not** install `make`. Most tasks are GUI buttons, so that's fine — but if you want to run `make ...` from the CLI, either run `winget install ezwinports.make` (§3.3) or use `python tasks.py` instead of `make`.
 >
@@ -147,30 +146,30 @@ You'll know it worked when your prompt shows a `(anima_lora)` (or `(.venv)`) pre
 > make gui          # (or: uv run make gui)
 > ```
 >
-> You'll still want to skim **§4** to create a Hugging Face token and log in (`hf auth login`) before the GUI's download button can fetch models, and **§5** to lay out your dataset. After that, the GUI covers the rest. Sections §6–§11 document the equivalent CLI commands — read them if you want to understand or script what the GUI does, but you don't have to run them by hand. Full GUI walkthrough: **[§7 Using the GUI](#7-using-the-gui)**.
+> You'll **sign in to Hugging Face right in the GUI** (see **§4** — no terminal step) before the download button can fetch models, and lay out your dataset per **§5**. After that, the GUI covers the rest. Sections §6–§11 document the equivalent CLI commands — read them if you want to understand or script what the GUI does, but you don't have to run them by hand. Full GUI walkthrough: **[§7 Using the GUI](#7-using-the-gui)**.
 
 ---
 
-## 4. Hugging Face Authentication and Model Download
+## 4. Model Download (Hugging Face sign-in is in the GUI)
 
-### 4.1 Get a Token and Log In
+Hugging Face sign-in is **built into the GUI** now — you no longer need to run `hf auth login` in a terminal.
+
+### 4.1 Sign in (in the GUI)
 
 1. Create a token with **read** permissions at <https://huggingface.co/settings/tokens>.
-2. Log in from the terminal:
+2. Launch the GUI (it opens automatically right after install) and paste the token into the **Hugging Face sign-in** field. It's saved to the standard Hugging Face cache, so the GUI and the CLI (`make download-models`) share the same login.
 
-   ```bash
-   hf auth login
-   ```
-
-   Paste the token and press Enter.
+> **CLI-only?** You can still run `hf auth login` in a terminal instead — it's the same token cache.
 
 ### 4.2 Download Models
+
+In the GUI, the **Models** dialog downloads everything below with one button. The CLI equivalent is:
 
 ```bash
 make download-models
 ```
 
-This command automatically downloads the following three items and organizes them under `models/`:
+This downloads the following three items and organizes them under `models/`:
 
 | File | Path |
 |---|---|
@@ -179,6 +178,8 @@ This command automatically downloads the following three items and organizes the
 | QwenImage VAE | `models/vae/qwen_image_vae.safetensors` |
 
 The same command also pulls **SAM3** and **MIT**, which are only used by the optional masked-loss step (see §8.2). Masking itself is opt-in, and even within it either segmenter can be toggled off — feel free to ignore these checkpoints if you're not training with masked loss.
+
+> **SAM3 is a gated model.** Its weights live in a gated Hugging Face repository, so before the download can succeed you must visit <https://huggingface.co/facebook/sam3>, click **Request access**, and **wait for approval** (granted by the repo owner — this can take anywhere from minutes to a few days). Until access is granted, the SAM3 download will fail with a 403/gated error. The three core models above (DiT, text encoder, VAE) are *not* gated, and `make download-models` continues past a blocked SAM3 — so a pending SAM3 request won't stop you from training without masked loss. Once approved, run `make download-sam3` to fetch it.
 
 > **If the download is interrupted**: you can re-download individual components with targets like `make download-anima`, `make download-sam3`, or `make download-mit`.
 
@@ -231,7 +232,7 @@ make preprocess              # Run all three steps (for LoRA / standard training
 make preprocess-resize       # 1) image_dataset/ → post_image_dataset/resized/
 make preprocess-vae          # 2) VAE latent caching → post_image_dataset/lora/
 make preprocess-te           # 3) Text encoder output caching → post_image_dataset/lora/
-make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — IP-Adapter only
+make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — CMMD validation / DCW v4 only
 ```
 
 > **⚠️ Caches are reused — they are never automatically deleted.**
@@ -263,7 +264,7 @@ make preprocess-pe           # (Optional) PE-Core vision encoder feature caching
 
 ### 6.4 PE Vision Feature Caching (Optional)
 
-- Only needed for IP-Adapter training (and the DCW v4 fusion head)
+- Only needed for CMMD validation and the DCW v4 fusion head
 - Pre-computes PE-Core-L14-336 vision encoder outputs so the vision encoder doesn't need to be loaded during training
 - Cache location: `post_image_dataset/lora/{stem}_anima_pe.safetensors`
 
@@ -284,7 +285,7 @@ make gui-shortcut   # (Optional) Create a no-console-window .lnk shortcut on the
 
 Main GUI tabs:
 
-- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `tlora_ortho_reft`, `hydralora`, `reft`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
+- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `hydralora`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
 - **Preprocess**: Run resize + VAE + text embedding caching in one shot.
 - **Dataset**: Preview images/captions and edit captions directly.
 - **Merge**: Bake a trained LoRA into the base DiT to produce a standalone ComfyUI checkpoint (supports base LoRA / OrthoLoRA / T-LoRA only).
@@ -341,9 +342,7 @@ PRESET=low_vram make lora-gui GUI_PRESETS=tlora-8gb   # VRAM 8~12 GB
 
 # Other variants (configs/gui-methods/<variant>.toml — clean single files)
 make lora-gui GUI_PRESETS=lora                   # Plain baseline LoRA
-make lora-gui GUI_PRESETS=tlora_ortho_reft       # Ortho + T-LoRA + ReFT stack
 make lora-gui GUI_PRESETS=hydralora              # MoE multi-head routing
-make lora-gui GUI_PRESETS=reft                   # ReFT only
 
 # Toggle-block style (select variant inside configs/methods/lora.toml directly)
 make lora                          # presets.toml[default]
@@ -377,7 +376,7 @@ Output PNGs are black-and-white: **white (255) = train**, **black (0) = exclude*
 | `caption_dropout_rate` | `0.1` | Replaces some captions with empty strings (helps CFG) |
 | `use_shuffled_caption_variants` | `true` | Use comma-shuffled caption variants |
 
-Variant toggles (`use_ortho`, `use_timestep_mask`, `add_reft`, `use_moe_style`, `router_source`, etc.) are activated by uncommenting the relevant block in `configs/methods/lora.toml`, or by using the per-variant single-file from `configs/gui-methods/<variant>.toml`. **The recommended `tlora` variant has `use_ortho = true` + `use_timestep_mask = true` pre-enabled, giving you the OrthoLoRA + T-LoRA combination out of the box.**
+Variant toggles (`use_ortho`, `use_timestep_mask`, `use_moe_style`, `router_source`, etc.) are activated by uncommenting the relevant block in `configs/methods/lora.toml`, or by using the per-variant single-file from `configs/gui-methods/<variant>.toml`. **The recommended `tlora` variant has `use_ortho = true` + `use_timestep_mask = true` pre-enabled, giving you the OrthoLoRA + T-LoRA combination out of the box.**
 
 ### 8.4 What Happens During Training
 
@@ -390,7 +389,7 @@ Variant toggles (`use_ortho`, `use_timestep_mask`, `add_reft`, `use_moe_style`, 
 
 ### 8.5 Outputs
 
-- Trained weights: `output/ckpt/<output_name>.safetensors` (auto-differentiated per variant as `anima`, `anima_tlora_ortho`, `anima_tlora_reft`, `anima_hydra`, `anima_postfix`, etc.)
+- Trained weights: `output/ckpt/<output_name>.safetensors` (auto-differentiated per variant as `anima`, `anima_tlora_ortho`, `anima_hydra`, `anima_postfix`, etc.)
 - Checkpoints: saved to `output/ckpt/` every `save_every_n_epochs` (`.snapshot.toml` sidecar + `_moe` companion for Hydra)
 - Validation samples: `output/ckpt/sample/`
 - Inference output images: `output/tests/`
@@ -433,17 +432,15 @@ How it works:
 | **OrthoLoRA + T-LoRA (8 GB)** | `make lora-gui GUI_PRESETS=tlora-8gb` or `PRESET=low_vram make lora-gui GUI_PRESETS=tlora` | Same recommended combination on VRAM 8~12 GB |
 | **Plain LoRA** | `make lora-gui GUI_PRESETS=lora` or `make lora` | Simplest baseline, for comparison experiments |
 | **Plain LoRA (8 GB)** | `make lora-gui GUI_PRESETS=lora-8gb` or `PRESET=low_vram make lora` | VRAM 8~12 GB |
-| **T-LoRA + Ortho + ReFT** | `make lora-gui GUI_PRESETS=tlora_ortho_reft` | Adds representation editing (ReFT) to the recommended combination for fine-grained control with fewer extra parameters |
 | **HydraLoRA** | `make lora-gui GUI_PRESETS=hydralora` (8 GB: `hydralora-8gb`) | MoE multi-head routing; fit multiple concepts in one adapter |
-| **ReFT only** | `make lora-gui GUI_PRESETS=reft` or set `add_reft = true` in `methods/lora.toml` | Representation Fine-Tuning — very few parameters |
 | **Postfix Tuning** *(experimental)* | `make exp-postfix` or `make lora-gui GUI_PRESETS=postfix_ortho_cond` | Learnable N-vector appendix on cross-attention (caption-conditional + orthogonal) |
 | **ChimeraHydra** *(experimental)* | `make exp-chimera` or `make lora-gui GUI_PRESETS=chimera_hydra` | Content/frequency dual-pool MoE — for research |
 
 For detailed options per variant, see [`docs/guidelines/training.md`](training.md) and the individual docs under `docs/methods/`.
 
 > **Compatibility notes**
-> - HydraLoRA / ReFT and similar adapter variants require `cache_llm_adapter_outputs = true` (enabled by default) to work correctly.
-> - The OrthoLoRA + T-LoRA portions of `tlora` and `tlora_ortho_reft` can be baked into the base DiT with `make merge` to produce a standalone ComfyUI checkpoint (the ReFT portion cannot be baked — use `--allow-partial`).
+> - HydraLoRA and similar adapter variants require `cache_llm_adapter_outputs = true` (enabled by default) to work correctly.
+> - The OrthoLoRA + T-LoRA portions of `tlora` can be baked into the base DiT with `make merge` to produce a standalone ComfyUI checkpoint.
 
 ---
 
@@ -454,7 +451,7 @@ For detailed options per variant, see [`docs/guidelines/training.md`](training.m
 To immediately generate samples with the adapter you just trained, use the matching `make test-*` command. All of them automatically pick the most recently saved adapter from `output/ckpt/`.
 
 ```bash
-make test                        # Plain LoRA / OrthoLoRA / T-LoRA / ReFT
+make test                        # Plain LoRA / OrthoLoRA / T-LoRA
 make test SPECTRUM=1             # Spectrum-accelerated inference
 make test MOD=1                  # Modulation guidance (pooled_text_proj) — composable with SPECTRUM=1
 make test NOLORA=1               # Base DiT only (omits --lora_weight); combine with MOD=1 for mod-only path
@@ -521,11 +518,11 @@ make merge ADAPTER_DIR=output/ckpt MULTIPLIER=0.8  # Adjust strength
 
 The baked `*_merged.safetensors` can be loaded as a standalone model with ComfyUI's `UNETLoader`.
 
-### 11.2 HydraLoRA / ReFT / Postfix
+### 11.2 HydraLoRA / Postfix
 
 These variants cannot be loaded with ComfyUI's default LoraLoader (they involve routing and token insertion, not simple weight deltas) and require dedicated nodes:
 
-- **Anima Adapter Loader** (`custom_nodes/comfyui-hydralora/`) — unified handling for LoRA / Hydra / ReFT / postfix. See the `README.md` in that folder for usage details.
+- **Anima Adapter Loader** (`custom_nodes/comfyui-hydralora/`) — unified handling for LoRA / Hydra / postfix. See the `README.md` in that folder for usage details.
 - **Spectrum KSampler / Mod Guidance / DCW nodes** — separate repository at <https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler>
 
 ---
@@ -543,16 +540,16 @@ make update -- --dry-run # Preview which files would change
 
 ## Further Reading
 
+- [`docs/guidelines/base-config.md`](base-config.md) — `base.toml` key-by-key reference (model paths, noise schedule, caching, compile, memory knobs, the dataset blueprint)
 - [`docs/guidelines/training.md`](training.md) — Adapter variants, caption shuffling, masked loss, dataset config details
-- [`docs/guidelines/inference.md`](inference.md) — Inference flags, DCW, Spectrum, prompt file format
+- [`docs/guidelines/inference.md`](inference.md) — Inference workflows, flags, DCW, Spectrum, prompt file format
 - [`docs/guidelines/difference_between_comfy.md`](difference_between_comfy.md) — Implementation differences between anima_lora and ComfyUI core
 - [`docs/methods/timestep_mask.md`](../methods/timestep_mask.md) — T-LoRA timestep mask
 - [`docs/methods/psoft-integrated-ortholora.md`](../methods/psoft-integrated-ortholora.md) — OrthoLoRA details (the orthogonal rotation part of the recommended `tlora` variant)
-- [`docs/methods/spectrum.md`](../methods/spectrum.md) — Spectrum acceleration: how it works and options
-- [`docs/methods/dcw.md`](../methods/dcw.md) — DCW (scalar + v4 learnable calibrator)
-- [`docs/methods/mod-guidance.md`](../methods/mod-guidance.md) — Modulation guidance
+- [`docs/inference/spectrum.md`](../inference/spectrum.md) — Spectrum acceleration: how it works and options
+- [`docs/inference/dcw.md`](../inference/dcw.md) — DCW (scalar + v4 learnable calibrator)
+- [`docs/inference/mod-guidance.md`](../inference/mod-guidance.md) — Modulation guidance
 - [`docs/methods/hydra-lora.md`](../methods/hydra-lora.md) — HydraLoRA multi-head routing
-- [`docs/methods/reft.md`](../methods/reft.md) — ReFT representation editing
 - [`docs/experimental/postfix.md`](../experimental/postfix.md) — Postfix (cond+ortho)
 
 Questions and bug reports are welcome on GitHub Issues. Happy training!

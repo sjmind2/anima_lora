@@ -251,6 +251,31 @@ def cmd_preprocess_pe(extra):
     )
 
 
+def cmd_preprocess_pe_spatial(extra):
+    """Cache PE-Spatial-B16-512 dense patch-token features for REPA v2.
+
+    Reads pre-resized images from ``post_image_dataset/resized/`` and writes
+    ``{stem}_anima_pe_spatial.safetensors`` sidecars into the LoRA cache dir
+    (disjoint from the PE-Core ``_anima_pe`` caches CMMD reads). No centroid —
+    REPA aligns per-patch, not against a dataset mean. Run before a
+    ``use_repa=true`` training arm.
+    """
+    run(
+        [
+            PY,
+            "scripts/preprocess/cache_pe_encoder.py",
+            "--dir",
+            _path("resized_image_dir", "post_image_dataset/resized"),
+            "--cache_dir",
+            _path("lora_cache_dir", "post_image_dataset/lora"),
+            "--encoder",
+            "pe_spatial",
+            "--recursive",
+            *extra,
+        ]
+    )
+
+
 def _common_parent(paths: list[str]) -> str | None:
     if not paths:
         return None
@@ -635,6 +660,31 @@ def cmd_preprocess(extra):
 
     print("  cmd_preprocess: no source data found, aborting", file=sys.stderr)
     sys.exit(1)
+
+
+def cmd_preprocess_reconcile(extra):
+    """Remove resized/latent/PE/mask caches stale for the configured bucket_families.
+
+    Dry-run by default; pass ``--delete`` in ARGS to actually remove.
+    Run after changing ``bucket_families`` in the config.
+    """
+    bf_args = _bucket_families_args()
+    run(
+        [
+            PY,
+            "scripts/preprocess/reconcile_caches.py",
+            "--image-dir",
+            _path("source_image_dir", "image_dataset"),
+            "--resized-dir",
+            _path("resized_image_dir", "post_image_dataset/resized"),
+            "--cache-dir",
+            _path("lora_cache_dir", "post_image_dataset/lora"),
+            "--mask-dir",
+            "post_image_dataset/masks",
+            *bf_args,
+            *extra,
+        ]
+    )
 
 
 def cmd_preprocess_config(extra):

@@ -4,12 +4,12 @@ Trains a *plain* LoRA on one frozen Anima DiT to follow the stage-specific
 straight-line velocity targets of the Spectral Progressive Diffusion (SPD)
 multi-resolution trajectory (Xiao et al., arXiv:2605.18736, §4.3, Eq. 11–14).
 This is "Case B" of the SPD investigation — see
-``docs/proposal/spd_finetune_lora.md``. Output ``output/ckpt/anima_spd.safetensors``
+``_archive/proposals/spd_finetune_lora.md``. Output ``output/ckpt/anima_spd.safetensors``
 is a normal LoRA: load it through the standard inference path and run it with
 the SPD sampler (``--spd``) at the *same* schedule it was trained on.
 
 Models the structure on ``scripts/distill_mod/distill.py`` /
-``scripts/distill_turbo.py`` (frozen-DiT + adapter-only + single MSE backward),
+``scripts/distill_turbo/distill.py`` (frozen-DiT + adapter-only + single MSE backward),
 but strictly simpler: one adapter, one optimizer.
 
 Usage::
@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 from pathlib import Path
 
 
@@ -38,19 +39,30 @@ from tqdm import tqdm  # noqa: E402
 
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
-from library.datasets.distill import CachedDataset  # noqa: E402
+from library.config.io import toml_get as _flatten  # noqa: E402
+from library.datasets.cache import make_cached_collate  # noqa: E402
+from library.datasets.cache import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
-    compile_dit_blocks,
+    compile_dit_blocks_for_pool,
     enable_training_grad_ckpt,
     place_dit_for_training,
 )
+from library.training.accumulator import ScalarAccumulator  # noqa: E402
+from library.training.forward import PadCache, renoise, to_dit_5d  # noqa: E402
+from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E402
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
+    SpdSnrGate,
+    _snap,
+    dct_lowpass_init,
+    measure_dct_power_profile,
+    spd_rollout_to_stage,
     spd_schedule_bands,
     spd_stage_target,
+    spectral_expand,
 )
-from library.io.cache import get_latent_resolution  # noqa: E402
+from library.io.cache import get_latent_resolution, load_cached_latents  # noqa: E402
 
 try:
     import tomllib
@@ -61,16 +73,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-
-def _flatten(cfg: dict, key_path: str, default):
-    """Look up ``a.b.c`` in a nested TOML dict, falling back to ``default``."""
-    node = cfg
-    for part in key_path.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return default
-        node = node[part]
-    return node
 
 
 def main():
@@ -124,6 +126,16 @@ def main():
         default=-1.0,
         help="±absolute uniform jitter on transition σ each step (R2 robustness). 0 = off.",
     )
+    parser.add_argument(
+        "--stage_weights",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-stage sampling multiplier (len = len(stages)). Stage sampled "
+        "∝ (band width × stage_weight) — tilts gradient budget across stages "
+        "without disturbing in-band σ density. Omitted/all-ones = band-width "
+        "baseline. e.g. 0.3 0.7 leans post-transition. Overrides schedule.stage_weights.",
+    )
     parser.add_argument("--lr", type=float, default=-1.0)
     parser.add_argument("--grad_clip", type=float, default=-1.0)
     parser.add_argument(
@@ -155,6 +167,25 @@ def main():
         default=None,
         help="torch.compile inductor preset (e.g. 'reduce-overhead'). "
         "Incompatible with --blocks_to_swap (CUDAGraphs need stable addresses).",
+    )
+    parser.add_argument(
+        "--compile_dynamic_seq",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help="Collapse the per-(stage x bucket) block graphs into ONE symbolic-seq "
+        "graph (mark_dynamic on the seq axis only), mirroring the LoRA-training "
+        "compile_dynamic_seq path. The dynamic axis is bounded by the *downsampled* "
+        "stage token counts (not just the on-disk full-res latents). Only matters "
+        "with --torch_compile. Sentinel None -> TOML (compile_dynamic_seq, default true).",
+    )
+    parser.add_argument(
+        "--activation_memory_budget",
+        type=float,
+        default=-1.0,
+        help="torch.compile partitioner saved-activation fraction (<1.0 recomputes "
+        "cheap intermediates in backward to cut peak VRAM; mirrors train.py). "
+        "Ignored under --grad_ckpt (CheckpointError otherwise; redundant there). "
+        "Sentinel -1 -> TOML (activation_memory_budget, default 1.0 = off).",
     )
     parser.add_argument("--save_every", type=int, default=-1)
     parser.add_argument("--log_interval", type=int, default=-1)
@@ -195,6 +226,92 @@ def main():
         help="EMA decay on the LoRA params (e.g. 0.999). 0 = off. When on, the "
         "EMA weights are what gets validated AND saved. Overrides optim.ema_decay.",
     )
+    # --- On-policy (DAgger-style) stage entry ------------------------------------
+    # Default training builds each stage>0 entry *analytically* — a straight line
+    # from the true clean low-passed latent. At inference the prefix rolls from
+    # pure noise to an *imperfect* state that drifts off that line (exposure bias;
+    # see bench/spd/probe_onpolicy_handoff.py), so the LoRA is queried off the
+    # manifold it trained on. --onpolicy replaces the analytic entry with the
+    # state the adapter-on prefix actually rolls to (spd_rollout_to_stage), and
+    # supervises the velocity toward the *true* clean x0 from there — the
+    # self-target on-policy correction. Stage 0 is already on-policy (pure-noise
+    # entry), so only stage>0 micro-steps are affected.
+    parser.add_argument(
+        "--onpolicy",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Roll the adapter-on prefix to build the stage>0 entry (DAgger). "
+        "Validation moves on-policy too, so best-ckpt selection tracks inference.",
+    )
+    parser.add_argument(
+        "--dagger_warmup",
+        type=float,
+        default=-1.0,
+        help="Steps (int >=1) or ratio of iterations (<1) trained fully analytic "
+        "before mixing on-policy entries in — the adapter is too random early to "
+        "roll a useful prefix. Overrides onpolicy.dagger_warmup (default 0.25).",
+    )
+    parser.add_argument(
+        "--onpolicy_ratio",
+        type=float,
+        default=-1.0,
+        help="Final fraction of stage>0 micro-steps that use the on-policy entry "
+        "(ramped in linearly after dagger_warmup). 1.0 = fully on-policy. "
+        "Overrides onpolicy.ratio (default 1.0).",
+    )
+    parser.add_argument(
+        "--rollout_steps",
+        type=int,
+        default=-1,
+        help="Euler steps in the no-grad prefix rollout. Fewer than deploy is fine "
+        "(only a plausible on-policy state is needed, not a finished image) and "
+        "keeps the extra forwards cheap. Overrides onpolicy.rollout_steps (default 12).",
+    )
+    parser.add_argument(
+        "--flow_shift",
+        type=float,
+        default=-1.0,
+        help="flow_shift for the rollout σ schedule — MUST match the deployed SPD "
+        "sampler. Overrides schedule.flow_shift (default 1.0).",
+    )
+    # --- SNR-gated (information-aware) loss ---------------------------------------
+    # Plain per-sample velocity MSE supervises every frequency band at every σ —
+    # including bands whose clean coefficient is statistically unrecoverable from
+    # x_t (post-expansion HF is fresh noise). The MSE-optimal response there is
+    # dataset-mean detail, i.e. learned HF attenuation ("looks fast, blurry").
+    # The gate weights the DCT-domain error by the per-band recoverable fraction
+    # (paper Prop. 1 / Eq. 15 fed back into the loss; see SpdSnrGate).
+    parser.add_argument(
+        "--snr_gate",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help="Weight the velocity loss per DCT band by SNR_w(t) so only bands "
+        "the input determines are supervised. Sentinel None -> TOML "
+        "(snr_gate.enabled). Validation uses the same gated loss, so best-ckpt "
+        "selection no longer rewards HF hedging.",
+    )
+    parser.add_argument(
+        "--snr_gate_mode",
+        type=str,
+        default=None,
+        choices=["soft", "hard"],
+        help="soft = w=SNR/(1+SNR) (recoverable-variance fraction); hard = "
+        "binary 1[t <= t_w] at the Prop.-1 delta-activation time.",
+    )
+    parser.add_argument(
+        "--snr_gate_delta",
+        type=float,
+        default=-1.0,
+        help="Error tolerance delta for the hard gate's activation time "
+        "(paper default 0.01). Ignored in soft mode.",
+    )
+    parser.add_argument(
+        "--snr_gate_profile_n",
+        type=int,
+        default=-1,
+        help="Training latents sampled at startup to measure the per-frequency "
+        "power profile P_w the gate is built from.",
+    )
     parser.add_argument(
         "--dry_run",
         action="store_true",
@@ -231,6 +348,14 @@ def main():
     compile_inductor_mode = pick(
         args.compile_inductor_mode, "compile_inductor_mode", None
     )
+    compile_dynamic_seq = bool(
+        args.compile_dynamic_seq
+        if args.compile_dynamic_seq is not None
+        else _flatten(cfg, "compile_dynamic_seq", True)
+    )
+    activation_memory_budget = float(
+        pick(args.activation_memory_budget, "activation_memory_budget", 1.0)
+    )
     if (
         args.torch_compile
         and compile_inductor_mode == "reduce-overhead"
@@ -265,6 +390,23 @@ def main():
             f"({len(stages) - 1}); stages={stages}, transition_sigmas={transition_sigmas}"
         )
 
+    # Per-stage sampling multiplier (default all-ones → band-width baseline).
+    stage_weights = list(
+        args.stage_weights
+        if args.stage_weights is not None
+        else _flatten(cfg, "schedule.stage_weights", [1.0] * len(stages))
+    )
+    if len(stage_weights) != len(stages):
+        raise ValueError(
+            f"schedule.stage_weights (len {len(stage_weights)}) must match "
+            f"len(stages) ({len(stages)}); stages={stages}, stage_weights={stage_weights}"
+        )
+    if any(w < 0 for w in stage_weights) or sum(stage_weights) <= 0:
+        raise ValueError(
+            f"schedule.stage_weights must be non-negative with positive sum, "
+            f"got {stage_weights}"
+        )
+
     lr = float(pick(args.lr, "optim.lr", 1e-4))
     weight_decay = float(_flatten(cfg, "optim.weight_decay", 0.0))
     grad_clip = float(pick(args.grad_clip, "optim.grad_clip", 1.0))
@@ -279,9 +421,48 @@ def main():
     val_interval = int(pick(args.val_interval, "io.val_interval", save_every))
     n_val_sigmas = max(1, int(pick(args.n_val_sigmas, "io.n_val_sigmas", 4)))
     ema_decay = float(pick(args.ema_decay, "optim.ema_decay", 0.0))
+
+    # On-policy (DAgger) stage-entry config.
+    onpolicy = bool(args.onpolicy or _flatten(cfg, "onpolicy.enabled", False))
+    flow_shift = float(pick(args.flow_shift, "schedule.flow_shift", 1.0))
+    dagger_warmup_raw = float(pick(args.dagger_warmup, "onpolicy.dagger_warmup", 0.25))
+    dagger_warmup = (
+        int(dagger_warmup_raw)
+        if dagger_warmup_raw >= 1
+        else int(dagger_warmup_raw * iterations)
+    )
+    onpolicy_ratio = float(pick(args.onpolicy_ratio, "onpolicy.ratio", 1.0))
+    rollout_steps = int(pick(args.rollout_steps, "onpolicy.rollout_steps", 12))
+
+    # SNR-gated loss config.
+    snr_gate_enabled = bool(
+        args.snr_gate
+        if args.snr_gate is not None
+        else _flatten(cfg, "snr_gate.enabled", False)
+    )
+    snr_gate_mode = pick(args.snr_gate_mode, "snr_gate.mode", "soft")
+    snr_gate_delta = float(pick(args.snr_gate_delta, "snr_gate.delta", 0.01))
+    snr_gate_profile_n = int(pick(args.snr_gate_profile_n, "snr_gate.profile_n", 64))
+    snr_gate_n_bins = int(_flatten(cfg, "snr_gate.n_bins", 128))
+    if onpolicy and len(stages) < 2:
+        logger.warning(
+            "onpolicy set but schedule has one stage → no prefix to roll; ignoring."
+        )
+        onpolicy = False
+    if onpolicy:
+        logger.info(
+            "on-policy DAgger: warmup=%d steps, ratio→%.2f, rollout_steps=%d, flow_shift=%.3g",
+            dagger_warmup,
+            onpolicy_ratio,
+            rollout_steps,
+            flow_shift,
+        )
+
     # Phase-0 overfit mode has a single pinned sample → nothing to hold out.
     if args.single_prompt_idx is not None and val_split > 0.0:
-        logger.warning("single_prompt_idx set → disabling validation (no held-out data).")
+        logger.warning(
+            "single_prompt_idx set → disabling validation (no held-out data)."
+        )
         val_split = 0.0
 
     torch.manual_seed(seed)
@@ -289,21 +470,29 @@ def main():
     # --- Schedule bands (data-independent; weights keep marginal-over-t uniform) ---
     bands = spd_schedule_bands(stages, transition_sigmas)
     band_widths = torch.tensor([hi - lo for (lo, hi) in bands], dtype=torch.float64)
-    band_widths_f = band_widths.float()  # hoisted for the per-step multinomial
-    stage_probs = (band_widths / band_widths.sum()).tolist()
+    # Stage sampling weight = (band width) × (per-stage multiplier). The band-width
+    # factor keeps σ marginally-uniform *within* each sampled stage (paper's
+    # U(0,1)); stage_weights tilt mass across stages without touching in-band σ
+    # density. All-ones → exact band-width-proportional baseline.
+    stage_w = torch.tensor(stage_weights, dtype=torch.float64)
+    stage_sample_w = band_widths * stage_w
+    stage_sample_w_f = stage_sample_w.float()  # hoisted for the per-step multinomial
+    stage_probs = (stage_sample_w / stage_sample_w.sum()).tolist()
     logger.info(
-        "SPD schedule '%s': stages=%s transition_sigmas=%s",
+        "SPD schedule '%s': stages=%s transition_sigmas=%s stage_weights=%s",
         schedule_label,
         stages,
         transition_sigmas,
+        stage_weights,
     )
     for i, ((lo, hi), p) in enumerate(zip(bands, stage_probs)):
         logger.info(
-            "  stage %d  scale=%.3f  query σ∈(%.4f, %.4f)  p=%.3f",
+            "  stage %d  scale=%.3f  query σ∈(%.4f, %.4f)  w=%.3g  p=%.3f",
             i,
             stages[i],
             lo,
             hi,
+            stage_weights[i],
             p,
         )
 
@@ -331,14 +520,9 @@ def main():
             os.path.basename(only[0]),
         )
 
-    def _collate(batch):
-        return (
-            [b[0] for b in batch],
-            torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]),
-            torch.stack([b[3] for b in batch]),  # pooled — unused
-        )
-
+    # Stacking collate (pooled-text slot returned but unused by SPD). Shared with
+    # the val loader; pickle-safe under the Windows/spawn DataLoader start method.
+    collate_fn = make_cached_collate()
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -346,7 +530,7 @@ def main():
         num_workers=2,
         pin_memory=True,
         drop_last=True,
-        collate_fn=_collate,
+        collate_fn=collate_fn,
     )
 
     # Held-out val loader — same batch_size as train so the compiled (stage ×
@@ -376,7 +560,7 @@ def main():
                 num_workers=2,
                 pin_memory=True,
                 drop_last=True,
-                collate_fn=_collate,
+                collate_fn=collate_fn,
             )
 
     # Generator for stage construction (fresh HF noise per step; seed offset so
@@ -386,7 +570,7 @@ def main():
     if args.dry_run:
         for i, (_idx, lat, te, _pooled) in enumerate(tqdm(dataloader, desc="dry-run")):
             lat = lat.to(device, dtype=dtype)
-            x0_full = lat.unsqueeze(2)
+            x0_full = to_dit_5d(lat)
             for s in range(len(stages)):
                 x0_si, eps_si = spd_stage_target(
                     x0_full, s, stages, transition_sigmas, patch=1, gen=gen
@@ -396,6 +580,34 @@ def main():
                 break
         logger.info("Dry run OK: stage-target construction + collation clean.")
         return
+
+    # --- SNR gate: measure P_w from the train latents, build the loss gate ---
+    # Orthonormal-DCT per-coefficient power, radially binned — measured rather
+    # than power-law-fitted (anime latents carry line-art HF a 2-param fit
+    # smooths over). Train split only; the profile is a dataset statistic, not
+    # a per-image quantity, so a small sample suffices.
+    snr_gate = None
+    if snr_gate_enabled:
+        prof_rng = random.Random(seed + 31)
+        prof_paths = [npz for (npz, _te) in dataset.samples]
+        prof_rng.shuffle(prof_paths)
+        prof_paths = prof_paths[: max(1, snr_gate_profile_n)]
+        profile = measure_dct_power_profile(
+            (load_cached_latents(p)[0].to(device, torch.float32) for p in prof_paths),
+            n_bins=snr_gate_n_bins,
+        )
+        snr_gate = SpdSnrGate(profile, mode=snr_gate_mode, delta=snr_gate_delta)
+        logger.info(
+            "SNR gate ON (mode=%s%s): P_w profile from %d latents, %d bins; "
+            "P[lowest bin]=%.3g, P[median bin]=%.3g, P[last bin]=%.3g",
+            snr_gate_mode,
+            f", delta={snr_gate_delta}" if snr_gate_mode == "hard" else "",
+            len(prof_paths),
+            snr_gate_n_bins,
+            float(profile[0]),
+            float(profile[snr_gate_n_bins // 2]),
+            float(profile[-1]),
+        )
 
     # --- Load DiT (frozen) ---
     logger.info("Loading DiT model...")
@@ -408,15 +620,7 @@ def main():
     )
     patch = model.patch_spatial
 
-    # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA / ReFT) ---
-    # use_custom_down_autograd: save the bf16 lora_down input and recompute the
-    # fp32 cast in backward instead of stashing the fp32 copy. Bitwise-identical
-    # on the no-channel-scale path (the default); when channel_scaling_alpha>0 the
-    # per-Linear inv_scale is folded into the recomputed down-project (lora.py:97),
-    # so it stays correct, just no longer bit-identical to the alpha=0 baseline.
-    # Trims LoRA-branch activation memory and avoids a per-Linear bf16 intermediate
-    # getting pinned in the CUDA-Graph pool under reduce-overhead. See
-    # custom_autograd.py and project-custom-down-autograd-distill-lever.
+    # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA) ---
     if channel_scaling_alpha:
         logger.info(
             "channel_scaling enabled (alpha=%.3g); inv_scale baked at save",
@@ -429,7 +633,6 @@ def main():
         vae=None,
         text_encoders=[],
         unet=model,
-        use_custom_down_autograd=True,
         channel_scaling_alpha=channel_scaling_alpha,
     )
     network.apply_to(
@@ -458,35 +661,48 @@ def main():
         len(network.unet_loras),
     )
 
-    # --- Per-shape block compile ---
-    # Compile each block's _forward (dynamic=False) and let torch.compile
-    # recompile once per distinct (stage x aspect-bucket) shape on the flash
-    # backend — each at its real token count, no padding/masking. Raise the
-    # dynamo cache limit to cover every (stage x bucket) specialization plus its
-    # backward graph so none falls back to eager. Recompiles are a one-time
-    # warmup cost, not a correctness issue.
+    # --- Block compile ---
+    # SPD runs each stage at a DOWNSAMPLED resolution not in CONSTANT_TOKEN_BUCKETS
+    # (dct_lowpass_init snaps each latent dim to _snap(dim*scale, patch)), so the
+    # real forward token counts span far more than the 2 full-res families and run
+    # *below* them. Enumerate every (stage × on-disk bucket) token count so both the
+    # static and the dynamic-seq paths size themselves to the true shape set.
     if args.torch_compile:
-        # SPD runs each stage at a downsampled resolution NOT in
-        # CONSTANT_TOKEN_BUCKETS, so distinct shapes = stages × buckets — far more
-        # than the 2 full-res families compile_blocks budgets for internally.
-        # Size the dynamo cache to cover every (stage x bucket) shape; fwd+bwd
-        # entries share the one `_forward` bytecode, so give headroom.
-        n_buckets = len({get_latent_resolution(npz) for npz, _te in dataset.samples})
-        n_shapes = len(stages) * max(1, n_buckets)
-        compile_dit_blocks(
+        # Distinct (stage × bucket) token counts in the cached pool — each image's
+        # full-res latent downsampled per stage scale. This derivation is coupled
+        # to SPD's multi-stage schedule, so it stays here; the budget → cache
+        # isolation → block-compile glue is the shared library helper.
+        stage_bucket_tokens: set[int] = set()
+        for npz, _te in dataset.samples:
+            w_lat, h_lat = (int(v) for v in get_latent_resolution(npz).split("x"))
+            for s in stages:
+                h = min(_snap(h_lat * s, patch), h_lat) if s < 1.0 else h_lat
+                w = min(_snap(w_lat * s, patch), w_lat) if s < 1.0 else w_lat
+                stage_bucket_tokens.add((h // patch) * (w // patch))
+        pc = compile_dit_blocks_for_pool(
             model,
+            stage_bucket_tokens,
             enabled=True,
-            cache_size_limit=2 * n_shapes + 8,
+            dynamic_seq=compile_dynamic_seq,
             backend=args.dynamo_backend,
             mode=compile_inductor_mode,
+            activation_memory_budget=activation_memory_budget,
+            grad_ckpt=args.grad_ckpt,
+            logger=logger,
         )
         logger.info(
-            "torch_compile: %d block._forward compiled (backend=%s, mode=%s); "
-            "up to %d (stage x bucket) shapes recompile over the first steps.",
+            "torch_compile: %d block._forward compiled (backend=%s, mode=%s, "
+            "dynamic_seq=%s); %d distinct (stage x bucket) token counts in %s.",
             len(model.blocks),
             args.dynamo_backend,
             compile_inductor_mode,
-            n_shapes,
+            compile_dynamic_seq,
+            pc.n_shapes,
+            (
+                f"seq_range={pc.seq_range} (one symbolic graph)"
+                if compile_dynamic_seq
+                else "static per-shape graphs"
+            ),
         )
 
     # --- Optimizer + warmup→cosine ---
@@ -499,11 +715,11 @@ def main():
     # decaying average, so the saved/validated weights sit near the sweet spot
     # without hand-picking an iteration. Updates use copy_ into the live params
     # (stable storage addresses) so it stays cudagraph-safe under reduce-overhead.
-    ema_shadow = (
-        [p.detach().clone() for p in trainable] if ema_decay > 0.0 else None
-    )
+    ema_shadow = [p.detach().clone() for p in trainable] if ema_decay > 0.0 else None
     if ema_shadow is not None:
-        logger.info("EMA enabled (decay=%.5f); EMA weights are validated + saved.", ema_decay)
+        logger.info(
+            "EMA enabled (decay=%.5f); EMA weights are validated + saved.", ema_decay
+        )
 
     @contextlib.contextmanager
     def _ema_weights():
@@ -521,24 +737,11 @@ def main():
             with torch.no_grad():
                 for p, b in zip(trainable, backup):
                     p.data.copy_(b)
+
     warmup_steps = int(warmup) if warmup >= 1 else int(warmup * iterations)
-    if warmup_steps > 0:
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[
-                torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=1e-6 / lr, total_iters=warmup_steps
-                ),
-                torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=iterations - warmup_steps, eta_min=lr * 0.1
-                ),
-            ],
-            milestones=[warmup_steps],
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=iterations, eta_min=lr * 0.1
-        )
+    scheduler = make_warmup_cosine_scheduler(
+        optimizer, iterations, lr, warmup_steps=warmup_steps
+    )
 
     # --- Logging ---
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -557,6 +760,7 @@ def main():
                     "schedule_label": schedule_label,
                     "stages": stages,
                     "transition_sigmas": transition_sigmas,
+                    "stage_weights": stage_weights,
                     "rank": rank,
                     "alpha": alpha,
                     "channel_scaling_alpha": channel_scaling_alpha,
@@ -567,6 +771,8 @@ def main():
                     "val_interval": val_interval,
                     "n_val_sigmas": n_val_sigmas,
                     "ema_decay": ema_decay,
+                    "snr_gate": snr_gate_mode if snr_gate is not None else "off",
+                    "snr_gate_delta": snr_gate_delta,
                 }.items()
             ),
         )
@@ -593,10 +799,15 @@ def main():
                 # silently mismatch the geometry the LoRA learned.
                 "ss_spd_stages": json.dumps(stages),
                 "ss_spd_transition_sigmas": json.dumps(transition_sigmas),
+                "ss_spd_stage_weights": json.dumps(stage_weights),
                 "ss_spd_schedule_label": str(schedule_label),
                 "ss_spd_rank": str(rank),
                 "ss_channel_scaling_alpha": str(channel_scaling_alpha),
                 "ss_spd_step": str(step),
+                "ss_spd_onpolicy": str(onpolicy),
+                "ss_spd_flow_shift": str(flow_shift),
+                "ss_spd_snr_gate": snr_gate_mode if snr_gate is not None else "off",
+                "ss_spd_snr_gate_delta": str(snr_gate_delta),
             },
             save_variant="standard",
         )
@@ -604,17 +815,92 @@ def main():
 
     stage_rng = torch.Generator().manual_seed(seed + 1)  # CPU: stage / mode selection
 
+    # Per-(stage × bucket) zero pad mask, recycled across forwards — a fresh
+    # allocation each call would hand the compiled forward a new input address
+    # every step (hostile to reduce-overhead CUDA graphs); recycling keeps it
+    # stable. cudagraph step-marking stays decoupled (once per optimizer step /
+    # validation pass below), so _forward_dit is left hand-rolled rather than
+    # routed through run_mini_train_forward (which marks per forward).
+    pad_cache = PadCache(dtype)
+
     def _forward_dit(x5, sig_vec, cattn):
         """Single conditional forward at x5's own resolution (adapter on)."""
-        pad = torch.zeros(
-            x5.shape[0], 1, x5.shape[-2], x5.shape[-1], dtype=dtype, device=device
-        )
+        pad = pad_cache.get(x5)
         if model.blocks_to_swap:
             model.prepare_block_swap_before_forward()
         with torch.autocast("cuda", dtype=dtype):
             return model.forward_mini_train_dit(
                 x5, sig_vec, cattn, padding_mask=pad, skip_pooled_text_proj=True
             )
+
+    def _band_edges(stage_idx, trans):
+        """(t_lo, t_hi) query band — precomputed unless σ-jitter built a fresh `trans`."""
+        return (
+            bands[stage_idx]
+            if trans is transition_sigmas
+            else spd_schedule_bands(stages, trans)[stage_idx]
+        )
+
+    def _stage_entry(x0_full, cattn, stage_idx, trans, gen_, use_onpolicy):
+        """Build ``(x0_si, eps_si, t_lo, t_hi)`` for a stage.
+
+        Analytic (default): ``spd_stage_target`` — straight line from the true
+        clean LL. On-policy (stage>0): roll the adapter-on prefix from pure noise
+        to the entry of ``stage_idx`` (``spd_rollout_to_stage``, no-grad), expand
+        to this stage's grid, and recover the FM-consistent effective noise so the
+        velocity target ``eps_si − x0_si`` still points at the *true* clean x0 —
+        from the off-manifold state inference actually visits. The rollout is
+        detached, so gradients flow only through the supervised forward later.
+        """
+        if not (use_onpolicy and stage_idx > 0):
+            x0_si, eps_si = spd_stage_target(
+                x0_full, stage_idx, stages, trans, patch=patch, gen=gen_
+            )
+            t_lo, t_hi = _band_edges(stage_idx, trans)
+            return x0_si, eps_si, t_lo, t_hi
+
+        s_hi = stages[stage_idx]
+        H_full, W_full = int(x0_full.shape[-2]), int(x0_full.shape[-1])
+        x0_si = dct_lowpass_init(x0_full, s_hi, patch) if s_hi < 1.0 else x0_full
+        init_noise = torch.randn(
+            x0_full.shape, generator=gen_, device=device, dtype=dtype
+        )
+
+        def _vfn(x5, sig):
+            sig_vec = torch.full((x5.shape[0],), float(sig), device=device, dtype=dtype)
+            return _forward_dit(x5, sig_vec, cattn)
+
+        x_entry_lo, sigma_cross, scale_lo = spd_rollout_to_stage(
+            _vfn,
+            init_noise,
+            stages,
+            trans,
+            infer_steps=rollout_steps,
+            flow_shift=flow_shift,
+            patch=patch,
+            gen=gen_,
+            stop_stage=stage_idx,
+        )
+        x_tilde, t_tilde = spectral_expand(
+            x_entry_lo, sigma_cross, scale_lo, s_hi, H_full, W_full, patch, gen_
+        )
+        t_lo = trans[stage_idx] if stage_idx < len(stages) - 1 else 0.0
+        # Degenerate crossing (rollout fell below the band) → analytic fallback.
+        if t_tilde <= t_lo + 1e-6:
+            x0_si, eps_si = spd_stage_target(
+                x0_full, stage_idx, stages, trans, patch=patch, gen=gen_
+            )
+            lo, hi = _band_edges(stage_idx, trans)
+            return x0_si, eps_si, lo, hi
+        eps_si = (x_tilde.float() - (1.0 - t_tilde) * x0_si.float()) / t_tilde
+        return x0_si, eps_si.to(dtype), t_lo, float(t_tilde)
+
+    def _onpolicy_active(step):
+        """Per-step probability a stage>0 micro-step uses the on-policy entry."""
+        if not onpolicy or step < dagger_warmup:
+            return 0.0
+        ramp = (step - dagger_warmup) / max(1, iterations - dagger_warmup)
+        return onpolicy_ratio * min(1.0, ramp)
 
     # --- Training loop ---
     logger.info("Starting SPD distillation: %d iterations", iterations)
@@ -631,11 +917,15 @@ def main():
     # GPU-side logging accumulators — flushed in one stacked .tolist() at every
     # log_interval, replacing the per-micro-step loss.item() (grad_accum CUDA
     # syncs per optimizer step) and the per-parameter .item() walk in the
-    # LoRA-norm logging. Mirrors the accumulator pattern in distill_turbo.py.
+    # LoRA-norm logging. Mirrors the accumulator pattern in scripts/distill_turbo/metrics.py.
     n_stages = len(stages)
-    acc_loss = torch.zeros((), device=device)  # Σ step-mean loss
-    acc_loss_stage = torch.zeros(n_stages, device=device)  # Σ micro-loss by stage
-    acc_stage_cnt = torch.zeros(n_stages, device=device)  # micro-steps by stage
+    # Named GPU-side accumulators flushed in a single CUDA sync per log boundary
+    # (library.training.accumulator). Scalar "loss" (Σ step-mean loss); vector
+    # "stage_loss"/"stage_cnt" (per-stage micro-loss sum + count, width n_stages);
+    # and — only when the SNR gate is on — scalar "gate_w"/"ungated". The
+    # per-boundary LoRA norms ("up_sq"/"down_sq") are added just before the flush
+    # so they ride the same sync. No magic slice offsets — read by name.
+    acc = ScalarAccumulator(device)
 
     # Fixed RNG for validation: reseeded each eval so the ε field (and hence the
     # analytic target) is identical across checkpoints → val/loss is a pure
@@ -646,12 +936,15 @@ def main():
 
     @torch.no_grad()
     def _validate():
-        """Deterministic held-out analytic-MSE over every stage × a fixed σ grid.
+        """Deterministic held-out velocity-MSE over every stage × a fixed σ grid.
 
         Sweeps the *full* validation set, all stages, at ``n_val_sigmas`` fixed
         band-midpoints per stage — no sampling, no PE-Core, same memory footprint
-        as one training micro-step (won't OOM where CMMD does). Returns
-        (overall_mse, per_stage_mse[n_stages], per_stage_count[n_stages]).
+        as one training micro-step (won't OOM where CMMD does). When ``onpolicy``
+        is on the stage>0 entry is the rolled prefix state (same exposure-bias
+        geometry as inference), so best-ckpt selection tracks the deployed sampler
+        rather than the analytic line. Returns (overall_mse,
+        per_stage_mse[n_stages], per_stage_count[n_stages]).
         """
         val_gen.manual_seed(seed + 104729)
         sums = torch.zeros(n_stages, device=device)
@@ -663,29 +956,45 @@ def main():
                 latents = latents.to(device, dtype=dtype, non_blocking=True)
                 crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
                 B = latents.shape[0]
-                x0_full = latents.unsqueeze(2)
+                x0_full = to_dit_5d(latents)
                 for stage_idx in range(n_stages):
-                    t_lo, t_hi = bands[stage_idx]
-                    # ε drawn once per (batch, stage) and reused across the σ grid.
-                    x0_si, eps_si = spd_stage_target(
-                        x0_full, stage_idx, stages, transition_sigmas,
-                        patch=patch, gen=val_gen,
+                    # Entry (and ε) drawn once per (batch, stage), reused across σ.
+                    x0_si, eps_si, t_lo, t_hi = _stage_entry(
+                        x0_full,
+                        crossattn_emb,
+                        stage_idx,
+                        transition_sigmas,
+                        val_gen,
+                        onpolicy,
                     )
                     v_target = (eps_si - x0_si).float()
                     for k in range(n_val_sigmas):
                         frac = (k + 0.5) / n_val_sigmas
                         t = torch.full(
-                            (B,), t_lo + (t_hi - t_lo) * frac, device=device, dtype=dtype
+                            (B,),
+                            t_lo + (t_hi - t_lo) * frac,
+                            device=device,
+                            dtype=dtype,
                         )
-                        t_e = t.view(B, 1, 1, 1, 1)
-                        x_t = (1.0 - t_e) * x0_si + t_e * eps_si
+                        x_t = renoise(x0_si, t, eps_si)
                         pred = _forward_dit(x_t, t, crossattn_emb)
-                        sums[stage_idx] += nn.functional.mse_loss(pred.float(), v_target)
+                        if snr_gate is not None:
+                            v_loss, _ = snr_gate.gated_mse(
+                                pred,
+                                v_target,
+                                t,
+                                (int(x0_full.shape[-2]), int(x0_full.shape[-1])),
+                            )
+                            sums[stage_idx] += v_loss
+                        else:
+                            sums[stage_idx] += nn.functional.mse_loss(
+                                pred.float(), v_target
+                            )
                         cnts[stage_idx] += 1
         overall = sums.sum() / cnts.sum().clamp(min=1)
         return overall, sums / cnts.clamp(min=1), cnts
 
-    def _micro_step():
+    def _micro_step(step):
         """One sample → scaled backward. Returns (unscaled_loss_tensor, stage_idx).
 
         The loss is returned as a *detached GPU tensor* (not ``.item()``) so the
@@ -706,7 +1015,7 @@ def main():
         latents = latents.to(device, dtype=dtype, non_blocking=True)
         crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
         B = latents.shape[0]
-        x0_full = latents.unsqueeze(2)  # (B, 16, 1, H, W)
+        x0_full = to_dit_5d(latents)  # (B, 16, 1, H, W)
 
         # Optional R2 jitter: perturb the transition σ so the segment geometry is
         # learned as a band, not a point.
@@ -724,21 +1033,24 @@ def main():
 
         # Sample one stage for this micro-batch (single-resolution per forward),
         # weighted by band width.
-        stage_idx = int(torch.multinomial(band_widths_f, 1, generator=stage_rng).item())
-        # Bands depend only on the schedule, so reuse the precomputed ones;
-        # only jitter (which builds a fresh `trans`) needs a recompute.
-        t_lo, t_hi = (
-            bands[stage_idx]
-            if trans is transition_sigmas
-            else spd_schedule_bands(stages, trans)[stage_idx]
+        stage_idx = int(
+            torch.multinomial(stage_sample_w_f, 1, generator=stage_rng).item()
         )
-        x0_si, eps_si = spd_stage_target(
-            x0_full, stage_idx, stages, trans, patch=patch, gen=gen
+        # On-policy entry for stage>0 with annealed probability (DAgger): roll the
+        # adapter-on prefix from pure noise instead of the analytic straight line,
+        # so the LoRA trains on the off-manifold state inference visits. Decided
+        # per micro-step (not per optimizer step) so grad_accum keeps mixing
+        # analytic/on-policy and the low-/full-res regimes. _stage_entry returns
+        # the matching query band (on-policy t_hi = the rollout's aligned σ̃).
+        use_op = stage_idx > 0 and (
+            float(torch.rand(1, generator=stage_rng).item()) < _onpolicy_active(step)
+        )
+        x0_si, eps_si, t_lo, t_hi = _stage_entry(
+            x0_full, crossattn_emb, stage_idx, trans, gen, use_op
         )
         # FM training sample + analytic velocity target at scale s_i (Eq. 13–14).
         t = (t_lo + (t_hi - t_lo) * torch.rand(B, device=device)).to(dtype)
-        t_e = t.view(B, 1, 1, 1, 1)
-        x_t = (1.0 - t_e) * x0_si + t_e * eps_si
+        x_t = renoise(x0_si, t, eps_si)
         if args.grad_ckpt:  # reentrant checkpoint needs a grad-requiring input
             x_t.requires_grad_()
         v_target = (eps_si - x0_si).float()
@@ -747,27 +1059,43 @@ def main():
         # compile_blocks above, which traces one graph per (stage × bucket) shape
         # keyed on the real seq_len — nothing per-step to set here.
         pred = _forward_dit(x_t, t, crossattn_emb)
-        loss = nn.functional.mse_loss(pred.float(), v_target)
+        if snr_gate is not None:
+            # Information-aware loss: DCT-domain error weighted by the per-band
+            # recoverable fraction at this t. The plain MSE is kept (detached)
+            # for the train/loss_ungated comparison curve.
+            loss, gate_w = snr_gate.gated_mse(
+                pred, v_target, t, (int(x0_full.shape[-2]), int(x0_full.shape[-1]))
+            )
+            acc.add("gate_w", gate_w)
+            acc.add("ungated", nn.functional.mse_loss(pred.detach().float(), v_target))
+        else:
+            loss = nn.functional.mse_loss(pred.float(), v_target)
         # Scale so accumulated grads are the *mean* over micro-steps (matches a
         # true batch); LR/grad_clip semantics stay invariant to grad_accum.
         (loss / grad_accum).backward()
         return loss.detach(), stage_idx
 
+    # When validation is on, save only on val/loss improvement (best-ckpt-only,
+    # like distill-mod) instead of overwriting every save_every steps. With
+    # val off, fall back to the step-cadence save below.
+    best_val_loss = float("inf")
     for step in progress:
         if cudagraph_step:
             torch.compiler.cudagraph_mark_step_begin()
         step_loss = torch.zeros((), device=device)  # mean micro-loss, GPU-side
         for _ in range(grad_accum):
-            micro_loss, stage_idx = _micro_step()
+            micro_loss, stage_idx = _micro_step(step)
             step_loss = step_loss + micro_loss / grad_accum
-            acc_loss_stage[stage_idx] += micro_loss  # python idx → no sync
-            acc_stage_cnt[stage_idx] += 1
+            acc.add_at(
+                "stage_loss", stage_idx, micro_loss, width=n_stages
+            )  # python idx → no sync
+            acc.add_at("stage_cnt", stage_idx, 1.0, width=n_stages)
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
-        acc_loss.add_(step_loss)
+        acc.add("loss", step_loss)
         if ema_shadow is not None:
             with torch.no_grad():
                 for s, p in zip(ema_shadow, trainable):
@@ -787,20 +1115,22 @@ def main():
                         up_sq = up_sq + s
                     elif "lora_down" in name:
                         down_sq = down_sq + s
-            # One CUDA sync per log boundary: stack every scalar, read once.
-            stage_means = acc_loss_stage / acc_stage_cnt.clamp(min=1)
-            packed = torch.cat(
-                [
-                    (acc_loss / log_interval).reshape(1),
-                    up_sq.sqrt().reshape(1),
-                    down_sq.sqrt().reshape(1),
-                    stage_means,
-                    acc_stage_cnt,
-                ]
-            ).tolist()
-            avg, up_norm, down_norm = packed[0], packed[1], packed[2]
-            stage_vals = packed[3 : 3 + n_stages]
-            stage_cnts = packed[3 + n_stages : 3 + 2 * n_stages]
+            acc.add("up_sq", up_sq)
+            acc.add("down_sq", down_sq)
+            # One CUDA sync per log boundary: read every accumulator by name.
+            # Per-key reductions (mean over the interval, sqrt of squared-norm
+            # sums) run on the returned floats — no further sync.
+            m = acc.flush_reset()
+            n_micro = log_interval * grad_accum  # micro-steps per log interval
+            avg = m["loss"] / log_interval
+            up_norm = m["up_sq"] ** 0.5
+            down_norm = m["down_sq"] ** 0.5
+            gate_w_mean = m.get("gate_w", 0.0) / n_micro
+            ungated_mean = m.get("ungated", 0.0) / n_micro
+            stage_cnts = m["stage_cnt"]
+            stage_vals = [
+                ls / c if c > 0 else 0.0 for ls, c in zip(m["stage_loss"], stage_cnts)
+            ]
             cur_lr = scheduler.get_last_lr()[0]  # CPU-side; no sync
             progress.set_postfix(
                 loss=f"{avg:.5f}",
@@ -813,17 +1143,21 @@ def main():
                 writer.add_scalar("train/lr", cur_lr, step + 1)
                 writer.add_scalar("train/lora_up_norm", up_norm, step + 1)
                 writer.add_scalar("train/lora_down_norm", down_norm, step + 1)
+                if snr_gate is not None:
+                    # Effective supervised fraction + the plain MSE the gated
+                    # loss replaced (diverging curves = the gate is doing work).
+                    writer.add_scalar("train/gate_w", gate_w_mean, step + 1)
+                    writer.add_scalar("train/loss_ungated", ungated_mean, step + 1)
                 # Per-stage mean loss over the interval (only stages touched).
                 for si in range(n_stages):
                     if stage_cnts[si] > 0:
                         writer.add_scalar(
                             f"train/loss_stage{si}", stage_vals[si], step + 1
                         )
-            acc_loss.zero_()
-            acc_loss_stage.zero_()
-            acc_stage_cnt.zero_()
 
         # --- Held-out analytic-MSE validation (CMMD-free overfit signal) ---
+        improved = False
+        v_overall = None
         if val_loader is not None and (
             (step + 1) % val_interval == 0 or (step + 1) == iterations
         ):
@@ -846,9 +1180,26 @@ def main():
                 for si in range(n_stages):
                     if v_cnt[si] > 0:
                         writer.add_scalar(f"val/loss_stage{si}", v_stage[si], step + 1)
+            if v_overall < best_val_loss:
+                best_val_loss = v_overall
+                improved = True
 
-        if (step + 1) % save_every == 0 or (step + 1) == iterations:
+        # Save: with validation on, only overwrite the checkpoint when val/loss
+        # improves (keep the best, like distill-mod). With val off, fall back to
+        # the step-cadence save.
+        if val_loader is not None:
+            should_save = improved
+        else:
+            should_save = (step + 1) % save_every == 0 or (step + 1) == iterations
+        if should_save:
             _save(step + 1)
+        elif v_overall is not None:
+            logger.info(
+                "skipped save at step %d: val=%.6f >= best=%.6f",
+                step + 1,
+                v_overall,
+                best_val_loss,
+            )
 
     if writer is not None:
         writer.close()

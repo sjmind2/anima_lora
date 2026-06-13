@@ -171,12 +171,13 @@ _DEFAULT_EXCLUDE = (
     r"pooled_text_proj).*"
 )
 
+
 @dataclass(frozen=True)
 class LoRANetworkCfg:
     """Run-fixed configuration for a ``LoRANetwork``.
 
     Field groupings mirror the comment blocks in ``factory.create_network``:
-    core / targeting / dropouts / regex overrides / T-LoRA / ReFT / Hydra /
+    core / targeting / dropouts / regex overrides / T-LoRA / Hydra /
     σ-router / channel scaling / logging.
     """
 
@@ -236,18 +237,22 @@ class LoRANetworkCfg:
     min_rank: int = 1
     alpha_rank_scale: float = 1.0
 
-    # ReFT
-    add_reft: bool = False
-    reft_dim: int = 4
-    reft_alpha: Optional[float] = None
-    reft_layers: object = "all"
-
     # Hydra (MoE)
     num_experts: int = 4
     # Gaussian perturb std applied to fused per-expert `lora_up_weight` at
     # init in plain HydraLoRA only (NOT OrthoHydra disjoint or fallback) —
     # paper baseline knob; production training should leave at 0.0.
     expert_init_std: float = 0.0
+    # OrthoHydra centered-gate init. When on, the expert gate is recentered to
+    # ``g_e - 1/E`` in the forward, the per-Linear router is fully zero-init
+    # (no normal seed) so step-0 gates are exactly uniform, and ``lambda_layer``
+    # starts at ``ortho_lambda_init`` (small nonzero) instead of 0. Result:
+    # ΔW = 0 at init (base preserved exactly), yet router logits get nonzero
+    # gradient at step 0 because the disjoint P_e directions survive the mean
+    # subtraction. Off + ``ortho_lambda_init=0.0`` reproduces the legacy
+    # zero-init-λ behaviour (router gradient gated off until λ ramps).
+    ortho_centered_gate: bool = False
+    ortho_lambda_init: float = 0.0
     router_lr_scale: float = 1.0
     # Single regex that scopes which Linear modules participate in routed
     # adaptation. Matched modules become HydraLoRA leaves; non-matching
@@ -294,6 +299,10 @@ class LoRANetworkCfg:
     # (``OrthoLoRA`` / ``OrthoHydra``) and this field is informational.
     use_ortho: bool = False
     ortho_init_std: float = 0.02
+    # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
+    # Selects ``OrthoInitLoRAModule`` via ``resolve_network_spec``; mutually
+    # exclusive with ``use_ortho`` (validated in the resolver). Non-MoE only.
+    use_ortho_init: bool = False
 
     # σ-conditional router parameters (consumed when ``router_source="sigma"``).
     # Layer scope is shared with Hydra and FEI via ``router_targets`` above.
@@ -353,6 +362,28 @@ class LoRANetworkCfg:
     # so the state_dict format is unchanged; the on/off semantics live in
     # the ``ss_chimera_freq_router_layer_norm`` metadata stamp.
     freq_router_layer_norm: bool = True
+    # Freq-pool routing MODE.
+    #   "learned" (default) — build the FreqRouter MLP over
+    #       ``concat(FEI, sinusoidal-σ-features)`` and route the freq pool by
+    #       its softmax output (paper-faithful).
+    #   "fei" — hardwire ``π_f = normalize(FEI ** (1/τ))`` directly, with no
+    #       learned params, no σ-feature input, and no freq balance loss.
+    #       Requires ``num_experts_freq == fei_feature_dim`` (the FEI band
+    #       count IS the expert count). Motivation: the archived FEI trace
+    #       (``_archive/bench/fera/.../fei_traces.png``) shows FEI is already a
+    #       normalized simplex carrying the load-bearing per-prompt routing
+    #       signal at low σ — the learned MLP only adds a reshape over inputs
+    #       (FEI + σ) no richer than FEI itself, and σ is the non-discriminating
+    #       half (identical across prompts at a given step). Hardwiring keeps
+    #       100% of the routing signal and makes ``expert_0 ≡ low band,
+    #       expert_1 ≡ high band`` true by construction. Stamped to
+    #       ``ss_chimera_freq_router_mode`` so the loader rebuilds the right path.
+    freq_router_mode: str = "learned"
+    # Temperature on the hardwired FEI gate (``freq_router_mode="fei"`` only).
+    # ``π_f = normalize(FEI ** (1/τ))``. τ=1.0 is the raw-FEI passthrough
+    # (``softmax(log p) = p`` identity); τ<1 sharpens the low/high crossover,
+    # τ>1 flattens it. Inert under ``freq_router_mode="learned"``.
+    freq_router_tau: float = 1.0
     # Per-pool router LR multipliers (chimera-only). Stack on top of the
     # global ``router_lr_scale``: effective LR = ``unet_lr × router_lr_scale
     # × <pool>_router_lr_scale``. Default 1.0 = preserves the previous
@@ -362,20 +393,42 @@ class LoRANetworkCfg:
     # is a faster lever than raising ``balance_w_content``.
     content_router_lr_scale: float = 1.0
     freq_router_lr_scale: float = 1.0
-    # ChimeraHydra content-router source. ``"input"`` (default) keeps the
-    # paper-faithful per-Linear softmax over pooled rank-R ``lx_c`` —
-    # ``self.router`` lives on every chimera module. ``"crossattn"`` builds a
-    # single network-level ``ContentRouter`` fed by the pooled
-    # ``crossattn_emb`` (post-LLM-adapter T5-space text features, fixed
-    # 1024-D for Anima — see ``crossattn_emb_channels`` in
-    # ``library/anima/models.py``); the per-Linear router is skipped at
-    # construction and ``π_c`` is broadcast via ``_content_routing_weights``
-    # the same way ``π_f`` flows from FreqRouter. Lifts the K_c content axis
-    # from a per-site decision to a single shared partition (analogous to
-    # FeRA → Hydra → FeRA on the freq side); see chimera proposal §"Router".
-    content_router_source: Literal["input", "crossattn_emb"] = "input"
-    content_router_init_std: float = 0.1
+    # ChimeraHydra content router: a single network-level ``ContentRouter``
+    # fed the pooled ``crossattn_emb`` (post-LLM-adapter T5-space text
+    # features, fixed 1024-D for Anima — see ``crossattn_emb_channels`` in
+    # ``library/anima/models.py``); ``π_c`` is broadcast via
+    # ``_content_routing_weights`` the same way ``π_f`` flows from FreqRouter.
+    # This is the only content-routing mode (the per-Linear ``lx_c`` softmax
+    # was removed). ``content_router_layer_norm`` toggles a parameterless LN on
+    # the pooled input.
     content_router_layer_norm: bool = True
+    # ContentRouter output-layer init magnitude. Default 0.0 (zero-init →
+    # exactly-uniform π_c at step 0 → ΔW_c=0, base preserved). Unlike the
+    # FreqRouter, zero is NOT a fixed point here (the disjoint P_bases_c·λ_c
+    # residual + per-prompt input variation already break symmetry), so a
+    # non-zero value is purely a plateau-kick for the "usage uniform but
+    # content_margin≈0" regime — NOT needed to escape a fixed point. It tilts
+    # π_c off uniform at init, so via the live λ_c it makes ΔW_c≠0 at init
+    # (loses the exact-identity start) and seeds an initial usage skew the
+    # content balance loss then has to undo. Keep small (~0.02) and opt-in.
+    content_router_init_std: float = 0.0
+
+    # ChimeraHydra centered-gate λ init (BOTH pools), always on. Each pool's
+    # gate is recentered to ``π - 1/K`` in the forward, the content + freq
+    # routers are zero-init, and ``lambda_c`` / ``lambda_f`` start at
+    # ``chimera_lambda_init`` (small nonzero). Result: ΔW = 0 at init (base
+    # preserved exactly), yet both routers get nonzero gradient at step 0
+    # because each pool's disjoint per-expert P-subspaces survive the mean
+    # subtraction. Per-pool balance loss still sees the RAW (uncentered)
+    # simplex. ``chimera_lambda_init<=0`` is floored to 1e-2 in ``from_kwargs``
+    # (centering with λ0=0 is a no-op).
+    chimera_lambda_init: float = 1e-2
+
+    # Step-expert (turbo per-step head split). When > 1, each adapted Linear
+    # is a ``StepExpertLoRAModule``: one shared ``lora_down`` + K up-heads
+    # selected by the diffusion step index (no router). 0/1 = inactive. See
+    # ``networks/lora_modules/step_expert.py``.
+    step_expert_K: int = 0
 
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
@@ -437,16 +490,23 @@ class LoRANetworkCfg:
             float(alpha_rank_scale) if alpha_rank_scale is not None else 1.0
         )
 
-        add_reft = _as_bool(kwargs.get("add_reft"))
-        reft_dim = kwargs.get("reft_dim")
-        reft_dim = int(reft_dim) if reft_dim is not None else network_dim
-        reft_alpha = kwargs.get("reft_alpha")
-        reft_alpha = float(reft_alpha) if reft_alpha is not None else None
-        reft_layers = kwargs.get("reft_layers", "all")
-
         num_experts = kwargs.get("num_experts")
         num_experts = int(num_experts) if num_experts is not None else 4
         expert_init_std = float(kwargs.get("expert_init_std", 0.0))
+
+        ortho_centered_gate = _as_bool(kwargs.get("ortho_centered_gate"))
+        ortho_lambda_init = float(kwargs.get("ortho_lambda_init", 0.0))
+        if ortho_centered_gate and ortho_lambda_init <= 0.0:
+            # Centering with λ0=0 is a no-op: the router-logit gradient is
+            # ∝ (P_k - mean) diag(λ0) ℓ and vanishes when λ0=0. Pick a small
+            # nonzero default so the mechanism actually fires (and stays
+            # useful in bf16 — 1e-6 would be mathematically nonzero but lost
+            # to noise). See [[project_dcw_*]]-style "direction-only" caveat.
+            ortho_lambda_init = 1e-2
+            logger.info(
+                "ortho_centered_gate=True with ortho_lambda_init<=0; "
+                "defaulting ortho_lambda_init=1e-2 (centering needs λ0>0)."
+            )
 
         router_lr_scale = kwargs.get("network_router_lr_scale")
         router_lr_scale = float(router_lr_scale) if router_lr_scale is not None else 1.0
@@ -474,9 +534,7 @@ class LoRANetworkCfg:
         specialize_experts_by_sigma_buckets = _as_bool(
             kwargs.get("specialize_experts_by_sigma_buckets")
         )
-        sigma_bucket_boundaries = _as_float_list(
-            kwargs.get("sigma_bucket_boundaries")
-        )
+        sigma_bucket_boundaries = _as_float_list(kwargs.get("sigma_bucket_boundaries"))
         if specialize_experts_by_sigma_buckets:
             if num_sigma_buckets <= 1:
                 raise ValueError(
@@ -506,11 +564,14 @@ class LoRANetworkCfg:
         fei_sigma_low_div = float(kwargs.get("fei_sigma_low_div", 4.0))
 
         # GlobalRouter knobs (only consumed when ``route_per_layer=False``).
-        router_hidden_dim = int(kwargs.get("router_hidden_dim", kwargs.get("router_hidden", 64)))
+        router_hidden_dim = int(
+            kwargs.get("router_hidden_dim", kwargs.get("router_hidden", 64))
+        )
         router_tau = float(kwargs.get("router_tau", 0.7))
 
         use_ortho = _as_bool(kwargs.get("use_ortho"))
         ortho_init_std = float(kwargs.get("ortho_init_std", 0.02))
+        use_ortho_init = _as_bool(kwargs.get("use_ortho_init"))
 
         # FECL knobs. Default off; turning it on requires `num_bands >= 3`
         # to be a meaningful objective (see compute_fecl docstring).
@@ -533,32 +594,31 @@ class LoRANetworkCfg:
         )
         freq_router_init_std = float(kwargs.get("freq_router_init_std", 0.1))
         freq_router_layer_norm = _as_bool(kwargs.get("freq_router_layer_norm", True))
+        freq_router_mode = (
+            str(kwargs.get("freq_router_mode", "learned")).strip().lower() or "learned"
+        )
+        if freq_router_mode not in ("learned", "fei"):
+            raise ValueError(
+                f"freq_router_mode={freq_router_mode!r}: expected 'learned' or 'fei'."
+            )
+        freq_router_tau = float(kwargs.get("freq_router_tau", 1.0))
         content_router_lr_scale = float(
             kwargs.get("network_content_router_lr_scale", 1.0)
         )
-        freq_router_lr_scale = float(
-            kwargs.get("network_freq_router_lr_scale", 1.0)
-        )
-        raw_content_router_source = kwargs.get("content_router_source")
-        if raw_content_router_source is None:
-            content_router_source: Literal["input", "crossattn_emb"] = "input"
-        else:
-            v = str(raw_content_router_source).strip()
-            # ``"crossattn"`` is the pre-rename spelling — accept it as a
-            # deprecated alias so chimera checkpoints stamped before the
-            # rename still load, then normalize to ``"crossattn_emb"``.
-            if v == "crossattn":
-                v = "crossattn_emb"
-            if v not in ("input", "crossattn_emb"):
-                raise ValueError(
-                    f"content_router_source={raw_content_router_source!r}: "
-                    "expected 'input' or 'crossattn_emb'."
-                )
-            content_router_source = v  # type: ignore[assignment]
-        content_router_init_std = float(kwargs.get("content_router_init_std", 0.1))
+        freq_router_lr_scale = float(kwargs.get("network_freq_router_lr_scale", 1.0))
         content_router_layer_norm = _as_bool(
             kwargs.get("content_router_layer_norm", True), default=True
         )
+        content_router_init_std = float(kwargs.get("content_router_init_std", 0.0))
+        # Chimera is always centered-gate; centering with λ0=0 is a no-op (each
+        # router's logit gradient ∝ (P_k - mean)·diag(λ0)·ℓ vanishes at λ0=0),
+        # so floor to a small nonzero default.
+        chimera_lambda_init = float(kwargs.get("chimera_lambda_init", 1e-2))
+        if use_chimera_hydra and chimera_lambda_init <= 0.0:
+            chimera_lambda_init = 1e-2
+            logger.info(
+                "chimera_lambda_init<=0 floored to 1e-2 (centering needs λ0>0)."
+            )
         if use_chimera_hydra:
             if num_experts_content <= 0 or num_experts_freq <= 0:
                 raise ValueError(
@@ -566,18 +626,15 @@ class LoRANetworkCfg:
                     f"and num_experts_freq > 0 (got K_c={num_experts_content}, "
                     f"K_f={num_experts_freq})."
                 )
-        if content_router_source == "crossattn_emb" and not use_chimera_hydra:
-            raise ValueError(
-                "content_router_source='crossattn_emb' requires use_chimera_hydra=True "
-                "(the global content router only routes the chimera content pool). "
-                "For a non-chimera Hydra/FeRA pool routed on text, use "
-                "router_source='crossattn_emb' instead."
-            )
-            # Derive total E from the pool split so the rest of the
-            # cfg machinery (warmup masks, balance loss accumulators, etc.)
-            # sees a consistent num_experts.
-            num_experts = num_experts_content + num_experts_freq
-
+            if freq_router_mode == "fei" and num_experts_freq != fei_feature_dim:
+                raise ValueError(
+                    "freq_router_mode='fei' hardwires the freq gate to the FEI "
+                    "band-simplex, so num_experts_freq must equal fei_feature_dim "
+                    f"(got K_f={num_experts_freq}, fei_feature_dim={fei_feature_dim}). "
+                    "Either set num_experts_freq=fei_feature_dim, or use "
+                    "freq_router_mode='learned' for an MLP that maps any input "
+                    "width to K_f experts."
+                )
         # Three-axis routing resolution (plan2.md §three-axis-config). The
         # legacy ``use_hydra`` / ``use_sigma_router`` / ``use_fei_router``
         # kwargs were retired in plan2 task #6 — every shipped TOML uses the
@@ -646,9 +703,7 @@ class LoRANetworkCfg:
             router_source = "input"
 
         # Validate impossible combos.
-        if use_moe_style is False and (
-            route_per_layer or router_source != "none"
-        ):
+        if use_moe_style is False and (route_per_layer or router_source != "none"):
             raise ValueError(
                 "Routing config requires use_moe_style != False; got "
                 f"use_moe_style={use_moe_style!r}, route_per_layer={route_per_layer}, "
@@ -666,6 +721,9 @@ class LoRANetworkCfg:
                 "vector routed by one network-level GlobalRouter, with no "
                 "per-Linear variant."
             )
+
+        step_expert_K_raw = kwargs.get("step_expert_K")
+        step_expert_K = int(step_expert_K_raw) if step_expert_K_raw is not None else 0
 
         reg_dims_str = kwargs.get("network_reg_dims")
         reg_dims = _parse_kv_pairs(reg_dims_str, is_int=True) if reg_dims_str else None
@@ -725,12 +783,10 @@ class LoRANetworkCfg:
             use_timestep_mask=use_timestep_mask,
             min_rank=min_rank,
             alpha_rank_scale=alpha_rank_scale,
-            add_reft=add_reft,
-            reft_dim=reft_dim,
-            reft_alpha=reft_alpha,
-            reft_layers=reft_layers,
             num_experts=num_experts,
             expert_init_std=expert_init_std,
+            ortho_centered_gate=ortho_centered_gate,
+            ortho_lambda_init=ortho_lambda_init,
             router_lr_scale=router_lr_scale,
             router_targets=router_targets,
             per_bucket_balance_weight=per_bucket_balance_weight,
@@ -747,6 +803,7 @@ class LoRANetworkCfg:
             router_tau=router_tau,
             use_ortho=use_ortho,
             ortho_init_std=ortho_init_std,
+            use_ortho_init=use_ortho_init,
             fera_fecl_weight=fera_fecl_weight,
             fera_num_bands=fera_num_bands,
             use_chimera_hydra=use_chimera_hydra,
@@ -756,11 +813,14 @@ class LoRANetworkCfg:
             balance_w_freq=balance_w_freq,
             freq_router_init_std=freq_router_init_std,
             freq_router_layer_norm=freq_router_layer_norm,
+            freq_router_mode=freq_router_mode,
+            freq_router_tau=freq_router_tau,
             content_router_lr_scale=content_router_lr_scale,
             freq_router_lr_scale=freq_router_lr_scale,
-            content_router_source=content_router_source,
-            content_router_init_std=content_router_init_std,
             content_router_layer_norm=content_router_layer_norm,
+            content_router_init_std=content_router_init_std,
+            chimera_lambda_init=chimera_lambda_init,
+            step_expert_K=step_expert_K,
             channel_scales_dict=channel_scales_dict,
             verbose=verbose,
         )
@@ -773,9 +833,6 @@ class LoRANetworkCfg:
         modules_alpha: Dict[str, float],
         module_class: Type,
         train_llm_adapter: bool,
-        has_reft: bool,
-        reft_dim: Optional[int],
-        reft_block_indices,
         is_hydra_or_ortho_hydra: bool,
         hydra_num_experts: int,
         sigma_feature_dim_detected: Optional[int],
@@ -794,6 +851,7 @@ class LoRANetworkCfg:
         new_use_moe_style: Optional[str] = None,
         new_route_per_layer: Optional[bool] = None,
         new_router_source: Optional[str] = None,
+        ortho_centered_gate: bool = False,
         # ChimeraHydra stamps. Present only on chimera checkpoints — when
         # set the loader builds ``ChimeraHydraLoRAModule`` instead of
         # ``OrthoHydraLoRAModule`` and the network attaches a FreqRouter.
@@ -801,8 +859,10 @@ class LoRANetworkCfg:
         num_experts_content: Optional[int] = None,
         num_experts_freq: Optional[int] = None,
         freq_router_layer_norm: bool = False,
-        content_router_source: str = "input",
+        freq_router_mode: str = "learned",
+        freq_router_tau: float = 1.0,
         content_router_layer_norm: bool = True,
+        step_expert_K: int = 0,
     ) -> "LoRANetworkCfg":
         """Build cfg from a checkpoint key-sniff (warm-start / inference path).
 
@@ -818,7 +878,7 @@ class LoRANetworkCfg:
         (``_expert_band`` / ``_sigma_edges`` are non-persistent) so it has to
         be reconstructed from those scalars at load time.
 
-        For non-MoE checkpoints (plain LoRA / OrthoLoRA / T-LoRA / ReFT) the
+        For non-MoE checkpoints (plain LoRA / OrthoLoRA / T-LoRA) the
         three-axis stamps are not stamped at save time; absence is taken as
         ``(False, False, "none")``. MoE checkpoints (Hydra / OrthoHydra /
         StackedExperts) must carry all three stamps — plan2 task #6 retired
@@ -873,14 +933,12 @@ class LoRANetworkCfg:
             modules_dim=modules_dim,
             modules_alpha=modules_alpha,
             train_llm_adapter=train_llm_adapter,
-            add_reft=has_reft,
-            reft_dim=reft_dim if reft_dim is not None else 4,
-            reft_layers=sorted(reft_block_indices) if has_reft else "all",
             num_experts=hydra_num_experts if is_hydra_or_ortho_hydra else 4,
             channel_scales_dict=channel_scales_dict,
             use_moe_style=use_moe_style,
             route_per_layer=route_per_layer,
             router_source=router_source,
+            ortho_centered_gate=bool(ortho_centered_gate),
             sigma_feature_dim=(
                 sigma_feature_dim_detected
                 if sigma_feature_dim_detected is not None
@@ -889,9 +947,7 @@ class LoRANetworkCfg:
             sigma_router_names=sigma_router_names,
             hydra_router_names=hydra_router_names,
             specialize_experts_by_sigma_buckets=specialize_experts_by_sigma_buckets,
-            num_sigma_buckets=(
-                int(num_sigma_buckets) if num_sigma_buckets else 3
-            ),
+            num_sigma_buckets=(int(num_sigma_buckets) if num_sigma_buckets else 3),
             sigma_bucket_boundaries=sigma_bucket_boundaries,
             fei_feature_dim=int(fei_feature_dim),
             fei_sigma_low_div=(
@@ -906,12 +962,10 @@ class LoRANetworkCfg:
                 int(num_experts_freq) if num_experts_freq is not None else 3
             ),
             freq_router_layer_norm=bool(freq_router_layer_norm),
-            content_router_source=(
-                # ``"crossattn"`` is the pre-rename stamp; normalize the
-                # deprecated alias so old chimera checkpoints still load.
-                "crossattn_emb"
-                if content_router_source in ("crossattn", "crossattn_emb")
-                else "input"
+            freq_router_mode=(
+                str(freq_router_mode).strip().lower() if freq_router_mode else "learned"
             ),
+            freq_router_tau=float(freq_router_tau),
             content_router_layer_norm=bool(content_router_layer_norm),
+            step_expert_K=int(step_expert_K),
         )

@@ -2,7 +2,7 @@
 
 ``generate(args, gen_settings)`` reads ~40 fields off an ``argparse.Namespace``
 via ``getattr``, so historically the only safe way to build one was to call the
-CLI parser (what ``examples/01``–``03`` all do). This dataclass makes the request
+CLI parser (what ``examples/01`` and ``03`` do). This dataclass makes the request
 the canonical constructor and turns the CLI parser into *one* consumer instead of
 the only one::
 
@@ -19,8 +19,9 @@ the only one::
     args.device = "cuda"
     latent = generate(args, get_generation_settings(args))
 
-``to_args()`` feeds ``to_argv()`` through ``inference.parse_args`` rather than
-hand-building a namespace, so the **CLI parser stays the single source of truth
+``to_args()`` feeds ``to_argv()`` through ``library.inference.args.build_default_args``
+(the parser ``inference.parse_args`` itself delegates to) rather than
+hand-building a namespace, so the **parser stays the single source of truth
 for every default** the generation code reads via ``getattr`` — this dataclass
 only carries the knobs an embedder commonly sets, and the long tail
 (spectrum / dcw / ip-adapter / … sub-knobs) rides through ``extra_argv``.
@@ -65,6 +66,7 @@ class GenerationRequest:
     infer_steps: int = 50
     guidance_scale: float = 3.5
     flow_shift: float = 3.0
+    sigma_tail_power: float = 1.0
     sampler: str = "euler"
     seed: Optional[int] = None
 
@@ -72,8 +74,6 @@ class GenerationRequest:
     lora_weight: Optional[Sequence[str]] = None
     lora_multiplier: Optional[Union[float, Sequence[float]]] = None
     soft_tokens_weight: Optional[str] = None
-    ip_adapter_weight: Optional[str] = None
-    ip_image: Optional[str] = None
     easycontrol_weight: Optional[str] = None
     easycontrol_image: Optional[str] = None
     pooled_text_proj: Optional[str] = None
@@ -118,6 +118,7 @@ class GenerationRequest:
         argv += ["--infer_steps", str(self.infer_steps)]
         argv += ["--guidance_scale", str(self.guidance_scale)]
         argv += ["--flow_shift", str(self.flow_shift)]
+        argv += ["--sigma_tail_power", str(self.sigma_tail_power)]
         argv += ["--sampler", self.sampler]
         argv += ["--attn_mode", self.attn_mode]
         argv += ["--output_type", self.output_type]
@@ -137,10 +138,6 @@ class GenerationRequest:
             argv += ["--vae_chunk_size", str(self.vae_chunk_size)]
         if self.soft_tokens_weight is not None:
             argv += ["--soft_tokens_weight", self.soft_tokens_weight]
-        if self.ip_adapter_weight is not None:
-            argv += ["--ip_adapter_weight", self.ip_adapter_weight]
-        if self.ip_image is not None:
-            argv += ["--ip_image", self.ip_image]
         if self.easycontrol_weight is not None:
             argv += ["--easycontrol_weight", self.easycontrol_weight]
         if self.easycontrol_image is not None:
@@ -176,15 +173,16 @@ class GenerationRequest:
     ) -> argparse.Namespace:
         """Build a fully-defaulted ``argparse.Namespace`` for ``generate()``.
 
-        Routes ``to_argv()`` through ``inference.parse_args`` (lazy-imported so
-        ``library`` carries no import-time edge into the root ``inference``
-        module). Pass an explicit ``parse_args`` to inject a different parser
-        (the test suite does this). The parser fills every knob this dataclass
-        doesn't model, and validates choices/requireds — so a request with no
-        ``prompt`` raises here, the same as the CLI.
+        Routes ``to_argv()`` through ``library.inference.args.build_default_args``
+        (lazy-imported) — the same parser ``inference.parse_args`` now delegates
+        to, so the request stays entirely inside ``library`` with no edge into
+        the root ``inference`` entry-point script. Pass an explicit ``parse_args``
+        to inject a different parser (the test suite does this). The parser fills
+        every knob this dataclass doesn't model, and validates choices/requireds —
+        so a request with no ``prompt`` raises here, the same as the CLI.
         """
         if parse_args is None:
-            import inference
+            from library.inference.args import build_default_args
 
-            parse_args = inference.parse_args
+            parse_args = build_default_args
         return parse_args(self.to_argv())

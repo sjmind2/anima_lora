@@ -11,13 +11,13 @@ hardcode: caption shuffle variant count, per-tag dropout rate, SAM prompt
 list / threshold / dilate, MIT text-threshold / dilate.
 
 Settings persist to:
+- the selected ``configs/gui-methods/<variant>.toml`` ``[variant]`` table —
+  GUI-profile preprocess knobs such as preprocess path filter, target_res,
+  low-res filtering, caption shuffle/dropout, and mask settings.
 - ``configs/sam_mask.yaml`` — SAM prompts / threshold / dilate (existing
-  canonical location, read directly by ``scripts/preprocess/generate_masks.py``).
-- ``gui/gui_settings.json`` — TE-cache and MIT knobs, picked up by this
-  tab on launch and forwarded to subprocesses via env vars
-  (``CAPTION_SHUFFLE_VARIANTS``, ``CAPTION_TAG_DROPOUT_RATE``,
-  ``MIT_TEXT_THRESHOLD``, ``MIT_DILATE``) consumed by
-  ``scripts/tasks/preprocess.py`` and ``scripts/tasks/masking.py``.
+  canonical CLI fallback, read directly by ``scripts/preprocess/generate_masks.py``).
+  GUI Save no longer writes this file; direct terminal ``make mask`` will not
+  see GUI-profile mask settings unless the user edits the YAML manually.
 """
 
 from __future__ import annotations
@@ -26,18 +26,23 @@ import html
 import json
 import re
 import sys
+import copy
 from pathlib import Path
 
+import toml
 import yaml
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -45,23 +50,42 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTextBrowser,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from gui import IMAGE_EXTS, ROOT, LazyTabMixin, count_preprocess_caches
+from gui import (
+    IMAGE_EXTS,
+    ROOT,
+    LazyTabMixin,
+    _TargetResWidget,
+    _load,
+    _save,
+    count_preprocess_caches,
+    list_gui_variants,
+    merged_gui_variant_preset,
+    variant_path,
+)
 from gui import daemon as gui_daemon
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
-from gui.tabs.config_tab import ClickableLabel
+from gui.tabs.config_tab import ClickableLabel, ConfigTab, SplitButtonStyle
+from library.datasets.path_filter import filter_paths_by_glob
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
+PREPROCESS_TOML = ROOT / "configs" / "preprocess.toml"
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "gui_settings.json"
 
 # Defaults match the historical hardcoded values in scripts/tasks/preprocess.py
 # and scripts/preprocess/generate_masks_mit.py so a freshly installed GUI runs the
 # same pipeline as the bare CLI.
+DEFAULT_SOURCE_IMAGE_DIR = "image_dataset"
+DEFAULT_PREPROCESS_PATH_PATTERN = "*"
+DEFAULT_DROP_LOWRES_IMAGES = True
+DEFAULT_MIN_PIXELS = 500000
+DEFAULT_TARGET_RES = [1024]
 DEFAULT_TE_SHUFFLE_VARIANTS = 4
 DEFAULT_TE_TAG_DROPOUT = 0.1
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
@@ -72,6 +96,22 @@ DEFAULT_MIT_TEXT_THRESHOLD = 0.8
 DEFAULT_MIT_DILATE = 5
 DEFAULT_RUN_SAM_MASK = True
 DEFAULT_RUN_MIT_MASK = True
+PREPROCESS_METHODS = ["lora", "tlora", "hydralora"]
+_GUI_PREPROCESS_KEYS = {
+    "source_image_dir",
+    "preprocess_path_pattern",
+    "drop_lowres_images",
+    "min_pixels",
+    "target_res",
+    "caption_shuffle_variants",
+    "caption_tag_dropout_rate",
+    "run_sam_mask",
+    "run_mit_mask",
+    "mask_path_pattern",
+    "mask_rules",
+    "mit_text_threshold",
+    "mit_dilate",
+}
 
 RESIZED_DIR = ROOT / "post_image_dataset" / "resized"
 LORA_CACHE_DIR = ROOT / "post_image_dataset" / "lora"
@@ -91,11 +131,17 @@ def _load_settings() -> dict:
     return data
 
 
-def _save_settings(updates: dict) -> None:
-    """Merge ``updates`` into the existing settings JSON, preserving other keys."""
-    data = _load_settings()
-    data.update(updates)
-    SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _load_preprocess_toml() -> dict:
+    """Read configs/preprocess.toml (the preprocess-only knobs split out of
+    base.toml). Returns {} if absent/unparseable so callers fall back to
+    defaults. The GUI uses this only as the CLI-default fallback; GUI edits are
+    stored on the selected gui-method variant."""
+    if not PREPROCESS_TOML.exists():
+        return {}
+    try:
+        return toml.loads(PREPROCESS_TOML.read_text(encoding="utf-8"))
+    except (OSError, toml.TomlDecodeError):
+        return {}
 
 
 def _load_sam_yaml() -> dict:
@@ -107,65 +153,179 @@ def _load_sam_yaml() -> dict:
         return {}
 
 
-class _IndentedListDumper(yaml.SafeDumper):
-    """SafeDumper that indents list items under mapping keys.
+def _load_rules(sam_yaml: dict) -> list[dict]:
+    """Normalize either schema into a list of per-card rule dicts.
 
-    PyYAML's default dumper writes list items flush with the parent key,
-    which is valid YAML but doesn't match the canonical sam_mask.yaml
-    formatting (2-space indent on the dash). Overriding ``increase_indent``
-    to disable ``indentless`` mode gives us the indented form so saving
-    from the GUI doesn't churn the file's whitespace.
+    A ``rules:`` array is returned card-for-card (per-rule threshold/dilate
+    fall back to the top-level values). A flat config (no ``rules:`` key)
+    collapses to one catch-all card carrying the top-level prompts.
     """
-
-    def increase_indent(self, flow=False, indentless=False):  # noqa: D401
-        return super().increase_indent(flow, False)
-
-
-def _save_sam_yaml(
-    prompts: list[str],
-    threshold: float,
-    dilate: int,
-    path_pattern: str = DEFAULT_MASK_PATH_PATTERN,
-) -> None:
-    SAM_YAML.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "prompts": prompts,
-        "threshold": threshold,
-        "dilate": dilate,
-        # Read by scripts/tasks/masking.py and forwarded to BOTH the SAM and
-        # MIT backends; "*" (the default) masks every resized image.
-        "path_pattern": path_pattern or DEFAULT_MASK_PATH_PATTERN,
-    }
-    text = yaml.dump(
-        payload,
-        Dumper=_IndentedListDumper,
-        default_flow_style=False,
-        sort_keys=False,
-    )
-    # Match the canonical layout's blank line between the prompts list and
-    # the scalar settings.
-    text = text.replace("\nthreshold:", "\n\nthreshold:", 1)
-    SAM_YAML.write_text(text, encoding="utf-8")
+    default_threshold = float(sam_yaml.get("threshold", DEFAULT_SAM_THRESHOLD))
+    default_dilate = int(sam_yaml.get("dilate", DEFAULT_SAM_DILATE))
+    raw = sam_yaml.get("rules")
+    if raw is None:
+        return [
+            {
+                "path_pattern": "",
+                "prompts": sam_yaml.get("prompts") or list(DEFAULT_SAM_PROMPTS),
+                "focus_prompts": sam_yaml.get("focus_prompts") or [],
+                "threshold": default_threshold,
+                "dilate": default_dilate,
+            }
+        ]
+    return [
+        {
+            "path_pattern": r.get("path_pattern") or "",
+            "prompts": r.get("prompts") or [],
+            "focus_prompts": r.get("focus_prompts") or [],
+            "threshold": float(r.get("threshold", default_threshold)),
+            "dilate": int(r.get("dilate", default_dilate)),
+        }
+        for r in raw
+    ]
 
 
-def _count_masks(mask_dir: Path) -> int:
+def _filtered_files(root: Path, pattern: str | None, predicate) -> list[Path]:
+    if not root.is_dir():
+        return []
+    paths = [p for p in root.rglob("*") if p.is_file() and predicate(p)]
+    if pattern and pattern != "*":
+        keep = filter_paths_by_glob([str(p) for p in paths], str(root), pattern)
+        paths = [p for p, k in zip(paths, keep) if k]
+    return paths
+
+
+def _count_masks(mask_dir: Path, path_pattern: str | None = None) -> int:
     if not mask_dir.is_dir():
         return 0
     # rglob picks up the nested `<rel>/` subtrees produced by `make mask`
     # under the consolidated layout; legacy flat trees still count correctly.
-    return sum(1 for _ in mask_dir.rglob("*_mask.png"))
+    return len(
+        _filtered_files(
+            mask_dir,
+            path_pattern,
+            lambda p: p.name.endswith("_mask.png"),
+        )
+    )
 
 
-def _count_resized() -> int:
-    if not RESIZED_DIR.is_dir():
+def _count_resized(resized_dir: Path, path_pattern: str | None = None) -> int:
+    if not resized_dir.is_dir():
         return 0
     # rglob picks up the nested `<rel>/` subtrees produced by recursive
     # resize_images.py; flat trees still count correctly.
-    return sum(
-        1
-        for p in RESIZED_DIR.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    return len(
+        _filtered_files(
+            resized_dir,
+            path_pattern,
+            lambda p: p.suffix.lower() in IMAGE_EXTS,
+        )
     )
+
+
+class _RuleCard(QGroupBox):
+    """One SAM mask rule editor: path_pattern + prompts/focus + threshold/dilate.
+
+    ``prompts`` mask OUT (ignored in the loss); ``focus_prompts`` keep ONLY
+    that subject (reversed polarity). An empty / ``*`` path_pattern is a
+    catch-all. Emits ``removed(self)`` when its Remove button is clicked.
+    """
+
+    removed = Signal(object)
+    changed = Signal()
+
+    def __init__(self, rule: dict, help_cb):
+        super().__init__(t("preprocess_sam_rule"))
+        self._help_cb = help_cb
+        form = QFormLayout(self)
+
+        self.path_pattern_edit = QLineEdit(rule.get("path_pattern", ""))
+        self.path_pattern_edit.setPlaceholderText("*")
+        self.path_pattern_edit.setToolTip(t("preprocess_sam_rule_path_pattern_tip"))
+        self.path_pattern_edit.textChanged.connect(lambda *_: self.changed.emit())
+        form.addRow(
+            self._label("sam_rule_path_pattern", t("preprocess_sam_rule_path_pattern")),
+            self.path_pattern_edit,
+        )
+
+        self.prompts_edit = QPlainTextEdit("\n".join(rule.get("prompts") or []))
+        self.prompts_edit.setMaximumHeight(70)
+        self.prompts_edit.setStyleSheet("font-family:monospace;")
+        self.prompts_edit.setToolTip(t("preprocess_sam_prompts_tip"))
+        self.prompts_edit.textChanged.connect(lambda: self.changed.emit())
+        form.addRow(
+            self._label("sam_prompts", t("preprocess_sam_prompts")), self.prompts_edit
+        )
+
+        self.focus_prompts_edit = QPlainTextEdit(
+            "\n".join(rule.get("focus_prompts") or [])
+        )
+        self.focus_prompts_edit.setMaximumHeight(70)
+        self.focus_prompts_edit.setStyleSheet("font-family:monospace;")
+        self.focus_prompts_edit.setToolTip(t("preprocess_sam_focus_prompts_tip"))
+        self.focus_prompts_edit.textChanged.connect(lambda: self.changed.emit())
+        form.addRow(
+            self._label("sam_focus_prompts", t("preprocess_sam_focus_prompts")),
+            self.focus_prompts_edit,
+        )
+
+        self.threshold_edit = QLineEdit(
+            f"{float(rule.get('threshold', DEFAULT_SAM_THRESHOLD)):g}"
+        )
+        self.threshold_edit.setToolTip(t("preprocess_sam_threshold_tip"))
+        self.threshold_edit.textChanged.connect(lambda *_: self.changed.emit())
+        form.addRow(
+            self._label("sam_threshold", t("preprocess_sam_threshold")),
+            self.threshold_edit,
+        )
+
+        self.dilate_spin = QSpinBox()
+        self.dilate_spin.setRange(0, 64)
+        self.dilate_spin.setValue(int(rule.get("dilate", DEFAULT_SAM_DILATE)))
+        self.dilate_spin.wheelEvent = lambda e: e.ignore()
+        self.dilate_spin.valueChanged.connect(lambda *_: self.changed.emit())
+        form.addRow(self._label("sam_dilate", t("preprocess_dilate")), self.dilate_spin)
+
+        self.remove_btn = QPushButton(t("preprocess_sam_remove_rule"))
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        form.addRow("", self.remove_btn)
+
+    def _label(self, key: str, text: str) -> ClickableLabel:
+        """Clickable field label that routes this field's help to the panel."""
+        lbl = ClickableLabel(text)
+        lbl.setStyleSheet("color:#f0f0f0; text-decoration: underline dotted;")
+        help_text = preprocess_field_help(key)
+        lbl.clicked.connect(lambda _t=text, _h=help_text: self._help_cb(_t, _h))
+        return lbl
+
+    def to_dict(self) -> dict:
+        """Serialize to a rule dict. Raises ValueError on an unparseable threshold."""
+        text = self.threshold_edit.text().strip()
+        try:
+            threshold = float(text)
+        except ValueError as exc:
+            raise ValueError(text) from exc
+        rule: dict = {}
+        pattern = self.path_pattern_edit.text().strip()
+        if pattern and pattern != "*":
+            rule["path_pattern"] = pattern
+        prompts = [
+            line.strip()
+            for line in self.prompts_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        if prompts:
+            rule["prompts"] = prompts
+        focus = [
+            line.strip()
+            for line in self.focus_prompts_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        if focus:
+            rule["focus_prompts"] = focus
+        rule["threshold"] = threshold
+        rule["dilate"] = int(self.dilate_spin.value())
+        return rule
 
 
 class PreprocessingTab(LazyTabMixin, QWidget):
@@ -184,7 +344,13 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self._job_timer = QTimer(self)
         self._job_timer.setInterval(400)
         self._job_timer.timeout.connect(self._poll_job)
-        self._run_buttons: list[QPushButton] = []
+        self._run_buttons: list[QToolButton] = []
+        # Custom QStyle instances for the split Run buttons — kept alive here
+        # because setStyle() does not take ownership.
+        self._split_styles: list[SplitButtonStyle] = []
+        self._variant: str | None = None
+        self._loading_variant = False
+        self._dirty = False
 
         outer = QVBoxLayout(self)
 
@@ -198,27 +364,67 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         #   Save           → neutral (default styling, no background tint)
         #   Cache / mask   → blue   (#2980b9) — run a specific preprocess step
         #   Stop           → red    (#c0392b) — abort the running subprocess
+        # Split Run buttons (matches ConfigTab's Train button): SplitButtonStyle
+        # widens the dropdown indicator and paints its divider + tint from the
+        # style, so the label stays centred in the action segment. Symmetric
+        # padding only — the style owns the arrow geometry.
         run_step_style = (
-            "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
+            "QToolButton{background:#2980b9;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
         )
 
+        self._method_label = QLabel("Method")
+        top.addWidget(self._method_label)
+        self.method_combo = QComboBox()
+        self.method_combo.addItems(PREPROCESS_METHODS)
+        self.method_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.method_combo.setMinimumContentsLength(
+            max((len(m) for m in PREPROCESS_METHODS), default=10)
+        )
+        self.method_combo.currentTextChanged.connect(self._on_method_changed)
+        top.addWidget(self.method_combo)
+
+        self._variant_label = QLabel(t("variant"))
+        top.addWidget(self._variant_label)
+        self.variant_combo = QComboBox()
+        self.variant_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.variant_combo.setMinimumContentsLength(20)
+        self.variant_combo.currentTextChanged.connect(self._on_variant_changed)
+        top.addWidget(self.variant_combo, 1)
+        self._refresh_variant_row(self.method_combo.currentText())
+
         self.save_btn = QPushButton(t("preprocess_save_settings"))
+        self._save_btn_idle_style = ""
+        self._save_btn_dirty_style = (
+            "background:#f39c12;color:#1b1b1b;font-weight:bold;padding:4px 12px;"
+        )
         self.save_btn.setToolTip(t("preprocess_save_settings_tip"))
         self.save_btn.clicked.connect(self._save_all_clicked)
         top.addWidget(self.save_btn)
 
         # Per-step Run buttons. Save is implicit on each Run (same pattern
-        # as ConfigTab's auto-save before Train/Preprocess).
-        self.run_te_btn = QPushButton(t("preprocess_run_te"))
-        self.run_te_btn.setStyleSheet(run_step_style)
-        self.run_te_btn.clicked.connect(self._run_te)
-        self._run_buttons.append(self.run_te_btn)
+        # as ConfigTab's auto-save before Train/Preprocess). Each is a split
+        # button: the main action runs the step now (attaches this tab to the
+        # job); the dropdown queues it on the daemon without attaching, so the
+        # user can stack the next step / variant before anything starts.
+        self.run_te_btn = self._make_run_button(
+            t("preprocess_run_te"), run_step_style, self._run_te
+        )
         top.addWidget(self.run_te_btn)
 
-        self.run_mask_btn = QPushButton(t("preprocess_run_mask"))
-        self.run_mask_btn.setStyleSheet(run_step_style)
-        self.run_mask_btn.clicked.connect(self._run_mask)
-        self._run_buttons.append(self.run_mask_btn)
+        # Standalone PE (vision-encoder) caching — caches the REPA encoder
+        # configured on the selected variant (pe_spatial by default; PE-Core for
+        # CMMD / DCW v4). A use_repa=true variant also pulls this in automatically
+        # via `tasks.py preprocess`, but the button lets the user pre-build / refresh
+        # PE sidecars without re-running the whole VAE+text pass.
+        self.run_pe_btn = self._make_run_button(
+            t("preprocess_run_pe"), run_step_style, self._run_pe
+        )
+        top.addWidget(self.run_pe_btn)
+
+        self.run_mask_btn = self._make_run_button(
+            t("preprocess_run_mask"), run_step_style, self._run_mask
+        )
         top.addWidget(self.run_mask_btn)
 
         top.addStretch()
@@ -238,10 +444,20 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self._progress_tracker = TqdmProgressTracker(self.progress)
         outer.addWidget(self.progress)
 
-        # Status one-liner stays directly under the progress bar.
+        # Status one-liner stays directly under the progress bar, with a small
+        # button to open the post_image_dataset/ folder (resized + caches) in
+        # the OS file manager.
+        status_row = QHBoxLayout()
         self.status_lbl = QLabel("")
         self.status_lbl.setStyleSheet("color:#dcdcdc; padding: 2px 0;")
-        outer.addWidget(self.status_lbl)
+        status_row.addWidget(self.status_lbl)
+        status_row.addStretch()
+        self.open_dataset_btn = QToolButton()
+        self.open_dataset_btn.setText("📂 " + t("preprocess_open_dataset_dir"))
+        self.open_dataset_btn.setToolTip(t("preprocess_open_dataset_dir_tooltip"))
+        self.open_dataset_btn.clicked.connect(self._open_dataset_dir)
+        status_row.addWidget(self.open_dataset_btn)
+        outer.addLayout(status_row)
 
         # ── Body: vertical splitter (form+explain top, log bottom) ──
         vsplit = QSplitter(Qt.Vertical)
@@ -256,11 +472,84 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         form_layout.setContentsMargins(0, 0, 0, 0)
 
         settings = _load_settings()
+        pp_cfg = _load_preprocess_toml()
         sam_yaml = _load_sam_yaml()
-        sam_prompts = sam_yaml.get("prompts") or list(DEFAULT_SAM_PROMPTS)
-        sam_threshold = float(sam_yaml.get("threshold", DEFAULT_SAM_THRESHOLD))
-        sam_dilate = int(sam_yaml.get("dilate", DEFAULT_SAM_DILATE))
+        # Normalize either schema (flat or rules array) into a list of rule
+        # dicts, one per editor card below. Flat configs collapse to a single
+        # catch-all card; saving always re-emits the rules form.
+        sam_rules = _load_rules(sam_yaml)
         mask_path_pattern = sam_yaml.get("path_pattern") or DEFAULT_MASK_PATH_PATTERN
+
+        # Image preprocessing group. GUI-specific cache knobs are stored on the
+        # selected gui-method variant; configs/preprocess.toml remains the CLI
+        # default/fallback.
+        img_box = QGroupBox(t("preprocess_image_prep"))
+        img_form = QFormLayout()
+
+        self.source_dir_edit = QLineEdit(
+            str(pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR))
+        )
+        self.source_dir_edit.setPlaceholderText(DEFAULT_SOURCE_IMAGE_DIR)
+        self.source_dir_edit.setToolTip(t("preprocess_source_image_dir_tip"))
+        img_form.addRow(
+            self._field_label("source_image_dir", t("preprocess_source_image_dir")),
+            self.source_dir_edit,
+        )
+
+        self.preprocess_path_pattern_edit = QLineEdit(
+            str(pp_cfg.get("preprocess_path_pattern", DEFAULT_PREPROCESS_PATH_PATTERN))
+        )
+        self.preprocess_path_pattern_edit.setPlaceholderText("*")
+        self.preprocess_path_pattern_edit.setToolTip(t("preprocess_path_pattern_tip"))
+        img_form.addRow(
+            self._field_label("preprocess_path_pattern", t("preprocess_path_pattern")),
+            self.preprocess_path_pattern_edit,
+        )
+
+        self.drop_lowres_chk = QCheckBox(t("preprocess_drop_lowres"))
+        self.drop_lowres_chk.setToolTip(t("preprocess_drop_lowres_tip"))
+        self.drop_lowres_chk.setChecked(
+            bool(pp_cfg.get("drop_lowres_images", DEFAULT_DROP_LOWRES_IMAGES))
+        )
+        img_form.addRow(
+            self._field_label("drop_lowres_images", t("preprocess_drop_lowres")),
+            self.drop_lowres_chk,
+        )
+
+        self.min_pixels_spin = QSpinBox()
+        self.min_pixels_spin.setRange(0, 100_000_000)
+        self.min_pixels_spin.setSingleStep(50_000)
+        self.min_pixels_spin.setGroupSeparatorShown(True)
+        self.min_pixels_spin.setValue(int(pp_cfg.get("min_pixels", DEFAULT_MIN_PIXELS)))
+        self.min_pixels_spin.wheelEvent = lambda e: e.ignore()
+        # min_pixels only applies when the filter is on (mirrors the CLI:
+        # drop_lowres=false → --min_pixels 0). Grey it out when unchecked.
+        self.min_pixels_spin.setEnabled(self.drop_lowres_chk.isChecked())
+        self.drop_lowres_chk.toggled.connect(self.min_pixels_spin.setEnabled)
+        img_form.addRow(
+            self._field_label("min_pixels", t("preprocess_min_pixels")),
+            self.min_pixels_spin,
+        )
+
+        # Multi-scale constant-token tiers. Dual-use: preprocess resizes each
+        # image into the tier that resizes it the least, and train.py reads the
+        # same value back (via load_method_preset) to size the compile cache, so
+        # this is the single source of truth — the config form no longer shows it.
+        self.target_res_widget = _TargetResWidget(
+            pp_cfg.get("target_res", DEFAULT_TARGET_RES)
+        )
+        # Live-persist tier checkboxes to the selected GUI method on every
+        # toggle. The Config tab's Train auto-chain snapshots method values
+        # without touching this widget, so without an immediate write the
+        # auto-chain would preprocess at the stale/default tier whenever the
+        # user changed tiers here but didn't click Save first.
+        self.target_res_widget.changed.connect(self.persist_target_res)
+        img_form.addRow(
+            self._field_label("target_res", t("preprocess_target_res")),
+            self.target_res_widget,
+        )
+        img_box.setLayout(img_form)
+        form_layout.addWidget(img_box)
 
         # Text caching group
         text_box = QGroupBox(t("preprocess_text_caching"))
@@ -295,6 +584,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
         # SAM masking group
         sam_box = QGroupBox(t("preprocess_masking_sam"))
+        sam_outer = QVBoxLayout()
+
+        # Top form: run toggle + global scope (forwarded to BOTH backends).
         sam_form = QFormLayout()
         self.run_sam_mask_chk = QCheckBox(t("preprocess_run_sam_mask"))
         self.run_sam_mask_chk.setToolTip(t("preprocess_run_sam_mask_tip"))
@@ -305,30 +597,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._field_label("run_sam_mask", t("preprocess_run_sam_mask")),
             self.run_sam_mask_chk,
         )
-
-        self.sam_prompts_edit = QPlainTextEdit("\n".join(sam_prompts))
-        self.sam_prompts_edit.setMaximumHeight(80)
-        self.sam_prompts_edit.setStyleSheet("font-family:monospace;")
-        sam_form.addRow(
-            self._field_label("sam_prompts", t("preprocess_sam_prompts")),
-            self.sam_prompts_edit,
-        )
-
-        self.sam_threshold_edit = QLineEdit(f"{sam_threshold:g}")
-        sam_form.addRow(
-            self._field_label("sam_threshold", t("preprocess_sam_threshold")),
-            self.sam_threshold_edit,
-        )
-
-        self.sam_dilate_spin = QSpinBox()
-        self.sam_dilate_spin.setRange(0, 64)
-        self.sam_dilate_spin.setValue(sam_dilate)
-        self.sam_dilate_spin.wheelEvent = lambda e: e.ignore()
-        sam_form.addRow(
-            self._field_label("sam_dilate", t("preprocess_dilate")),
-            self.sam_dilate_spin,
-        )
-
         # Stored in sam_mask.yaml but scopes BOTH backends — masking.py reads
         # it and forwards --path-pattern to SAM and MIT alike.
         self.mask_path_pattern_edit = QLineEdit(mask_path_pattern)
@@ -338,7 +606,23 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._field_label("mask_path_pattern", t("preprocess_mask_path_pattern")),
             self.mask_path_pattern_edit,
         )
-        sam_box.setLayout(sam_form)
+        sam_outer.addLayout(sam_form)
+
+        # One card per rule: each routes a subset of images (by path_pattern)
+        # to its own prompt set. Rules whose pattern matches an image compose.
+        self._rule_cards: list[_RuleCard] = []
+        self._rules_layout = QVBoxLayout()
+        self._rules_layout.setContentsMargins(0, 0, 0, 0)
+        sam_outer.addLayout(self._rules_layout)
+        for rule in sam_rules:
+            self._add_rule_card(rule)
+
+        self.add_rule_btn = QPushButton(t("preprocess_sam_add_rule"))
+        self.add_rule_btn.setToolTip(t("preprocess_sam_add_rule_tip"))
+        self.add_rule_btn.clicked.connect(lambda: self._add_rule_card())
+        sam_outer.addWidget(self.add_rule_btn)
+
+        sam_box.setLayout(sam_outer)
         form_layout.addWidget(sam_box)
 
         # MIT masking group
@@ -403,12 +687,219 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         vsplit.setSizes([520, 200])
         outer.addWidget(vsplit, 1)
 
+        self._connect_dirty_signals()
+        self._clear_dirty()
+
     def _lazy_init(self) -> None:
         # Cache-count scan deferred to first show of the tab.
         self._refresh_status()
         # Re-bind to a preprocess/mask job still running from a previous GUI
         # session (or one submitted by the CLI) so closing+reopening re-attaches.
         self._try_reattach()
+
+    def _refresh_variant_row(self, method: str) -> None:
+        variants = list_gui_variants(method)
+        current = [
+            self.variant_combo.itemText(i) for i in range(self.variant_combo.count())
+        ]
+        if current == variants:
+            return
+        self.variant_combo.blockSignals(True)
+        self.variant_combo.clear()
+        if variants:
+            self.variant_combo.addItems(variants)
+        self.variant_combo.blockSignals(False)
+
+    def _on_method_changed(self, method: str) -> None:
+        if self._loading_variant:
+            return
+        self._refresh_variant_row(method)
+        self.set_variant(self.variant_combo.currentText(), method=method)
+
+    def _on_variant_changed(self, variant: str) -> None:
+        if self._loading_variant:
+            return
+        self.set_variant(variant, method=self.method_combo.currentText())
+
+    def set_variant(self, variant: str, *, method: str | None = None) -> None:
+        """Load GUI preprocess controls for the selected training variant."""
+        if not variant:
+            return
+        if method:
+            self._loading_variant = True
+            try:
+                if self.method_combo.currentText() != method:
+                    self.method_combo.setCurrentText(method)
+                self._refresh_variant_row(method)
+                if self.variant_combo.currentText() != variant:
+                    self.variant_combo.setCurrentText(variant)
+            finally:
+                self._loading_variant = False
+        self._variant = variant
+        meta = self._variant_preprocess_meta(variant)
+        settings = _load_settings()
+        pp_cfg = _load_preprocess_toml()
+
+        # The base source dir is preprocess-owned (configs/preprocess.toml is the
+        # global default; a gui-method variant may override it). path_scope is
+        # layered on top at submit time by _gui_scoped_paths, so this field shows
+        # and edits the *unscoped* root, not the scoped run path.
+        source_dir = meta.get(
+            "source_image_dir",
+            pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR),
+        )
+
+        target_res = meta.get(
+            "target_res", pp_cfg.get("target_res", DEFAULT_TARGET_RES)
+        )
+        path_pattern = meta.get(
+            "preprocess_path_pattern", DEFAULT_PREPROCESS_PATH_PATTERN
+        )
+        drop_lowres = meta.get(
+            "drop_lowres_images",
+            pp_cfg.get("drop_lowres_images", DEFAULT_DROP_LOWRES_IMAGES),
+        )
+        min_pixels = meta.get(
+            "min_pixels", pp_cfg.get("min_pixels", DEFAULT_MIN_PIXELS)
+        )
+        shuffle_variants = meta.get(
+            "caption_shuffle_variants",
+            settings.get("caption_shuffle_variants", DEFAULT_TE_SHUFFLE_VARIANTS),
+        )
+        tag_dropout = meta.get(
+            "caption_tag_dropout_rate",
+            settings.get("caption_tag_dropout_rate", DEFAULT_TE_TAG_DROPOUT),
+        )
+        run_sam_mask = meta.get(
+            "run_sam_mask",
+            settings.get("run_sam_mask", DEFAULT_RUN_SAM_MASK),
+        )
+        run_mit_mask = meta.get(
+            "run_mit_mask",
+            settings.get("run_mit_mask", DEFAULT_RUN_MIT_MASK),
+        )
+        mask_path_pattern = meta.get(
+            "mask_path_pattern",
+            _load_sam_yaml().get("path_pattern") or DEFAULT_MASK_PATH_PATTERN,
+        )
+        mask_rules = meta.get("mask_rules")
+        if not isinstance(mask_rules, list):
+            mask_rules = _load_rules(_load_sam_yaml())
+        mit_threshold = meta.get(
+            "mit_text_threshold",
+            settings.get("mit_text_threshold", DEFAULT_MIT_TEXT_THRESHOLD),
+        )
+        mit_dilate = meta.get(
+            "mit_dilate",
+            settings.get("mit_dilate", DEFAULT_MIT_DILATE),
+        )
+
+        self._loading_variant = True
+        try:
+            self.source_dir_edit.setText(str(source_dir or DEFAULT_SOURCE_IMAGE_DIR))
+            self.preprocess_path_pattern_edit.setText(str(path_pattern or "*"))
+            self.drop_lowres_chk.setChecked(bool(drop_lowres))
+            self.min_pixels_spin.setValue(int(min_pixels))
+            self.min_pixels_spin.setEnabled(self.drop_lowres_chk.isChecked())
+            self._set_target_res_widget(target_res)
+            self.shuffle_spin.setValue(int(shuffle_variants))
+            self.dropout_edit.setText(f"{float(tag_dropout):g}")
+            self.run_sam_mask_chk.setChecked(bool(run_sam_mask))
+            self.mask_path_pattern_edit.setText(str(mask_path_pattern or "*"))
+            self._set_rule_cards(mask_rules)
+            self.run_mit_mask_chk.setChecked(bool(run_mit_mask))
+            self.mit_threshold_edit.setText(f"{float(mit_threshold):g}")
+            self.mit_dilate_spin.setValue(int(mit_dilate))
+        finally:
+            self._loading_variant = False
+        if hasattr(self, "status_lbl"):
+            self._refresh_status()
+        self._clear_dirty()
+
+    @staticmethod
+    def _variant_preprocess_meta(variant: str) -> dict:
+        try:
+            data = _load(variant_path(variant))
+        except Exception:
+            return {}
+        meta = data.get("variant")
+        if not isinstance(meta, dict):
+            return {}
+        return {k: meta[k] for k in _GUI_PREPROCESS_KEYS if k in meta}
+
+    def _set_target_res_widget(self, values) -> None:
+        if values is None:
+            selected = {1024}
+        elif isinstance(values, (list, tuple, set)):
+            selected = {int(v) for v in values}
+        else:
+            selected = {int(values)}
+        for edge, checkbox in self.target_res_widget._boxes.items():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(edge in selected)
+            checkbox.blockSignals(False)
+
+    def _set_rule_cards(self, rules: list[dict]) -> None:
+        for card in list(self._rule_cards):
+            self._rules_layout.removeWidget(card)
+            card.deleteLater()
+        self._rule_cards.clear()
+        for rule in rules or [{}]:
+            self._add_rule_card(rule)
+        self._update_remove_buttons()
+
+    # ── Dirty tracking ─────────────────────────────────────────────
+
+    def _connect_dirty_signal(self, widget: QWidget) -> None:
+        if isinstance(widget, _TargetResWidget):
+            widget.changed.connect(self._mark_dirty)
+        elif isinstance(widget, QCheckBox):
+            widget.toggled.connect(self._mark_dirty)
+        elif isinstance(widget, QSpinBox):
+            widget.valueChanged.connect(self._mark_dirty)
+        elif isinstance(widget, QLineEdit):
+            widget.textChanged.connect(self._mark_dirty)
+        elif isinstance(widget, QPlainTextEdit):
+            widget.textChanged.connect(self._mark_dirty)
+
+    def _connect_dirty_signals(self) -> None:
+        for widget in (
+            self.source_dir_edit,
+            self.preprocess_path_pattern_edit,
+            self.drop_lowres_chk,
+            self.min_pixels_spin,
+            self.target_res_widget,
+            self.shuffle_spin,
+            self.dropout_edit,
+            self.run_sam_mask_chk,
+            self.mask_path_pattern_edit,
+            self.run_mit_mask_chk,
+            self.mit_threshold_edit,
+            self.mit_dilate_spin,
+        ):
+            self._connect_dirty_signal(widget)
+
+    def _mark_dirty(self, *_):
+        if self._loading_variant or self._dirty:
+            return
+        self._dirty = True
+        self._update_save_button()
+
+    def _clear_dirty(self):
+        self._dirty = False
+        self._update_save_button()
+
+    def _update_save_button(self):
+        if not hasattr(self, "save_btn"):
+            return
+        if self._dirty:
+            self.save_btn.setText(t("preprocess_save_settings") + " *")
+            self.save_btn.setStyleSheet(self._save_btn_dirty_style)
+            self.save_btn.setToolTip(t("save_dirty_tooltip"))
+        else:
+            self.save_btn.setText(t("preprocess_save_settings"))
+            self.save_btn.setStyleSheet(self._save_btn_idle_style)
+            self.save_btn.setToolTip(t("preprocess_save_settings_tip"))
 
     # ── Field labels & explain panel ───────────────────────────────
 
@@ -445,9 +936,33 @@ class PreprocessingTab(LazyTabMixin, QWidget):
     # ── Status panel ───────────────────────────────────────────────
 
     def _refresh_status(self) -> None:
-        n_resized = _count_resized()
-        caches = count_preprocess_caches(LORA_CACHE_DIR)
-        mask_n = _count_masks(MASK_DIR)
+        snapshot = self.preprocess_config_snapshot()
+
+        def _path(key: str, default: Path) -> Path:
+            raw = snapshot.get(key)
+            if not raw:
+                return default
+            p = Path(str(raw))
+            return p if p.is_absolute() else ROOT / p
+
+        preprocess_pattern = (
+            self.preprocess_path_pattern_edit.text().strip()
+            or DEFAULT_PREPROCESS_PATH_PATTERN
+        )
+        path_pattern = (
+            preprocess_pattern
+            if preprocess_pattern != DEFAULT_PREPROCESS_PATH_PATTERN
+            else str(snapshot.get("path_pattern") or DEFAULT_PREPROCESS_PATH_PATTERN)
+        )
+        n_resized = _count_resized(
+            _path("resized_image_dir", RESIZED_DIR),
+            path_pattern,
+        )
+        caches = count_preprocess_caches(
+            _path("lora_cache_dir", LORA_CACHE_DIR),
+            path_pattern,
+        )
+        mask_n = _count_masks(_path("mask_dir", MASK_DIR), path_pattern)
         if n_resized == 0:
             self.status_lbl.setText(t("preprocess_status_no_resized"))
             return
@@ -463,6 +978,67 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         ]
         self.status_lbl.setText("  |  ".join(lines))
 
+    def _open_dataset_dir(self) -> None:
+        """Open the post_image_dataset/ folder (resized + caches) in the OS file manager."""
+        snapshot = self.preprocess_config_snapshot()
+        raw = snapshot.get("resized_image_dir")
+        resized = (
+            (Path(str(raw)) if Path(str(raw)).is_absolute() else ROOT / str(raw))
+            if raw
+            else RESIZED_DIR
+        )
+        # post_image_dataset/ is the parent of resized/ (and lora/, masks/).
+        target = resized.parent
+        if not target.is_dir():
+            target = ROOT
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    # ── SAM rule cards ─────────────────────────────────────────────
+
+    def _add_rule_card(self, rule: dict | None = None) -> None:
+        card = _RuleCard(rule or {}, self._show_field_help)
+        card.changed.connect(self._mark_dirty)
+        card.removed.connect(self._remove_rule_card)
+        self._rule_cards.append(card)
+        self._rules_layout.addWidget(card)
+        self._update_remove_buttons()
+        if not self._loading_variant:
+            self._mark_dirty()
+
+    def _remove_rule_card(self, card: _RuleCard) -> None:
+        if len(self._rule_cards) <= 1:
+            return  # keep at least one rule
+        self._rule_cards.remove(card)
+        self._rules_layout.removeWidget(card)
+        card.deleteLater()
+        self._update_remove_buttons()
+        self._mark_dirty()
+
+    def _update_remove_buttons(self) -> None:
+        # A lone rule can't be removed (would leave an empty config).
+        sole = len(self._rule_cards) <= 1
+        for card in self._rule_cards:
+            card.remove_btn.setEnabled(not sole)
+
+    def _collect_rules(self) -> list[dict] | None:
+        """Serialize every rule card, or None if one fails validation."""
+        rules: list[dict] = []
+        for card in self._rule_cards:
+            try:
+                rules.append(card.to_dict())
+            except ValueError as bad_threshold:
+                QMessageBox.warning(
+                    self,
+                    t("error"),
+                    t(
+                        "preprocess_invalid_float",
+                        field=t("preprocess_sam_threshold"),
+                        value=str(bad_threshold),
+                    ),
+                )
+                return None
+        return rules
+
     # ── Settings persistence ───────────────────────────────────────
 
     def _parse_float(self, text: str, field_label: str) -> float | None:
@@ -476,6 +1052,185 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             )
             return None
 
+    def preprocess_env(self) -> dict[str, str]:
+        """Environment values consumed by ``tasks.py preprocess``."""
+        return {
+            "CAPTION_SHUFFLE_VARIANTS": str(int(self.shuffle_spin.value())),
+            "CAPTION_TAG_DROPOUT_RATE": self.dropout_edit.text().strip(),
+            "PREPROCESS_PATH_PATTERN": (
+                self.preprocess_path_pattern_edit.text().strip()
+                or DEFAULT_PREPROCESS_PATH_PATTERN
+            ),
+        }
+
+    def preprocess_overrides(self) -> dict[str, object]:
+        """Flat config overrides that should be captured in preprocess snapshots."""
+        return {
+            "drop_lowres_images": self.drop_lowres_chk.isChecked(),
+            "min_pixels": int(self.min_pixels_spin.value()),
+            "target_res": self.target_res_widget.value(),
+        }
+
+    def preprocess_config_snapshot(self) -> dict[str, object]:
+        """Full preprocess config snapshot captured at GUI submit time.
+
+        The concrete paths come from the selected GUI method plus ``path_scope``.
+        ``preprocess_path_pattern`` is not written into the flat config because
+        training should not see that GUI-only preprocess filter; it is forwarded
+        to tasks.py via ``PREPROCESS_PATH_PATTERN`` instead.
+        """
+        variant = self._variant or "lora"
+        merged, _ = merged_gui_variant_preset(variant, "default")
+        # Seed the base source dir from the (editable) field before scoping so
+        # path_scope is appended onto the user-chosen root, not the hard default.
+        source_dir = self.source_dir_edit.text().strip()
+        if source_dir:
+            merged["source_image_dir"] = source_dir
+        snapshot = ConfigTab._gui_scoped_paths(copy.deepcopy(merged))
+        snapshot.update(self.preprocess_overrides())
+        for key in (
+            "base_config",
+            "dataset_config",
+            "variant",
+            "method",
+            "preset",
+            "methods_subdir",
+            "path_scope",
+            "preprocess_path_pattern",
+        ):
+            snapshot.pop(key, None)
+
+        def _clean(value):
+            if isinstance(value, dict):
+                return {k: _clean(v) for k, v in value.items() if v is not None}
+            if isinstance(value, list):
+                return [_clean(v) for v in value if v is not None]
+            if isinstance(value, Path):
+                return str(value)
+            return value
+
+        return _clean(snapshot)
+
+    def persist_target_res(self) -> None:
+        """Mark the GUI profile dirty when the tier selection changes.
+
+        ConfigTab auto-chain/queue calls ``persist_preprocess_inputs`` before it
+        submits, so it still captures the latest tiers without silently saving
+        them while the user is editing.
+        """
+        if not self._loading_variant:
+            self._mark_dirty()
+
+    def persist_preprocess_inputs(self) -> bool:
+        """Persist cache-building inputs used by ConfigTab's auto-chain/queue.
+
+        This intentionally excludes mask-only settings so an invalid mask
+        threshold cannot block a plain cache build.
+        """
+        return self._save_variant_preprocess_meta(validate_dropout=True)
+
+    def _save_variant_preprocess_meta(
+        self,
+        *,
+        validate_dropout: bool,
+        include_mask: bool = False,
+        rules: list[dict] | None = None,
+        mit_threshold: float | None = None,
+    ) -> bool:
+        if not self._variant:
+            return True
+        dropout = (
+            self._parse_float(
+                self.dropout_edit.text().strip(),
+                t("preprocess_caption_tag_dropout_rate"),
+            )
+            if validate_dropout
+            else None
+        )
+        if validate_dropout and dropout is None:
+            return False
+        if dropout is None:
+            try:
+                dropout = float(self.dropout_edit.text().strip())
+            except ValueError:
+                dropout = DEFAULT_TE_TAG_DROPOUT
+
+        path = variant_path(self._variant)
+        data = _load(path)
+        meta = data.get("variant")
+        if not isinstance(meta, dict):
+            meta = {}
+
+        # Base source dir: persist on the variant only when it diverges from the
+        # global preprocess.toml default, so a plain checkout keeps an empty meta.
+        pp_default = str(
+            _load_preprocess_toml().get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR)
+        )
+        source_dir = self.source_dir_edit.text().strip() or pp_default
+        if source_dir == pp_default:
+            meta.pop("source_image_dir", None)
+        else:
+            meta["source_image_dir"] = source_dir
+
+        path_pattern = (
+            self.preprocess_path_pattern_edit.text().strip()
+            or DEFAULT_PREPROCESS_PATH_PATTERN
+        )
+        if path_pattern == DEFAULT_PREPROCESS_PATH_PATTERN:
+            meta.pop("preprocess_path_pattern", None)
+        else:
+            meta["preprocess_path_pattern"] = path_pattern
+
+        drop_lowres = self.drop_lowres_chk.isChecked()
+        if drop_lowres == DEFAULT_DROP_LOWRES_IMAGES:
+            meta.pop("drop_lowres_images", None)
+        else:
+            meta["drop_lowres_images"] = drop_lowres
+
+        min_pixels = int(self.min_pixels_spin.value())
+        if min_pixels == DEFAULT_MIN_PIXELS:
+            meta.pop("min_pixels", None)
+        else:
+            meta["min_pixels"] = min_pixels
+
+        target_res = self.target_res_widget.value()
+        # Keep this explicit even when it matches the default. It is the only
+        # preprocess knob that also affects train-time compile-cache sizing, and
+        # users expect the selected GUI profile to show the exact resolution
+        # tiers it will use.
+        meta["target_res"] = target_res
+
+        shuffle = int(self.shuffle_spin.value())
+        if shuffle == DEFAULT_TE_SHUFFLE_VARIANTS:
+            meta.pop("caption_shuffle_variants", None)
+        else:
+            meta["caption_shuffle_variants"] = shuffle
+
+        if float(dropout) == float(DEFAULT_TE_TAG_DROPOUT):
+            meta.pop("caption_tag_dropout_rate", None)
+        else:
+            meta["caption_tag_dropout_rate"] = float(dropout)
+
+        if include_mask:
+            mask_path_pattern = (
+                self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
+            )
+            meta["run_sam_mask"] = self.run_sam_mask_chk.isChecked()
+            meta["run_mit_mask"] = self.run_mit_mask_chk.isChecked()
+            meta["mask_path_pattern"] = mask_path_pattern
+            meta["mask_rules"] = list(rules or [])
+            meta["mit_text_threshold"] = float(
+                DEFAULT_MIT_TEXT_THRESHOLD if mit_threshold is None else mit_threshold
+            )
+            meta["mit_dilate"] = int(self.mit_dilate_spin.value())
+
+        if meta:
+            data["variant"] = meta
+        else:
+            data.pop("variant", None)
+        _save(path, data)
+        return True
+
     def _save_all(self) -> bool:
         """Validate and persist every form value. Returns True on success."""
         dropout = self._parse_float(
@@ -484,12 +1239,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         )
         if dropout is None:
             return False
-        sam_threshold = self._parse_float(
-            self.sam_threshold_edit.text().strip(),
-            t("preprocess_sam_threshold"),
-        )
-        if sam_threshold is None:
-            return False
         mit_threshold = self._parse_float(
             self.mit_threshold_edit.text().strip(),
             t("preprocess_mit_threshold"),
@@ -497,33 +1246,21 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         if mit_threshold is None:
             return False
 
-        prompts = [
-            line.strip()
-            for line in self.sam_prompts_edit.toPlainText().splitlines()
-            if line.strip()
-        ]
-        if not prompts:
-            prompts = list(DEFAULT_SAM_PROMPTS)
+        rules = self._collect_rules()
+        if rules is None:
+            return False
 
         mask_path_pattern = (
             self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
         )
-        _save_sam_yaml(
-            prompts,
-            sam_threshold,
-            int(self.sam_dilate_spin.value()),
-            mask_path_pattern,
-        )
-        _save_settings(
-            {
-                "caption_shuffle_variants": int(self.shuffle_spin.value()),
-                "caption_tag_dropout_rate": dropout,
-                "mit_text_threshold": mit_threshold,
-                "mit_dilate": int(self.mit_dilate_spin.value()),
-                "run_sam_mask": self.run_sam_mask_chk.isChecked(),
-                "run_mit_mask": self.run_mit_mask_chk.isChecked(),
-            }
-        )
+        if not self._save_variant_preprocess_meta(
+            validate_dropout=False,
+            include_mask=True,
+            rules=rules,
+            mit_threshold=mit_threshold,
+        ):
+            return False
+        self._clear_dirty()
         return True
 
     def _save_all_clicked(self) -> None:
@@ -535,7 +1272,32 @@ class PreprocessingTab(LazyTabMixin, QWidget):
     def _is_running(self) -> bool:
         return self._job_id is not None
 
-    def _run_te(self) -> None:
+    def _make_run_button(self, label: str, style: str, run_cb) -> QToolButton:
+        """Build a split Run button: main action runs now, dropdown queues it.
+
+        ``run_cb`` is a ``_run_*`` handler taking a keyword-only ``queue`` flag;
+        the dropdown calls it with ``queue=True`` (submit without attaching).
+        """
+        btn = QToolButton()
+        # SplitButtonStyle (set before the stylesheet) widens the dropdown
+        # indicator + paints its divider/tint, keeping the label centred in the
+        # action segment. The style must outlive the button, so stash a ref.
+        split_style = SplitButtonStyle()
+        self._split_styles.append(split_style)
+        btn.setStyle(split_style)
+        btn.setText(label)
+        btn.setStyleSheet(style)
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        btn.setPopupMode(QToolButton.MenuButtonPopup)
+        btn.clicked.connect(lambda _checked=False: run_cb())
+        menu = QMenu(btn)
+        queue_action = menu.addAction(t("preprocess_add_to_queue"))
+        queue_action.triggered.connect(lambda _checked=False: run_cb(queue=True))
+        btn.setMenu(menu)
+        self._run_buttons.append(btn)
+        return btn
+
+    def _run_te(self, *, queue: bool = False) -> None:
         # Unified "caching" step — runs `tasks.py preprocess`, which chains
         # resize → VAE-latent cache → text-embedding cache. Replaces the old
         # text-only path now that the ConfigTab's standalone Preprocess
@@ -544,24 +1306,55 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         # currently have no GUI-tunable parameters, so the form stays TE-only.
         if not self._save_all():
             return
+        snapshot = self.preprocess_config_snapshot()
         self._submit(
             label="preprocess",
             argv=["tasks.py", "preprocess"],
-            extra_env={
-                "CAPTION_SHUFFLE_VARIANTS": str(int(self.shuffle_spin.value())),
-                "CAPTION_TAG_DROPOUT_RATE": self.dropout_edit.text().strip(),
-            },
+            extra_env=self.preprocess_env(),
+            config_snapshot=snapshot,
+            attach=not queue,
         )
 
-    def _run_mask(self) -> None:
+    def _run_pe(self, *, queue: bool = False) -> None:
+        # Cache vision-encoder (PE) features for the selected variant. The
+        # encoder follows the variant's `repa_encoder` (pe_spatial by default;
+        # `pe` = PE-Core for CMMD / DCW v4), so the button matches whatever a
+        # use_repa run will read. The config_snapshot carries the variant's
+        # resolved paths to the task (the daemon exposes it as CONFIG_FILE).
+        if not self._save_all():
+            return
+        variant = self._variant or "lora"
+        merged, _ = merged_gui_variant_preset(variant, "default")
+        encoder = (
+            str(merged.get("repa_encoder") or "pe_spatial").strip() or "pe_spatial"
+        )
+        task = "preprocess-pe-spatial" if encoder == "pe_spatial" else "preprocess-pe"
+        snapshot = self.preprocess_config_snapshot()
+        self._submit(
+            label="preprocess-pe",
+            argv=["tasks.py", task],
+            extra_env=self.preprocess_env(),
+            config_snapshot=snapshot,
+            attach=not queue,
+        )
+
+    def _run_mask(self, *, queue: bool = False) -> None:
         # Single-shot pipeline. ``tasks.py mask`` runs SAM and/or MIT into
         # a tempdir, merges the produced sources, and writes only the
-        # merged result to ``post_image_dataset/masks/<rel>/``. SAM reads
-        # ``configs/sam_mask.yaml`` directly; MIT picks up the
+        # merged result to ``post_image_dataset/masks/<rel>/``. GUI mask
+        # settings are submitted as env snapshots so queued jobs keep the
+        # profile values they were queued with; direct CLI usage still falls
+        # back to ``configs/sam_mask.yaml``. MIT picks up the
         # ``MIT_TEXT_THRESHOLD`` / ``MIT_DILATE`` env vars set below.
         # ``RUN_SAM_MASK`` / ``RUN_MIT_MASK`` gate each backend.
         if not self._save_all():
             return
+        rules = self._collect_rules()
+        if rules is None:
+            return
+        mask_path_pattern = (
+            self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
+        )
         run_sam = self.run_sam_mask_chk.isChecked()
         run_mit = self.run_mit_mask_chk.isChecked()
         if not (run_sam or run_mit):
@@ -575,49 +1368,84 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 "MIT_DILATE": str(int(self.mit_dilate_spin.value())),
                 "RUN_SAM_MASK": "1" if run_sam else "0",
                 "RUN_MIT_MASK": "1" if run_mit else "0",
+                "SAM_MASK_CONFIG_JSON": json.dumps(
+                    {
+                        "rules": rules,
+                        "path_pattern": mask_path_pattern,
+                    },
+                    ensure_ascii=False,
+                ),
             },
+            attach=not queue,
         )
 
-    def _submit(self, *, label: str, argv: list[str], extra_env: dict) -> None:
-        """Submit a preprocess/mask job to the daemon, then observe it.
+    def _submit(
+        self,
+        *,
+        label: str,
+        argv: list[str],
+        extra_env: dict,
+        config_snapshot: dict | None = None,
+        attach: bool = True,
+    ) -> None:
+        """Submit a preprocess/mask job to the daemon.
 
         The daemon spawns ``python <argv>`` detached and serializes it behind
         any running training job (single GPU). Pre-launch validation
-        (``_save_all`` + per-step gating) is the caller's job."""
-        if self._is_running():
+        (``_save_all`` + per-step gating) is the caller's job.
+
+        With ``attach=True`` (the main Run action) this tab takes over its
+        log/bar and blocks the Run buttons until the job finishes. With
+        ``attach=False`` (the "add to queue" dropdown) the job is submitted
+        silently — the Run buttons stay live so the next step / variant can be
+        queued, and the job is watched from the Queue tab."""
+        if attach and self._is_running():
             QMessageBox.information(self, "", t("preprocess_already_running"))
             return
-        # Busy UI + repaint before the submit so the tab feels responsive while
-        # the daemon auto-start + /health wait completes on a cold start.
-        for btn in self._run_buttons:
-            btn.setEnabled(False)
-        self.save_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.log.clear()
-        self._stdout_buf = ""
-        self._progress_tracker.reset()
-        self._progress_tracker.mark_starting(t("starting"))
-        self.log.appendPlainText("> " + " ".join([sys.executable, *argv]))
-        self.log.appendPlainText(t("daemon_submitting"))
-        QApplication.processEvents()
+        if attach:
+            # Busy UI + repaint before the submit so the tab feels responsive
+            # while the daemon auto-start + /health wait completes on a cold
+            # start.
+            for btn in self._run_buttons:
+                btn.setEnabled(False)
+            self.save_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            self.log.clear()
+            self._stdout_buf = ""
+            self._progress_tracker.reset()
+            self._progress_tracker.mark_starting(t("starting"))
+            self.log.appendPlainText("> " + " ".join([sys.executable, *argv]))
+            self.log.appendPlainText(t("daemon_submitting"))
+            QApplication.processEvents()
 
         try:
             resp = gui_daemon.submit_command(
-                label=label, argv=argv, extra_env=extra_env
+                label=label,
+                argv=argv,
+                extra_env=extra_env,
+                config_snapshot=config_snapshot,
+                # Main Run starts now; the "add to queue" dropdown holds it
+                # paused until the Queue tab's "Start Queue".
+                start=attach,
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_idle_ui()
+            if attach:
+                self._restore_idle_ui()
             return
         job_id = resp.get("job_id") if isinstance(resp, dict) else None
         if not job_id:
             QMessageBox.warning(
                 self, t("error"), t("daemon_submit_failed", err=str(resp))
             )
-            self._restore_idle_ui()
+            if attach:
+                self._restore_idle_ui()
             return
-        self.log.appendPlainText(t("daemon_queued", job_id=job_id).rstrip("\n"))
-        self._attach_to_job(job_id, replay_log=False)
+        if attach:
+            self.log.appendPlainText(t("daemon_queued", job_id=job_id).rstrip("\n"))
+            self._attach_to_job(job_id, replay_log=False)
+        else:
+            self.log.appendPlainText(t("preprocess_queued", label=label, job_id=job_id))
 
     def _try_reattach(self) -> None:
         """Bind to a preprocess/mask job still running when the tab first opens.

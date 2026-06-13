@@ -11,6 +11,7 @@ Flag precedence (evaluated top to bottom, first match wins):
     use_moe_style="independent_A"        → stacked_experts_global_fei
     use_moe_style="shared_A" + use_ortho → ortho_hydra
     use_moe_style="shared_A"             → hydra
+    use_ortho_init                       → ortho_init
     use_ortho                            → ortho
     (none)                               → lora
 
@@ -33,8 +34,10 @@ from networks.lora_modules import (
     LokrModule,
     LoRAModule,
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
+    StepExpertLoRAModule,
 )
 
 
@@ -50,11 +53,6 @@ class NetworkSpec:
             instantiate per target module.
         save_variant: Label keyed into ``networks.lora_save.SAVE_HANDLERS``
             — selects the serialization pipeline for this variant.
-        kwarg_flags: Tuple of kwargs this variant consumes beyond
-            ``SHARED_KWARG_FLAGS``. Combined with the shared set by
-            ``all_network_kwargs()`` to populate argparse schema and
-            forward TOML-level args into ``create_network``. Single
-            source of truth for what keys train.py recognizes.
         post_init: Optional hook run after the network is built; receives
             ``(network, kwargs)``. Used for variant-specific attribute
             attachment (e.g. hydra balance loss weight).
@@ -67,86 +65,122 @@ class NetworkSpec:
     post_init: Optional[Callable[[Any, Mapping[str, Any]], None]] = None
 
 
-# Kwargs every LoRA-family variant consumes in ``create_network``: core
-# targeting knobs + cross-cutting add-ons (ReFT, channel scaling,
-# LoRA+, T-LoRA). Cross-cutting because these compose on top of any
-# variant rather than belonging to a single one.
-SHARED_KWARG_FLAGS: Tuple[str, ...] = (
-    # Layer-type targeting (training-time and save-time gating).
-    # Training-time: which DiT layer families receive adapters at all.
-    # Save-time: which trained families are written to the .safetensors.
-    "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
-    "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
-    # Core network targeting / knobs
-    "train_llm_adapter",
-    "exclude_patterns",
-    "include_patterns",
-    "layer_start",
-    "layer_end",
-    "rank_dropout",
-    "module_dropout",
-    "verbose",
-    # Regex-driven per-module rank / lr overrides
-    "network_reg_dims",
-    "network_reg_lrs",
-    # HydraLoRA router (+ σ-router MLP) LR multiplier on top of unet_lr / reg_lr
-    "network_router_lr_scale",
-    # LoRA+
-    "loraplus_lr_ratio",
-    "loraplus_unet_lr_ratio",
-    "loraplus_text_encoder_lr_ratio",
-    # T-LoRA (timestep-dependent rank masking)
-    "use_timestep_mask",
-    "min_rank",
-    "alpha_rank_scale",
-    # Per-channel input pre-scaling (SmoothQuant-style). Gated by alpha:
-    # 0.0 disables; 0.5 = sqrt balance; 1.0 fully flattens. Calibration is
-    # vendored at `networks/calibration/channel_stats.safetensors`.
-    "channel_scaling_alpha",
-    # Memory-saving down-projection autograd (classic LoRA only; bitwise-equal grads)
-    "use_custom_down_autograd",
-    # Variant selectors (read by resolve_network_spec)
-    "use_ortho",
-    # PSOFT-style Cayley-init magnitude (consumed by OrthoHydra +
-    # StackedExperts in ortho mode).
-    "ortho_init_std",
-    # Three-axis routing config (see plan2.md §three-axis-config). Drives
-    # `LoRANetworkCfg.from_kwargs` translation; `resolve_network_spec` also
-    # dispatches on `use_moe_style="independent_A"` → `stacked_experts_global_fei`.
-    "use_moe_style",
-    "route_per_layer",
-    "router_source",
-    # GlobalRouter knobs (consumed only when route_per_layer=False).
-    "router_hidden_dim",
-    "router_tau",
-    # FECL knobs (FeRA auxiliary loss; opt-in via fera_fecl_weight > 0).
-    "fera_fecl_weight",
-    "fera_num_bands",
-    # ReFT add-on (composes with any variant)
-    "add_reft",
-    "reft_dim",
-    "reft_alpha",
-    "reft_layers",
-    # REPA-style auxiliary alignment (composes with any variant). The factory
-    # ``_maybe_attach_repa_head`` reads ``use_repa`` to decide whether to attach
-    # the head, then sizes/weights it from the rest. Selection of the hooked
-    # block index and the loss weight live as top-level argparse flags
-    # (``--repa_layer``, ``--repa_weight``) — the network module doesn't need
-    # them, only the adapter / loss handler does.
-    "use_repa",
-    "repa_dit_dim",
-    "repa_hidden_dim",
-    "repa_encoder_dim",
-    "repa_lr_scale",
-    # LyCORIS variant selector (loha / locon / lokr)
-    "network_type",
-    # LyCORIS per-variant knobs
-    "use_tucker",
-    "decompose_both",
-    "lokr_factor",
-    "full_matrix",
-    "conv_dim",
-    "conv_alpha",
+# Single flat allowlist of every TOML key the LoRA family forwards into
+# ``create_network`` as a string kwarg. Two jobs: (1) it lets these keys pass
+# the config-schema validator (so a typo like ``num_exprets`` still warns as an
+# unknown key), and (2) ``train.py`` copies exactly these keys off ``args`` into
+# ``net_kwargs``. It is a closed mirror of what ``LoRANetworkCfg.from_kwargs``
+# (+ ``_post_init_hydra``) actually read via ``kwargs.get(...)`` — keep the two
+# in sync: adding a ``kwargs.get("foo")`` there means adding ``"foo"`` here.
+#
+# There is no per-variant partition: every variant's ``from_kwargs`` reads the
+# whole set unconditionally (a plain-LoRA run with ``num_experts`` in its TOML
+# forwards it; the cfg just ignores it), so splitting by variant bought nothing.
+# Grouped by concern below purely for readability.
+NETWORK_KWARGS: frozenset[str] = frozenset(
+    {
+        # --- layer-type targeting (fork) ---
+        # Training-time: which DiT layer families receive adapters at all.
+        # Save-time: which trained families are written to the .safetensors.
+        "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
+        "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+        # --- core targeting / knobs (every variant) ---
+        "train_llm_adapter",
+        "exclude_patterns",
+        "include_patterns",
+        "layer_start",
+        "layer_end",
+        "rank_dropout",
+        "module_dropout",
+        "verbose",
+        # Regex-driven per-module rank / lr overrides
+        "network_reg_dims",
+        "network_reg_lrs",
+        # HydraLoRA router (+ sigma-router MLP) LR multiplier
+        "network_router_lr_scale",
+        # LoRA+
+        "loraplus_lr_ratio",
+        "loraplus_unet_lr_ratio",
+        "loraplus_text_encoder_lr_ratio",
+        # T-LoRA (timestep-dependent rank masking)
+        "use_timestep_mask",
+        "min_rank",
+        "alpha_rank_scale",
+        # Per-channel input pre-scaling (SmoothQuant-style).
+        "channel_scaling_alpha",
+        # Memory-saving down-projection autograd (classic LoRA only)
+        "use_custom_down_autograd",
+        # Variant selectors (read by resolve_network_spec)
+        "use_ortho",
+        # OrthoInit: top-r SVD of W0 as trainable init.
+        "use_ortho_init",
+        # PSOFT-style Cayley-init magnitude.
+        "ortho_init_std",
+        # Three-axis routing config.
+        "use_moe_style",
+        "route_per_layer",
+        "router_source",
+        # GlobalRouter knobs (consumed only when route_per_layer=False).
+        "router_hidden_dim",
+        "router_tau",
+        # FECL knobs (FeRA auxiliary loss; opt-in via fera_fecl_weight > 0).
+        "fera_fecl_weight",
+        "fera_num_bands",
+        # --- Hydra / OrthoHydra MoE ---
+        "num_experts",
+        "balance_loss_weight",
+        "balance_loss_warmup_ratio",
+        "expert_init_std",
+        # OrthoHydra centered-gate init.
+        "ortho_centered_gate",
+        "ortho_lambda_init",
+        # Unified layer filter.
+        "router_targets",
+        # sigma-conditional router add-on (router_source="sigma")
+        "sigma_feature_dim",
+        "per_bucket_balance_weight",
+        "num_sigma_buckets",
+        "specialize_experts_by_sigma_buckets",
+        "sigma_bucket_boundaries",
+        # FEI-conditional router (router_source="fei")
+        "fei_feature_dim",
+        "fei_sigma_low_div",
+        # --- Step-expert (turbo DP-DMD student) ---
+        "step_expert_K",
+        # --- ChimeraHydra dual-pool routing ---
+        "use_chimera_hydra",
+        "num_experts_content",
+        "num_experts_freq",
+        "balance_w_content",
+        "balance_w_freq",
+        "freq_router_init_std",
+        "freq_router_layer_norm",
+        "freq_router_mode",
+        "freq_router_tau",
+        "network_content_router_lr_scale",
+        "network_freq_router_lr_scale",
+        "content_router_layer_norm",
+        "content_router_init_std",
+        "chimera_lambda_init",
+        # REPA v2 auxiliary alignment loss.
+        "use_repa",
+        "repa_mode",
+        "repa_weight",
+        "repa_layer",
+        "repa_encoder",
+        "repa_lr_scale",
+        "repa_anneal_steps",
+        "repa_spatial_norm",
+        "repa_grad_heatmap",
+        # --- LyCORIS variant selectors + per-variant knobs (fork) ---
+        "network_type",
+        "use_tucker",
+        "decompose_both",
+        "lokr_factor",
+        "full_matrix",
+        "conv_dim",
+        "conv_alpha",
+    }
 )
 
 
@@ -184,57 +218,16 @@ def _post_init_hydra(network: Any, kwargs: Mapping[str, Any]) -> None:
         w_c = cfg.balance_w_content if cfg.balance_w_content is not None else target
         w_f = cfg.balance_w_freq if cfg.balance_w_freq is not None else target
         network._balance_w_content = float(w_c)
-        network._balance_w_freq = float(w_f)
+        # Hardwired-FEI freq gate has no router params and is a fixed function
+        # of z_t, so a Switch balance penalty on it is a constant w.r.t. the
+        # trained params (zero gradient) — force w_f=0 to keep the loss scalar
+        # honest and the logs clean.
+        if str(getattr(cfg, "freq_router_mode", "learned")).lower() == "fei":
+            network._balance_w_freq = 0.0
+        else:
+            network._balance_w_freq = float(w_f)
     else:
         network._use_chimera_hydra = False
-
-
-_HYDRA_KWARG_FLAGS: Tuple[str, ...] = (
-    "num_experts",
-    "balance_loss_weight",
-    "balance_loss_warmup_ratio",
-    "expert_init_std",
-    # Unified layer filter — scopes which Linears participate in routed
-    # adaptation (Hydra MoE leaves + σ / FEI feature concatenation).
-    "router_targets",
-    # σ-conditional router add-on (router_source="sigma")
-    "sigma_feature_dim",
-    "per_bucket_balance_weight",
-    "num_sigma_buckets",
-    "specialize_experts_by_sigma_buckets",
-    "sigma_bucket_boundaries",
-    # FEI-conditional router (router_source="fei"; FeRA-style content-aware)
-    "fei_feature_dim",
-    "fei_sigma_low_div",
-)
-
-_CHIMERA_KWARG_FLAGS: Tuple[str, ...] = (
-    "use_chimera_hydra",
-    "num_experts_content",
-    "num_experts_freq",
-    # Per-pool balance weights. Fall back to balance_loss_weight when unset.
-    "balance_w_content",
-    "balance_w_freq",
-    # FreqRouter init magnitude (small N(0, std)) — non-zero so the freq
-    # pool differentiates at step 0.
-    "freq_router_init_std",
-    # Per-modality LayerNorm on FreqRouter input. Active only when both
-    # FEI and σ feature blocks are enabled — equalizes the variance budget
-    # so the higher-dim σ block doesn't fan-in-overpower the 2-D FEI simplex.
-    "freq_router_layer_norm",
-    # Per-pool router LR multipliers — stack on top of network_router_lr_scale.
-    # Defaults to 1.0 (no-op). Bump content when the per-layer router stays
-    # near-uniform too long (std=0.01 init is slow to break symmetry).
-    "network_content_router_lr_scale",
-    "network_freq_router_lr_scale",
-    # Optional global content router (replaces the per-Linear lx-router with
-    # a single network-level ContentRouter fed by pooled crossattn_emb).
-    # Consumed by ``LoRANetworkCfg.from_kwargs`` — see chimera.toml's "Optional:
-    # global content router" block.
-    "content_router_source",
-    "content_router_init_std",
-    "content_router_layer_norm",
-)
 
 
 NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
@@ -248,18 +241,25 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         module_class=OrthoLoRAModule,
         save_variant="ortho_to_lora",
     ),
+    # OrthoInit: top-r SVD of W0 as *trainable* init (no Cayley, no frozen
+    # subspace). Full LoRA expressivity with a W0-aligned warm start; distills
+    # to standard LoRA at save time (sqrt-split λ → down/up), so the on-disk
+    # form is identical to a distilled OrthoLoRA. See OrthoInitLoRAModule.
+    "ortho_init": NetworkSpec(
+        name="ortho_init",
+        module_class=OrthoInitLoRAModule,
+        save_variant="ortho_to_lora",
+    ),
     "hydra": NetworkSpec(
         name="hydra",
         module_class=HydraLoRAModule,
         save_variant="hydra_moe",
-        kwarg_flags=_HYDRA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
     "ortho_hydra": NetworkSpec(
         name="ortho_hydra",
         module_class=OrthoHydraLoRAModule,
         save_variant="ortho_hydra_to_hydra",
-        kwarg_flags=_HYDRA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
     # ChimeraHydra: dual-pool additive routing on the OrthoHydra Cayley
@@ -276,8 +276,17 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         name="chimera_hydra",
         module_class=ChimeraHydraLoRAModule,
         save_variant="chimera_hydra_moe",
-        kwarg_flags=_HYDRA_KWARG_FLAGS + _CHIMERA_KWARG_FLAGS,
         post_init=_post_init_hydra,
+    ),
+    # Step-expert: shared down-proj + K step-indexed up-heads, hard selection
+    # by diffusion step counter (no router). Turbo DP-DMD student only; the
+    # student LoRA is kept-live at inference (K heads can't fold into one DiT
+    # weight), so save_variant is bespoke (written by TurboDMDNetwork.save_student,
+    # not save_network_weights). Selected via the ``step_expert_K`` kwarg.
+    "step_expert": NetworkSpec(
+        name="step_expert",
+        module_class=StepExpertLoRAModule,
+        save_variant="step_expert",
     ),
     # FeRA paper-faithful: independent-A stacked experts, single network-level
     # router fed by FEI(z_t). See plan2.md §three-axis-config — selected via
@@ -288,7 +297,6 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         name="stacked_experts_global_fei",
         module_class=StackedExpertsLoRAModule,
         save_variant="stacked_experts_global_fei",
-        kwarg_flags=_HYDRA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
     "loha": NetworkSpec(
@@ -313,17 +321,14 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
 
 
 def all_network_kwargs() -> Tuple[str, ...]:
-    """Return the union of shared + per-variant kwargs, sorted.
+    """Return the LoRA-family TOML allowlist (``NETWORK_KWARGS``), sorted.
 
-    Single source of truth for train.py — populates the argparse schema
-    and the TOML → ``net_kwargs`` forwarding list, so adding a new kwarg
-    to a ``NetworkSpec`` (or to ``SHARED_KWARG_FLAGS``) automatically
-    makes it visible to training without touching train.py.
+    Single source of truth for train.py — populates the argparse schema and
+    the TOML → ``net_kwargs`` forwarding list, so adding a key to
+    ``NETWORK_KWARGS`` automatically makes it visible to training without
+    touching train.py.
     """
-    merged: set[str] = set(SHARED_KWARG_FLAGS)
-    for spec in NETWORK_REGISTRY.values():
-        merged.update(spec.kwarg_flags)
-    return tuple(sorted(merged))
+    return tuple(sorted(NETWORK_KWARGS))
 
 
 def _parse_bool_flag(kwargs: Mapping[str, Any], key: str) -> bool:
@@ -354,7 +359,14 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     a single ``num_experts`` — the user only sets the chimera flag.
     """
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
+    use_ortho_init = _parse_bool_flag(kwargs, "use_ortho_init")
     use_chimera = _parse_bool_flag(kwargs, "use_chimera_hydra")
+    if use_ortho and use_ortho_init:
+        raise ValueError(
+            "use_ortho and use_ortho_init are mutually exclusive: ortho freezes "
+            "the SVD basis (Cayley-rotates within it); ortho_init trains the SVD "
+            "basis (no cap). Pick one."
+        )
 
     network_type = kwargs.get("network_type", None)
     if network_type is not None:
@@ -372,17 +384,30 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
                 raise ValueError(
                     f"network_type={network_type!r} is not compatible with use_chimera_hydra=True."
                 )
+            if use_ortho_init:
+                raise ValueError(
+                    f"network_type={network_type!r} is not compatible with use_ortho_init=True."
+                )
             raw_moe = kwargs.get("use_moe_style")
             if raw_moe and str(raw_moe).strip().lower() not in ("false", "none", ""):
                 raise ValueError(
                     f"network_type={network_type!r} is not compatible with MoE routing."
                 )
             return NETWORK_REGISTRY[network_type]
-        if network_type == "lora":
-            pass
-
     if use_chimera:
+        # OrthoInit composes with chimera: ``use_ortho_init=True`` swaps each
+        # pool's frozen-basis + Cayley parameterization for trainable SVD-seeded
+        # bases (threaded to ``ChimeraHydraLoRAModule`` via ``cfg.use_ortho_init``
+        # in ``network.py``). Same chimera_hydra spec — it distills to the
+        # identical free-form ``*_chimera.safetensors`` layout either way.
         return NETWORK_REGISTRY["chimera_hydra"]
+
+    # Step-expert (turbo per-step head split) short-circuits when step_expert_K
+    # is set and > 1. K==1 collapses to plain LoRA, so don't pay the ModuleList
+    # plumbing for it.
+    raw_step_K = kwargs.get("step_expert_K")
+    if raw_step_K is not None and int(raw_step_K) > 1:
+        return NETWORK_REGISTRY["step_expert"]
 
     raw_moe = kwargs.get("use_moe_style")
     if isinstance(raw_moe, str):
@@ -400,12 +425,19 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
             f"use_moe_style={raw_moe!r}: expected False, 'shared_A', or 'independent_A'."
         )
 
+    if use_ortho_init and moe_style:
+        raise NotImplementedError(
+            "use_ortho_init does not yet compose with use_moe_style — the "
+            "orthoinit MoE pool is a separate family member (not implemented)."
+        )
     if moe_style == "independent_A":
         return NETWORK_REGISTRY["stacked_experts_global_fei"]
     if moe_style == "shared_A":
         return (
             NETWORK_REGISTRY["ortho_hydra"] if use_ortho else NETWORK_REGISTRY["hydra"]
         )
+    if use_ortho_init:
+        return NETWORK_REGISTRY["ortho_init"]
     if use_ortho:
         return NETWORK_REGISTRY["ortho"]
     return NETWORK_REGISTRY["lora"]
@@ -414,7 +446,7 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
 __all__ = [
     "NetworkSpec",
     "NETWORK_REGISTRY",
-    "SHARED_KWARG_FLAGS",
+    "NETWORK_KWARGS",
     "all_network_kwargs",
     "resolve_network_spec",
 ]

@@ -9,10 +9,12 @@ both the ComfyUI node and ``make daemon`` rely on.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Iterator, Optional
 
 from . import config, proc
@@ -55,6 +57,56 @@ def _resolve_port() -> int:
     return config.DEFAULT_PORT
 
 
+def _norm_root(path: str | Path) -> str:
+    return str(Path(path).resolve()).casefold()
+
+
+def daemon_matches_root(health: Optional[dict], expected_root: str | Path) -> bool:
+    """True iff a daemon health response belongs to ``expected_root``.
+
+    New daemons report ``root`` directly in ``/health`` and pidfiles. For
+    legacy same-checkout daemons, a local in-repo pidfile is accepted even when
+    the health payload lacks ``root``. A rootless daemon discovered only through
+    the per-user global pidfile is treated as unknown, because that is exactly
+    how a GUI can accidentally attach to another checkout's daemon.
+    """
+    if not health:
+        return False
+    expected = _norm_root(expected_root)
+    root = health.get("root")
+    if root:
+        return _norm_root(root) == expected
+
+    pidfile = config.discover_pidfile()
+    info = proc.read_pidfile(pidfile) or {}
+    root = info.get("root")
+    if root:
+        return _norm_root(root) == expected
+
+    try:
+        return pidfile.resolve() == config.PIDFILE.resolve()
+    except OSError:
+        return False
+
+
+def _root_mismatch_message(health: dict, expected_root: str | Path) -> str:
+    actual = health.get("root") or "unknown checkout"
+    return (
+        "training daemon belongs to a different anima_lora checkout "
+        f"({actual}); expected {Path(expected_root).resolve()}"
+    )
+
+
+def _has_live_jobs(client: "DaemonClient") -> bool:
+    try:
+        return any(
+            (job.get("state") or "") in {"queued", "running"}
+            for job in client.list_jobs()
+        )
+    except Exception:
+        return True
+
+
 class DaemonClient:
     def __init__(self, port: Optional[int] = None) -> None:
         self.port = port or _resolve_port()
@@ -87,6 +139,19 @@ class DaemonClient:
     # ----- typed endpoints -----
 
     def health(self, *, timeout: float = 3.0) -> Optional[dict]:
+        # Fast-fail when nothing is listening. On Windows, a TCP connect to a
+        # closed port isn't refused immediately — the stack retransmits SYN
+        # for ~2s before erroring — so a bare urlopen turns every "is the
+        # daemon up?" probe into a 2s stall (the GUI makes several at launch
+        # and on poll timers, on the UI thread). A raw connect with a short
+        # timeout bounds the daemon-down answer at 0.25s; when the daemon is
+        # up, loopback connects in microseconds and we proceed to the real
+        # request with the caller's (generous) timeout.
+        try:
+            with socket.create_connection((config.HOST, self.port), timeout=0.25):
+                pass
+        except OSError:
+            return None
         try:
             return self._request("GET", "/health", timeout=timeout)
         except (urllib.error.URLError, OSError, ValueError):
@@ -98,8 +163,11 @@ class DaemonClient:
         method: str,
         preset: str = "default",
         methods_subdir: Optional[str] = None,
+        config_snapshot: Optional[dict] = None,
+        config_file: Optional[str] = None,
         overrides: Optional[dict] = None,
         extra: Optional[list[str]] = None,
+        start: Optional[bool] = None,
     ) -> dict:
         return self._request(
             "POST",
@@ -108,8 +176,11 @@ class DaemonClient:
                 "method": method,
                 "preset": preset,
                 "methods_subdir": methods_subdir,
+                "config_snapshot": config_snapshot or None,
+                "config_file": config_file,
                 "overrides": overrides or {},
                 "extra": extra or [],
+                "start": start,
             },
         )
 
@@ -120,6 +191,9 @@ class DaemonClient:
         argv: list[str],
         extra_env: Optional[dict] = None,
         chain_train: Optional[dict] = None,
+        config_snapshot: Optional[dict] = None,
+        config_file: Optional[str] = None,
+        start: Optional[bool] = None,
     ) -> dict:
         return self._request(
             "POST",
@@ -130,8 +204,19 @@ class DaemonClient:
                 "argv": list(argv),
                 "extra_env": extra_env or {},
                 "chain_train": chain_train or None,
+                "config_snapshot": config_snapshot or None,
+                "config_file": config_file,
+                "start": start,
             },
         )
+
+    def start_queue(self) -> Optional[dict]:
+        """Resume a paused queue — the worker launches queued jobs in order."""
+        return self._request("POST", "/queue/start")
+
+    def pause_queue(self) -> Optional[dict]:
+        """Hold the queue — queued jobs wait until ``start_queue``."""
+        return self._request("POST", "/queue/pause")
 
     def list_jobs(self) -> list:
         return self._request("GET", "/jobs") or []
@@ -173,7 +258,12 @@ class DaemonClient:
         return self.stream(f"/jobs/{job_id}/logs")
 
 
-def ensure_daemon(*, timeout: float = 60.0, port: Optional[int] = None) -> DaemonClient:
+def ensure_daemon(
+    *,
+    timeout: float = 60.0,
+    port: Optional[int] = None,
+    expected_root: Optional[str | Path] = None,
+) -> DaemonClient:
     """Return a client to a live daemon, starting one if needed.
 
     Idempotent: if ``/health`` answers we just return a client. Otherwise spawn
@@ -194,8 +284,21 @@ def ensure_daemon(*, timeout: float = 60.0, port: Optional[int] = None) -> Daemo
     """
     requested = port or _resolve_port()
     client = DaemonClient(requested)
-    if client.health() is not None:
+    health = client.health()
+    if health is not None and expected_root is None:
         return client
+    if health is not None and expected_root is not None:
+        if daemon_matches_root(health, expected_root):
+            return client
+        if health.get("active_job") or _has_live_jobs(client):
+            raise RuntimeError(
+                f"{_root_mismatch_message(health, expected_root)}; "
+                "it still has queued or running jobs"
+            )
+        client.shutdown(kill_jobs=False)
+        deadline = time.time() + min(timeout, 5.0)
+        while time.time() < deadline and client.health() is not None:
+            time.sleep(0.2)
 
     config.ensure_state_dirs()
     proc.spawn_detached(
@@ -213,8 +316,17 @@ def ensure_daemon(*, timeout: float = 60.0, port: Optional[int] = None) -> Daemo
         resolved = _resolve_port()  # follow a fallback-to-ephemeral daemon
         if resolved != client.port:
             client = DaemonClient(resolved)
-        if client.health() is not None:
+        health = client.health()
+        if health is not None and expected_root is None:
             return client
+        if health is not None and expected_root is not None:
+            if daemon_matches_root(health, expected_root):
+                return client
+            if health.get("active_job") or _has_live_jobs(client):
+                raise RuntimeError(
+                    f"{_root_mismatch_message(health, expected_root)}; "
+                    "it still has queued or running jobs"
+                )
         time.sleep(interval)
         interval = min(interval * 1.5, 0.5)  # ramp 0.1 → 0.5s
     raise RuntimeError(

@@ -16,13 +16,13 @@
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
 
-network_alpha = 64
-network_dim = 64
+network_alpha = 32
+network_dim = 32
 
 learning_rate = 2e-5
-max_train_epochs = 10
-save_every_n_epochs = 2
-checkpointing_epochs = 2
+max_train_epochs = 18
+save_every_n_epochs = 6
+checkpointing_epochs = 6
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -31,18 +31,14 @@ caption_dropout_rate = 0.1
 # CMMD val (PE-Core MMD²) is the primary val signal.
 # use_cmmd = true
 
-logging_dir = "output/logs"
-log_with = "tensorboard"
-
-output_name = "anima_chimera"
+output_name = "anima_chimera-0611-48"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
-use_ortho = true
+use_ortho_init = true
 use_timestep_mask = true
-min_rank = 16
+min_rank = 8
 alpha_rank_scale = 1.0
-channel_scaling_alpha = 0.5
-blocks_to_swap=8
+blocks_to_swap=0
 
 # -------------
 # ChimeraHydra activation. The three-axis routing fields
@@ -56,44 +52,54 @@ use_chimera_hydra = true
 num_experts_content = 6
 num_experts_freq = 2
 
-# Outer balance multiplier is 1.0 so the per-pool weights below are the
-# only scalars on the balance loss. Default per-pool weights match the
-# OrthoHydra production value (~2e-5, see
-# [[project_hydra_balance_weight_ceiling]]).
-#
-# Warmup is asymmetric on the chimera path: only the per-Linear CONTENT
-# router gates through ``balance_loss_warmup_ratio``. The FREQ router
-# bypasses warmup entirely — its FEI input + ``freq_router_init_std``
-# break symmetry from step 0, so its load-balance pressure can fire
-# immediately without pinning the router to uniform.
-
-balance_loss_warmup_ratio = 0.1
+balance_loss_warmup_ratio = 0.02
 balance_loss_weight = 1.0
-balance_w_content = 1e-6
-balance_w_freq = 1e-6
+# EMA-usage load balance on the content pool (O(1) at uniform, → K_c at full
+# collapse). The old per-microbatch Switch at 1e-5 was negligible AND degenerate
+# at batch=1; this EMA term bites against the global dead-expert collapse without
+# punishing per-sample sharpness. Held gentle here (weighted ~1e-4–8e-4 vs
+# denoise ~0.1) so it shapes usage rather than forcing flat uniformity — the
+# symmetry-break now comes mainly from content_router_init_std below. Raise
+# toward 1e-3 if experts still die; lower if usage pins uniform with margin flat.
+balance_w_content = 1e-4
 network_content_router_lr_scale = 10.0
-network_freq_router_lr_scale = 2.0
 
-content_router_source = "crossattn_emb"
-content_router_init_std = 0.001      # non-zero (uniform would be a fixed point)
+# Content routing is always the network-level ContentRouter fed the pooled
+# crossattn_emb (the per-Linear lx_c router was removed).
 content_router_layer_norm = true   # parameterless LN on the pooled input
 
-# FreqRouter input. FEI = 2-band simplex (e_low, e_high). σ-features
-# disabled by default (sigma_feature_dim = 0), so the FreqRouter input
-# dim = 2. Flip sigma_feature_dim > 0 to add sinusoidal σ features (same
-# functional form as the DiT t_embedder); the proposal targets "F ≈ 32".
+use_repa       = true
+repa_mode      = "relational"
+repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
+repa_layer     = 8            # block to hook (of 28)
+repa_encoder   = "pe_spatial"
+repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
+repa_spatial_norm = true
 
+# Freq-pool routing mode.
+#   "fei"     — hardwire π_f = normalize(FEI ** (1/freq_router_tau)) directly.
+#               No learned router, no σ-features, no freq balance loss. The
+#               FEI 2-band simplex (e_low, e_high) IS the gate, so K_f
+#               (num_experts_freq) MUST equal fei_feature_dim. Motivation: the
+#               archived FEI trace (_archive/bench/fera/.../fei_traces.png)
+#               shows FEI already carries the load-bearing per-prompt routing
+#               signal at low σ; the learned MLP only reshaped inputs no richer
+#               than FEI itself, and σ is the non-discriminating half.
+#   "learned" — paper-faithful FreqRouter MLP over concat(FEI, σ-features).
+freq_router_mode = "fei"
+freq_router_tau = 1.0   # 1.0 = raw FEI passthrough; <1 sharpens, >1 flattens
+activation_memory_budget = 0.85
+
+# FEI = 2-band simplex (e_low, e_high). fei_sigma_low_div=4.0 places the
+# low/high crossover near σ≈0.3 (mid-denoising) on this dataset.
 fei_feature_dim = 2
 fei_sigma_low_div = 4.0
-sigma_feature_dim = 16
-freq_router_layer_norm = true
-freq_router_init_std = 0.1
 max_data_loader_n_workers=1
 # Routing scope. Every Linear matched by this regex becomes a chimera
 # leaf; non-matching layers fall back to OrthoLoRA (single-pool Cayley,
 # no router). Same default as the other hydra variants.
-# router_targets = ".*(output_proj|mlp\\.layer[12])$"
-router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
+router_targets = ".*(output_proj|mlp\\.layer[12])$"
+# router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
 # output_name = "anima_chimera-0521"
 [[datasets]]
 validation_split_num = 8

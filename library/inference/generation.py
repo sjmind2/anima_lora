@@ -20,6 +20,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
+    set_step_expert_index,
 )
 from library.inference import sampling as inference_utils
 from library.inference.output import check_inputs
@@ -30,6 +31,33 @@ from library.inference.corrections.smc_cfg import SMCCFGState
 from library.inference.sampler_context import SamplerSideChannels
 
 logger = logging.getLogger(__name__)
+
+
+def _build_cns_recolorer(args):
+    """Build a CNS noise recolorer from ``--cns`` (path or "auto"), or None.
+
+    Only meaningful on the stochastic ``er_sde`` path — on euler/lcm there is no
+    injected noise to recolor, so the recolorer (even if loaded) is a no-op. We
+    still gate on the flag here and let the sampler ignore it otherwise.
+    """
+    spec = getattr(args, "cns", None)
+    if not spec:
+        return None
+    if getattr(args, "sampler", "euler") != "er_sde":
+        logger.warning(
+            "--cns is set but --sampler=%s injects no noise; CNS is a no-op "
+            "(use --sampler er_sde).",
+            getattr(args, "sampler", "euler"),
+        )
+        return None
+    from library.inference.corrections.cns import CNSRecolorer
+
+    recolorer = CNSRecolorer.from_path(
+        spec, strength=getattr(args, "cns_strength", 1.0)
+    )
+    logger.info("CNS noise recoloring enabled (strength=%.2f).", recolorer.strength)
+    return recolorer
+
 
 # Spectrum runner registry. The spectrum implementation lives in
 # networks/spectrum.py (or a downstream package); it self-registers on import.
@@ -145,7 +173,14 @@ class GenerationSettings:
 
 
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
-    device = torch.device(args.device)
+    # ``inference.parse_args`` defaults ``--device`` to None and resolves it in
+    # main()'s body, but programmatic callers (GenerationRequest.to_args(), bench
+    # probes) skip that block. Resolve the cuda-else-cpu default here so the one
+    # chokepoint every caller funnels through can't see ``args.device is None``.
+    dev = getattr(args, "device", None) or (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    device = torch.device(dev)
     logger.info(f"Using device: {device}, DiT weight precision: bfloat16")
     return GenerationSettings(device=device)
 
@@ -291,15 +326,21 @@ def generate_body_tiled(
     negative_embed = negative_embed.to(torch.bfloat16)
 
     timesteps, sigmas = inference_utils.get_timesteps_sigmas(
-        args.infer_steps, args.flow_shift, device
+        args.infer_steps,
+        args.flow_shift,
+        device,
+        tail_power=getattr(args, "sigma_tail_power", 1.0),
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
     # Create sampler. Variable kept named `er_sde` for historic minimum-diff
     # reasons; both ERSDESampler and LCMSampler share the same .step interface.
+    cns = _build_cns_recolorer(args)
     er_sde = None
     if args.sampler == "er_sde":
-        er_sde = inference_utils.ERSDESampler(sigmas, seed=args.seed, device=device)
+        er_sde = inference_utils.ERSDESampler(
+            sigmas, seed=args.seed, device=device, cns=cns
+        )
     elif args.sampler == "lcm":
         er_sde = inference_utils.LCMSampler(sigmas, seed=args.seed, device=device)
 
@@ -331,6 +372,7 @@ def generate_body_tiled(
 
                 t_expand = t.expand(latents.shape[0])
                 set_hydra_sigma(anima, t_expand)
+                set_step_expert_index(anima, i)
                 # FEI router input — computed on the full latent (pre-tile)
                 # so every tile in this step sees the same per-sample FEI.
                 # Drives both the per-Linear FEI router (FEI-on-Hydra) and
@@ -569,7 +611,10 @@ def generate_body(
 
     # Prepare timesteps
     timesteps, sigmas = inference_utils.get_timesteps_sigmas(
-        args.infer_steps, args.flow_shift, device
+        args.infer_steps,
+        args.flow_shift,
+        device,
+        tail_power=getattr(args, "sigma_tail_power", 1.0),
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
@@ -610,9 +655,12 @@ def generate_body(
 
     # Create sampler. Variable kept named `er_sde` for historic minimum-diff
     # reasons; both ERSDESampler and LCMSampler share the same .step interface.
+    cns = _build_cns_recolorer(args)
     er_sde = None
     if args.sampler == "er_sde":
-        er_sde = inference_utils.ERSDESampler(sigmas, seed=args.seed, device=device)
+        er_sde = inference_utils.ERSDESampler(
+            sigmas, seed=args.seed, device=device, cns=cns
+        )
     elif args.sampler == "lcm":
         er_sde = inference_utils.LCMSampler(sigmas, seed=args.seed, device=device)
 
@@ -722,6 +770,7 @@ def generate_body(
 
                     t_expand = t.expand(latents.shape[0])
                     set_hydra_sigma(anima, t_expand)
+                    set_step_expert_index(anima, i)
                     compute_and_set_hydra_fei(anima, latents)
                     if dcw_calibrator is not None:
                         # Capture FEI on the pre-forward latent at warmup steps
@@ -901,111 +950,28 @@ def generate(
     else:
         anima.reset_mod_guidance()
 
-    # IP-Adapter: load + apply network, encode reference image, prime per-block
-    # K/V on the network. The patched cross-attn closures pull from the cache
-    # for both cond and uncond passes (image stays on through CFG; text is the
-    # CFG steering knob).
-    _setup_ip_adapter(args, anima, device)
-
     # EasyControl: load + apply network, VAE-encode reference image, run cond
     # pre-pass to prime per-block (K_c, V_c). Phase 1 — recomputed every step
     # at training; at inference we run it once here (no KV cache yet).
     _setup_easycontrol(args, anima, device, shared_models)
 
-    return generate_body(args, anima, context, context_null, device, seed)
+    # DAVE: arm the per-block DC-attenuation hooks (training-free diversity edit).
+    # Hooks must be removed after generation — the model is shared across seeds,
+    # so a stacked hook set would compound the attenuation. See dave.py.
+    dave_hooks = None
+    if getattr(args, "dave", None):
+        from library.inference.corrections.dave import setup_dave
 
+        dave_hooks = setup_dave(args, anima, device)
+    else:
+        anima.reset_dave()
 
-def _setup_ip_adapter(args, anima, device):
-    ip_weight = getattr(args, "ip_adapter_weight", None)
-    ip_image = getattr(args, "ip_image", None)
-    if ip_weight is None and ip_image is None:
-        return None
-    if ip_weight is None or ip_image is None:
-        raise ValueError(
-            "--ip_adapter_weight and --ip_image must be passed together "
-            f"(got ip_adapter_weight={ip_weight!r}, ip_image={ip_image!r})"
-        )
-
-    from PIL import Image
-    from torchvision import transforms
-
-    from networks.methods.ip_adapter import create_network_from_weights
-    from library.vision import encode_pe_from_imageminus1to1, load_pe_encoder
-
-    # Aspect-match: snap --image_size to the CONSTANT_TOKEN_BUCKETS entry whose
-    # aspect is closest to the reference. Done BEFORE encoding so the same
-    # aspect drives both the generated latent and the PE-side bucket pick.
-    if getattr(args, "ip_image_match_size", False):
-        from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
-
-        with Image.open(ip_image) as _ref_for_size:
-            _rw, _rh = _ref_for_size.size
-        _target = _rw / _rh
-        _best_wh = min(
-            CONSTANT_TOKEN_BUCKETS, key=lambda wh: abs((wh[0] / wh[1]) - _target)
-        )
-        # check_inputs reads args.image_size as [H, W].
-        args.image_size = [_best_wh[1], _best_wh[0]]
-        logger.info(
-            f"IP-Adapter: image_size auto-picked from ref (aspect w/h={_target:.3f}) "
-            f"-> {tuple(args.image_size)} (HxW)"
-        )
-
-    create_kwargs = {}
-    if getattr(args, "ip_scale", None) is not None:
-        create_kwargs["ip_scale"] = float(args.ip_scale)
-
-    network, _sd = create_network_from_weights(
-        multiplier=1.0,
-        file=ip_weight,
-        ae=None,
-        text_encoders=None,
-        unet=anima,
-        **create_kwargs,
-    )
-    network.load_weights(ip_weight)
-    network.to(device, dtype=torch.bfloat16)
-    network.apply_to(text_encoders=None, unet=anima)
-
-    img = Image.open(ip_image).convert("RGB")
-    tfm = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
-    )
-    img_t = (
-        tfm(img).unsqueeze(0).to(device, dtype=torch.bfloat16)
-    )  # [1, 3, H, W] in [-1, 1]
-
-    with torch.no_grad():
-        if getattr(network, "pe_lora_enabled", False):
-            # PE-LoRA path: encoder lives on the network with LoRA active.
-            ip_features = network.encode_images(img_t)  # [1, T_pe, d_enc]
-        else:
-            bundle = load_pe_encoder(
-                device, name=network.encoder_name, dtype=torch.bfloat16
-            )
-            feats_list = encode_pe_from_imageminus1to1(bundle, img_t, same_bucket=True)
-            ip_features = torch.stack(feats_list, dim=0)  # [1, T_pe, d_enc]
-            # Drop the local encoder before set_ip_tokens — the resampler is
-            # the only thing left that reads ip_features.
-            del bundle, feats_list
-        ip_tokens = network.encode_ip_tokens(ip_features.to(torch.bfloat16))
-
-    network.set_ip_tokens(ip_tokens)
-    # K/V are now cached per-block on the cross-attn modules — the PE encoder
-    # is dead weight for the rest of generation. Drop it and reclaim VRAM
-    # before the diffusion forward starts.
-    if getattr(network, "pe_lora_enabled", False):
-        network.release_encoder()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    logger.info(
-        f"IP-Adapter: loaded {ip_weight} (encoder={network.encoder_name}, "
-        f"K={network.num_ip_tokens}, scale={network.get_effective_scale():.3f})"
-    )
-    # Stash on anima so the caller can keep the network alive for the duration
-    # of generation (Python won't GC it while it's reachable from the model).
-    anima._ip_adapter_network = network
-    return network
+    try:
+        return generate_body(args, anima, context, context_null, device, seed)
+    finally:
+        if dave_hooks is not None:
+            dave_hooks.remove()
+            anima.reset_dave()
 
 
 def _setup_easycontrol(args, anima, device, shared_models):

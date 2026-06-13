@@ -1,37 +1,60 @@
-"""Experimental training entry-points: ip-adapter, easycontrol, turbo, chimera.
+"""Experimental training entry-points: turbo, spd, chimera, byg.
 
 These are wired up under ``make exp-*`` / ``python tasks.py exp-*`` to keep
 the unstable methods visually separate from the shipped ones (lora family,
-modulation guidance, hydra). Each ``cmd_*`` is a thin shim that translates env
-vars + extra argv into the right ``train.py`` (via ``accelerate launch``) or
-``scripts/preprocess/*.py`` call.
+modulation guidance, hydra, EasyControl). Each ``cmd_*`` is a thin shim that
+translates env vars + extra argv into the right ``train.py`` (via
+``accelerate launch``) or ``scripts/preprocess/*.py`` call.
+
+(EasyControl graduated to the shipped ``make easycontrol*`` targets — see
+``scripts/tasks/training.py``.)
 """
 
 from __future__ import annotations
 
-from scripts.tasks import preprocess as _preprocess
-from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
+from scripts.tasks._common import (
+    PY,
+    _preset,
+    bespoke_preset_flags,
+    queue_command,
+    run,
+    train,
+)
 
 
 def cmd_turbo(extra):
-    """Turbo Anima — Decoupled DMD2 distillation (proposal: docs/proposal/turbo_anima_dmd_lora.md).
+    """Turbo Anima — DP-DMD distillation (docs: docs/experimental/dpdmd.md).
 
     Bypasses train.py / accelerate (single-GPU bespoke loop, like distill-mod).
     Reads ``configs/methods/turbo.toml``; trailing args are forwarded so user
     CLI flags override TOML values, e.g.::
 
-        make exp-turbo                                  # defaults: rank=48, 4-step
+        make exp-turbo                                  # defaults: rank=64, 2-step
         make exp-turbo ARGS="--student_rank 64 --iterations 5000"
         make exp-turbo ARGS="--single_prompt_idx 0"     # Phase 0 single-prompt overfit
+        make exp-turbo --queue                          # enqueue on the daemon
 
     Honors ``PRESET`` (default ``default``) — translates ``blocks_to_swap`` and
     ``gradient_checkpointing`` from ``configs/presets.toml`` into CLI flags so
     ``make exp-turbo PRESET=low_vram`` enables grad ckpt + unsloth offload, and
     ``PRESET=half/quarter/tenth`` shrinks the dataset via ``--sample_ratio``.
     ``extra`` is appended last, so user CLI overrides win.
+
+    ``--queue`` anywhere in ``extra`` enqueues the distillation as a daemon
+    command-job (run serially behind any other queued work) and returns
+    immediately, instead of running it inline — the bespoke-loop analogue of
+    ``make lora --queue``. The job is labeled ``exp-turbo`` so the GUI's Turbo
+    tab can re-attach to it. Preset flags are baked into the queued argv since the
+    daemon's command path does no config merging.
     """
+    extra = list(extra or [])
     preset_flags = bespoke_preset_flags(_preset())
-    run([PY, "scripts/distill_turbo.py", *preset_flags, *extra])
+    argv = ["-m", "scripts.distill_turbo.distill", *preset_flags, *extra]
+    if "--queue" in argv:
+        argv.remove("--queue")
+        queue_command("exp-turbo", argv)
+        return
+    run([PY, *argv])
 
 
 def cmd_spd(extra):
@@ -76,64 +99,39 @@ def cmd_chimera(extra):
     train("chimera", extra)
 
 
-def cmd_ip_adapter(extra):
-    train("ip_adapter", extra)
+def cmd_byg(extra):
+    """BYG — Bootstrap Your Generator unpaired instruction editing.
 
+    Plain rank-64 LoRA trained with a multi-forward unpaired objective (bootstrap
+    rollout + DDS prior + cycle + identity), conditioned on a parameter-free
+    token-concat source latent. Reads ``configs/methods/byg.toml``.
 
-def cmd_ip_adapter_preprocess(extra):
-    """Full IP-Adapter preprocess.
-
-    IP-Adapter shares the LoRA pipeline's data layout — source images live in
-    ``image_dataset/`` and caches in ``post_image_dataset/lora/``. This is just
-    a convenience alias for ``make preprocess`` + ``make preprocess-pe`` so the
-    GUI's IP-Adapter tab and ``make exp-ip-adapter-preprocess`` keep working.
+    Run ``exp-byg-data`` first to build the per-image edit-tuple sidecars under
+    ``post_image_dataset/byg/``. The image VAE/TE caches are the standard
+    ``preprocess`` ones (the source image IS the training image).
     """
-    _preprocess.cmd_preprocess(extra)
-    _preprocess.cmd_preprocess_pe(extra)
+    train("byg", extra)
 
 
-def cmd_easycontrol(extra):
-    train("easycontrol", extra)
+def cmd_byg_data(extra):
+    """Build BYG edit-tuple sidecars (tag-swap) into ``post_image_dataset/byg/``.
 
-
-def cmd_easycontrol_preprocess(extra):
-    """Full EasyControl preprocess: VAE latents + text-encoder outputs.
-
-    Source: ``easycontrol-dataset/``  Caches: ``post_image_dataset/easycontrol/``.
+    One offline pass over the captioned corpus emitting
+    ``<stem>_byg.safetensors`` (4 encoded role conditionings) per image. Pass
+    ``--limit N`` for a quick smoke subset, ``--overwrite`` to rebuild.
     """
-    src = "easycontrol-dataset"
-    dst = "post_image_dataset/easycontrol"
     run(
         [
             PY,
-            "scripts/preprocess/cache_latents.py",
+            "scripts/byg/build_edit_tuples.py",
             "--dir",
-            src,
+            "image_dataset",
             "--cache_dir",
-            dst,
-            "--vae",
-            "models/vae/qwen_image_vae.safetensors",
-            "--batch_size",
-            "4",
-            "--chunk_size",
-            "64",
-        ]
-    )
-    run(
-        [
-            PY,
-            "scripts/preprocess/cache_text_embeddings.py",
-            "--dir",
-            src,
-            "--cache_dir",
-            dst,
+            "post_image_dataset/byg",
             "--qwen3",
             "models/text_encoders/qwen_3_06b_base.safetensors",
             "--dit",
             "models/diffusion_models/anima-base-v1.0.safetensors",
-            "--caption_shuffle_variants",
-            "4",
-            "--caption_tag_dropout_rate",
-            "0.1",
+            *extra,
         ]
     )
