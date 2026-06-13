@@ -1450,7 +1450,7 @@ class ConfigTab(QWidget):
         # Write batch_size override into [[datasets]][0] if changed from base default.
         batch_size_w = self._w.get("batch_size")
         if batch_size_w is not None:
-            from gui import _base_batch_size
+            from gui.validation import _base_batch_size
 
             base_bs = _base_batch_size(base)
             try:

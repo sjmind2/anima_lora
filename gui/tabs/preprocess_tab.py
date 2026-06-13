@@ -131,6 +131,13 @@ def _load_settings() -> dict:
     return data
 
 
+def _save_settings(updates: dict) -> None:
+    """Merge *updates* into ``gui_settings.json`` (read-modify-write)."""
+    data = _load_settings()
+    data.update(updates)
+    SETTINGS_FILE.write_text(json.dumps(data), encoding="utf-8")
+
+
 def _load_preprocess_toml() -> dict:
     """Read configs/preprocess.toml (the preprocess-only knobs split out of
     base.toml). Returns {} if absent/unparseable so callers fall back to
