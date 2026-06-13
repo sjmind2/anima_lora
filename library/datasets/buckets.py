@@ -419,6 +419,11 @@ def scan_dataset_bucket_distribution(
     }
 
 
+def token_counts_for_resos(resos) -> set:
+    """Distinct token counts ``(W//16)*(H//16)`` over a set of (W, H) resolutions."""
+    return {(w // 16) * (h // 16) for w, h in resos}
+
+
 def snap_sample_size(width: int, height: int) -> Tuple[int, int]:
     """Snap a requested sample (W, H) to the DiT's 16px pixel grid."""
     return max(64, width - width % 16), max(64, height - height % 16)

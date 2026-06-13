@@ -326,16 +326,16 @@ def test_output_layer_targeting_string_bool_parsing():
 
 
 def test_shared_kwarg_flags_contains_layer_targeting_keys():
-    """SHARED_KWARG_FLAGS must include all 8 train_*+output_* keys so they
+    """NETWORK_KWARGS must include all 8 train_*+output_* keys so they
     propagate from TOML/CLI through to create_network()."""
-    from networks import SHARED_KWARG_FLAGS
+    from networks import NETWORK_KWARGS
 
     expected = {
         "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
         "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
     }
-    missing = expected - set(SHARED_KWARG_FLAGS)
-    assert not missing, f"Missing from SHARED_KWARG_FLAGS: {missing}"
+    missing = expected - set(NETWORK_KWARGS)
+    assert not missing, f"Missing from NETWORK_KWARGS: {missing}"
 
 
 def test_classify_layer_supports_lora_name_underscore_form():

@@ -8,6 +8,15 @@ Locks the invariants the preprocess + compile paths rely on:
   * compile_blocks' dynamo budget scales with the active tier count.
 """
 
+import pytest
+
+# This fork uses BUCKET_FAMILIES instead of upstream's target_res/edge tiers.
+# The entire module tests the upstream multi-scale architecture we didn't merge.
+pytestmark = pytest.skip(
+    "Skipped: this fork uses BUCKET_FAMILIES, not upstream target_res tiers",
+    allow_module_level=True,
+)
+
 import math
 
 import pytest
