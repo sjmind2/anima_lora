@@ -61,14 +61,22 @@ def process_image(
     bucket_args: tuple,
     copy_captions: bool = True,
     rel_dir: str = "",
-) -> tuple[str, tuple[int, int]]:
+    overwrite: bool = False,
+) -> tuple[str, tuple[int, int], bool]:
     """Worker — receives bucket params (not a BucketManager) to stay picklable.
 
     ``rel_dir`` is the (possibly empty) relative subdir under the source root;
     the output mirrors it as ``out_dir / rel_dir / stem.png``. Empty ``rel_dir``
     collapses to the flat layout.
+
+    Returns ``(name, bucket_reso, skipped)``. Unless ``overwrite`` is set, an
+    image whose resized PNG already exists *at the correct bucket size* is
+    skipped (no re-decode/resize) — so a re-run is near-free, while a bucket
+    change still re-resizes only the images whose target bucket actually moved.
     """
-    max_reso, min_size, max_size, reso_steps, use_constant, enabled_families = bucket_args
+    max_reso, min_size, max_size, reso_steps, use_constant, enabled_families = (
+        bucket_args
+    )
     bucket_mgr = BucketManager(
         max_reso=max_reso,
         min_size=min_size,
@@ -81,12 +89,25 @@ def process_image(
         bucket_mgr.make_buckets(constant_token_buckets=use_constant)
 
     src_img = Image.open(image_path)
-    save_kwargs = _collect_metadata(src_img)
-    img = src_img.convert("RGB")
-    w, h = img.size
+    w, h = src_img.size  # header-only read; no pixel decode yet
 
     bucket_reso, _, _ = bucket_mgr.select_bucket(w, h)
     bw, bh = bucket_reso
+
+    target_dir = out_dir / rel_dir if rel_dir else out_dir
+    out_path = target_dir / f"{image_path.stem}.png"
+
+    # Idempotent skip: an existing PNG already at the target bucket is up to date.
+    if not overwrite and out_path.exists():
+        try:
+            with Image.open(out_path) as ex:
+                if ex.size == (bw, bh):
+                    return image_path.name, bucket_reso, True
+        except Exception:
+            pass  # unreadable existing output → fall through and re-resize
+
+    save_kwargs = _collect_metadata(src_img)
+    img = src_img.convert("RGB")
 
     # Resize preserving aspect ratio so the image covers the bucket.
     ar_img = w / h
@@ -105,10 +126,7 @@ def process_image(
     top = (new_h - bh) // 2
     img = img.crop((left, top, left + bw, top + bh))
 
-    target_dir = out_dir / rel_dir if rel_dir else out_dir
     target_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = target_dir / f"{image_path.stem}.png"
     img.save(out_path, format="PNG", **save_kwargs)
 
     if copy_captions:
@@ -117,7 +135,7 @@ def process_image(
             if cap.exists():
                 shutil.copy2(cap, target_dir / f"{image_path.stem}{ext}")
 
-    return image_path.name, bucket_reso
+    return image_path.name, bucket_reso, False
 
 
 def resize_to_buckets(
@@ -135,6 +153,7 @@ def resize_to_buckets(
     copy_captions: bool = True,
     recursive: bool = False,
     tree: bool = False,
+    overwrite: bool = False,
     verbose: bool = True,
     progress: ProgressFn | None = None,
 ) -> tuple[PreprocessStats, dict[tuple[int, int], int]]:
@@ -208,10 +227,7 @@ def resize_to_buckets(
                     if enabled_families
                     else ("constant-token" if constant_token_buckets else "standard")
                 )
-                print(
-                    f"[{name}] Resizing {len(image_files)} images to "
-                    f"{label} buckets"
-                )
+                print(f"[{name}] Resizing {len(image_files)} images to {label} buckets")
 
             subset_dst.mkdir(parents=True, exist_ok=True)
 
@@ -224,11 +240,12 @@ def resize_to_buckets(
                         bucket_args,
                         copy_captions,
                         "",
+                        overwrite,
                     ): img_path
                     for img_path in image_files
                 }
                 for future in as_completed(futures):
-                    fname, reso = future.result()
+                    fname, reso, _skipped = future.result()
                     total_buckets[reso] = total_buckets.get(reso, 0) + 1
                     total_stats.written += 1
                     if progress is not None:
@@ -295,10 +312,7 @@ def resize_to_buckets(
             if enabled_families
             else ("constant-token" if constant_token_buckets else "standard")
         )
-        print(
-            f"Resizing {len(image_files)} images to "
-            f"{label} buckets"
-        )
+        print(f"Resizing {len(image_files)} images to {label} buckets")
 
     def _rel_for(p: Path) -> str:
         try:
@@ -321,11 +335,12 @@ def resize_to_buckets(
                 bucket_args,
                 copy_captions,
                 _rel_for(img_path),
+                overwrite,
             ): img_path
             for img_path in image_files
         }
         for future in as_completed(futures):
-            name, reso = future.result()
+            name, reso, _skipped = future.result()
             bucket_counts[reso] = bucket_counts.get(reso, 0) + 1
             stats.written += 1
             if progress is not None:

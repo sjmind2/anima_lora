@@ -16,15 +16,23 @@ Run with:
 
 import torch
 import pytest
-from typing import List, Tuple
+from typing import Tuple
 
 # Import both optimizers
 from library.training.came_optimizer import CAME  # Python reference
+
 try:
     from library.training.came_cpp_extension import CAME_C  # C++ version
+    from library.training.came_cpp_extension import (
+        _EXTENSION_AVAILABLE as _CAME_C_EXT_OK,
+    )
+
     _CAME_C_AVAILABLE = True
-except ImportError:
+except Exception:
     _CAME_C_AVAILABLE = False
+    _CAME_C_EXT_OK = False
+
+if not (_CAME_C_AVAILABLE and _CAME_C_EXT_OK):
     pytest.skip("CAME_C extension not available", allow_module_level=True)
 
 
@@ -54,7 +62,11 @@ def _init_identical_params(
 
     # Force state initialization by doing a dummy step check
     for p, opt in [(param_py, opt_py), (param_cpp, opt_cpp)]:
-        g = p.grad.float() if p.grad.dtype in (torch.float16, torch.bfloat16) else p.grad
+        g = (
+            p.grad.float()
+            if p.grad.dtype in (torch.float16, torch.bfloat16)
+            else p.grad
+        )
         if len(g.shape) >= 2:
             opt._init_state(p, g, opt.state[p])
         else:
@@ -71,7 +83,9 @@ def _init_identical_params(
     return param_py, param_cpp, opt_py, opt_cpp, grad
 
 
-def _check_state_equality(opt_py, opt_cpp, param_py, param_cpp, atol: float = 1e-6, rtol: float = 1e-6):
+def _check_state_equality(
+    opt_py, opt_cpp, param_py, param_cpp, atol: float = 1e-6, rtol: float = 1e-6
+):
     """Verify all optimizer states match.
 
     Python CAME stores state in grad.dtype (bf16 for bf16 params).
@@ -86,7 +100,11 @@ def _check_state_equality(opt_py, opt_cpp, param_py, param_cpp, atol: float = 1e
 
     errors = {}
     for key in state_py:
-        if key in state_cpp and isinstance(state_py[key], torch.Tensor) and isinstance(state_cpp[key], torch.Tensor):
+        if (
+            key in state_cpp
+            and isinstance(state_py[key], torch.Tensor)
+            and isinstance(state_cpp[key], torch.Tensor)
+        ):
             # Compare in fp32 to handle dtype differences
             py_val = state_py[key].float()
             cpp_val = state_cpp[key].float()
@@ -132,8 +150,9 @@ class TestCAMECKernelEquivalence:
 
         # Check parameter update parity
         _assert_params_close(
-            param_py, param_cpp,
-            msg="Parameter update diverged after one step (tall matrix)"
+            param_py,
+            param_cpp,
+            msg="Parameter update diverged after one step (tall matrix)",
         )
 
         # Check all internal states
@@ -227,7 +246,9 @@ class TestCAMECKernelEquivalence:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_weight_decay(self):
         """Verify weight decay is applied identically."""
-        param_py = torch.randn((64, 64), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        param_py = torch.randn(
+            (64, 64), device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
         param_cpp = param_py.detach().clone().requires_grad_(True)
 
         opt_py = CAME([param_py], lr=1e-4, weight_decay=0.01)
@@ -265,8 +286,7 @@ class TestCAMECKernelEquivalence:
 
             # Check after each step
             _assert_params_close(
-                param_py, param_cpp,
-                msg=f"Divergence at step {step + 1}"
+                param_py, param_cpp, msg=f"Divergence at step {step + 1}"
             )
 
 
@@ -288,7 +308,8 @@ class TestCAMECBatchedEquivalence:
 
         opt_s = CAME_C(
             [{"params": [p]} for p in params_s],
-            lr=1e-4, betas=(0.9, 0.999, 0.9999),
+            lr=1e-4,
+            betas=(0.9, 0.999, 0.9999),
         )
         opt_b = CAME_C(params_b, lr=1e-4, betas=(0.9, 0.999, 0.9999))
         return params_s, params_b, opt_s, opt_b
@@ -305,19 +326,29 @@ class TestCAMECBatchedEquivalence:
         """Compare params and states between single and batched paths."""
         for i, (ps, pb) in enumerate(zip(ps_list, pb_list)):
             torch.testing.assert_close(
-                ps.data.to(torch.float32), pb.data.to(torch.float32),
-                atol=atol, rtol=rtol,
+                ps.data.to(torch.float32),
+                pb.data.to(torch.float32),
+                atol=atol,
+                rtol=rtol,
                 msg=f"Param {i} mismatch",
             )
             # Compare states
             ss = opt_s.state[ps]
             sb = opt_b.state[pb]
-            for key in ("exp_avg", "exp_avg_sq_row", "exp_avg_sq_col",
-                        "exp_avg_res_row", "exp_avg_res_col", "exp_avg_sq"):
+            for key in (
+                "exp_avg",
+                "exp_avg_sq_row",
+                "exp_avg_sq_col",
+                "exp_avg_res_row",
+                "exp_avg_res_col",
+                "exp_avg_sq",
+            ):
                 if key in ss and key in sb:
                     torch.testing.assert_close(
-                        ss[key], sb[key],
-                        atol=atol, rtol=rtol,
+                        ss[key],
+                        sb[key],
+                        atol=atol,
+                        rtol=rtol,
                         msg=f"State[{key}] mismatch for param {i}",
                     )
 
@@ -390,10 +421,13 @@ class TestCAMECBatchedEquivalence:
         refs_s = {}
         refs_b = {}
         for shp in shapes:
-            refs_s[shp] = [torch.randn(*shp, device="cuda", dtype=torch.bfloat16,
-                                        requires_grad=True) for _ in range(4)]
-            refs_b[shp] = [p.detach().clone().requires_grad_(True)
-                           for p in refs_s[shp]]
+            refs_s[shp] = [
+                torch.randn(
+                    *shp, device="cuda", dtype=torch.bfloat16, requires_grad=True
+                )
+                for _ in range(4)
+            ]
+            refs_b[shp] = [p.detach().clone().requires_grad_(True) for p in refs_s[shp]]
 
         all_s = [p for shp in shapes for p in refs_s[shp]]
         all_b = [p for shp in shapes for p in refs_b[shp]]
@@ -453,7 +487,9 @@ class TestCAMECBatchedEquivalence:
     def test_batched_single_param_fallback(self):
         """Singleton shape group falls back to single-param path."""
         torch.manual_seed(42)
-        p_s = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        p_s = torch.randn(
+            32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
         p_b = p_s.detach().clone().requires_grad_(True)
 
         # Single group with 1 param → singleton → single-param path
@@ -468,8 +504,10 @@ class TestCAMECBatchedEquivalence:
         opt_b.step()
 
         torch.testing.assert_close(
-            p_s.data.to(torch.float32), p_b.data.to(torch.float32),
-            atol=1e-6, rtol=1e-5,
+            p_s.data.to(torch.float32),
+            p_b.data.to(torch.float32),
+            atol=1e-6,
+            rtol=1e-5,
         )
 
 

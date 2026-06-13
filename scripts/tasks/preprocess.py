@@ -122,6 +122,23 @@ def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
     return _min_pixels_args(), cleaned
 
 
+def _repa_pe_encoder() -> str | None:
+    """Read the ``use_repa`` / ``repa_encoder`` config keys.
+
+    Returns the encoder name (``"pe_spatial"``, ``"pe_core"``, …) when REPA is
+    enabled, or ``None`` when it is off.
+    """
+    from ._common import _path_overrides
+
+    overrides = _path_overrides()
+    raw = overrides.get("use_repa")
+    enabled = raw is True or str(raw).strip().lower() in ("1", "true", "yes")
+    if not enabled:
+        return None
+    encoder = str(overrides.get("repa_encoder") or "pe_spatial").strip()
+    return encoder or "pe_spatial"
+
+
 def cmd_preprocess_resize(extra):
     mp_args, extra = _resolve_lowres_filter(extra)
     bf_args = _bucket_families_args()
@@ -429,10 +446,10 @@ def cmd_caption_index(extra):
     )
 
 
-# Same default the build_caption_index.py CLI uses; the index step is skipped
-# (not fatal) when this vocab is absent. `make download-models` fetches it (via
-# `download-tagger`), so a fresh checkout that ran the standard download will
-# have it; only a partial/offline setup hits the skip path.
+# Same default the build_caption_index.py CLI uses. `cmd_preprocess` auto-fetches
+# this vocab on demand when it's absent (via `cmd_download_tagger`). A full
+# `make download-models` fetches it too, so a fresh checkout that ran the
+# standard download will already have it.
 _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 
@@ -656,6 +673,38 @@ def cmd_preprocess(extra):
             file=sys.stderr,
         )
         cmd_preprocess_subsets(extra, subsets=subsets)
+
+        # Caption-index auto-build (with tagger vocab auto-fetch)
+        vocab = _path("caption_index_vocab", _CAPTION_INDEX_VOCAB)
+        if not os.path.exists(vocab):
+            print("  [preprocess] tagger vocab missing; fetching it for caption-index")
+            try:
+                from .downloads import cmd_download_tagger
+
+                cmd_download_tagger([])
+            except (SystemExit, OSError) as e:
+                print(f"  [preprocess] tagger vocab auto-download failed: {e}")
+        if os.path.exists(vocab):
+            cmd_caption_index([])
+        else:
+            print(
+                f"  [preprocess] skipping caption-index: tagger vocab not found at "
+                f"{_CAPTION_INDEX_VOCAB} and auto-download failed. Run "
+                f"`make download-tagger`, then `make caption-index` "
+                f"(soft-tokens contrastive training needs it)."
+            )
+
+        # REPA PE auto-caching when use_repa=true in the config
+        encoder = _repa_pe_encoder()
+        if encoder is not None:
+            print(
+                f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})"
+            )
+            if encoder == "pe_spatial":
+                cmd_preprocess_pe_spatial([])
+            else:
+                cmd_preprocess_pe([])
+
         return
 
     print("  cmd_preprocess: no source data found, aborting", file=sys.stderr)
@@ -680,7 +729,7 @@ def cmd_preprocess_reconcile(extra):
             "--cache-dir",
             _path("lora_cache_dir", "post_image_dataset/lora"),
             "--mask-dir",
-            "post_image_dataset/masks",
+            _path("mask_dir", "post_image_dataset/masks"),
             *bf_args,
             *extra,
         ]

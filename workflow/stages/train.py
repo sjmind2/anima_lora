@@ -17,6 +17,8 @@ _NETWORK_MODULE_KWARGS = {
     "decompose_both",
     "use_tucker",
     "use_scalar",
+    "weight_decompose",
+    "full_matrix",
     "use_custom_down_autograd",
     "block_lr",
     "down_lr_weight",
@@ -37,6 +39,7 @@ _DATASET_KEYS = {
     "dataset_subsets",
     "general",
     "batch_size",
+    "keep_tokens",
 }
 
 _METADATA_KEYS = {
@@ -144,7 +147,6 @@ class TrainExecutor(StageBase):
         stop_epoch = resolved.get("stop_epoch")
         if stop_epoch is not None:
             resolved["max_train_epochs"] = int(stop_epoch)
-            resolved["save_every_n_epochs"] = int(stop_epoch)
 
         return resolved
 
@@ -154,6 +156,10 @@ class TrainExecutor(StageBase):
 
         toml_data: dict = {}
         general = dict(resolved_config.get("general", {}))
+        # Dataset-ascendable keys that belong in [general] rather than CLI args
+        keep_tokens = resolved_config.get("keep_tokens")
+        if keep_tokens is not None:
+            general["keep_tokens"] = int(keep_tokens)
         if general:
             toml_data["general"] = general
 
@@ -340,6 +346,8 @@ class TrainExecutor(StageBase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(Path(__file__).resolve().parents[2]),
             )
             self._current_proc = proc

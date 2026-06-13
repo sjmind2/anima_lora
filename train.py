@@ -8,6 +8,16 @@ import typing
 from typing import Any, Union, Optional
 import sys
 import random
+
+# Windows GBK terminal can't encode Unicode (→, σ, ↔, etc.) in argparse help.
+# Force UTF-8 on stdout/stderr so `--help` works everywhere.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import time
 from multiprocessing import Value
 
@@ -998,9 +1008,7 @@ class AnimaTrainer:
         # Re-apply with unsloth_offload if needed (after base has already enabled it).
         if self._use_unsloth_offload_checkpointing and args.gradient_checkpointing:
             gc_last_n = getattr(args, "gradient_checkpointing_last_n", 0)
-            unet.enable_gradient_checkpointing(
-                unsloth_offload=True, last_n=gc_last_n
-            )
+            unet.enable_gradient_checkpointing(unsloth_offload=True, last_n=gc_last_n)
 
         if not self.is_swapping_blocks:
             return accelerator.prepare(unet)
@@ -1711,13 +1719,9 @@ class AnimaTrainer:
             gc_last_n = getattr(args, "gradient_checkpointing_last_n", 0)
             gc_use_sac = bool(getattr(args, "gradient_checkpointing_sac", False))
             if args.cpu_offload_checkpointing:
-                unet.enable_gradient_checkpointing(
-                    cpu_offload=True, last_n=gc_last_n
-                )
+                unet.enable_gradient_checkpointing(cpu_offload=True, last_n=gc_last_n)
             else:
-                unet.enable_gradient_checkpointing(
-                    last_n=gc_last_n, use_sac=gc_use_sac
-                )
+                unet.enable_gradient_checkpointing(last_n=gc_last_n, use_sac=gc_use_sac)
 
             for t_enc, flag in zip(
                 text_encoders, self.get_text_encoders_train_flags(args, text_encoders)

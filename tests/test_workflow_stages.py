@@ -59,7 +59,9 @@ class TestTrainExecutor:
         executor = TrainExecutor("train_s1", config, stage_dir, infra)
         resolved_config = executor.prepare_config({})
         assert resolved_config["max_train_epochs"] == 6
-        assert resolved_config["save_every_n_epochs"] == 6
+        # stop_epoch only sets max_train_epochs; save_every_n_epochs
+        # preserves the user's value (or stays absent if not set).
+        assert "save_every_n_epochs" not in resolved_config
 
     def test_build_train_cmd_with_network_weights(self, tmp_path):
         config = {

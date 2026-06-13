@@ -82,6 +82,7 @@ class PreprocessExecutor(StageBase):
                 ):
                     if on_stdout:
                         from workflow.i18n import t
+
                         on_stdout(
                             self.stage_id,
                             t("backend.stages.sharedCacheHit", stage_id=self.stage_id),
@@ -90,15 +91,20 @@ class PreprocessExecutor(StageBase):
                 else:
                     if on_stdout:
                         from workflow.i18n import t
+
                         on_stdout(
                             self.stage_id,
-                            t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
+                            t(
+                                "backend.stages.sharedCacheMismatch",
+                                stage_id=self.stage_id,
+                            ),
                         )
                     self._invalidate_shared_cache(post_dir, hash_file)
                     return False
             else:
                 if on_stdout:
                     from workflow.i18n import t
+
                     on_stdout(
                         self.stage_id,
                         t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
@@ -108,6 +114,7 @@ class PreprocessExecutor(StageBase):
             # Cache data exists but no hash snapshot — incomplete run, invalidate
             if on_stdout:
                 from workflow.i18n import t
+
                 on_stdout(
                     self.stage_id,
                     t("backend.stages.sharedCacheMismatch", stage_id=self.stage_id),
@@ -228,7 +235,9 @@ class PreprocessExecutor(StageBase):
             resolved_config = self.prepare_config(stage_outputs or {})
 
             # Shared cache skip check
-            if use_shared and self._should_skip_shared_cache(resolved_config, on_stdout):
+            if use_shared and self._should_skip_shared_cache(
+                resolved_config, on_stdout
+            ):
                 subsets = self.discover_subsets()
                 dataset_dir = str(self.stage_dir / "post_image_dataset")
                 outputs: dict[str, Any] = {"dataset_dir": dataset_dir}
@@ -255,6 +264,8 @@ class PreprocessExecutor(StageBase):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     cwd=str(Path(__file__).resolve().parents[2]),
                 )
                 self._current_proc = proc

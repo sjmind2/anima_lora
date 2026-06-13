@@ -380,6 +380,25 @@ def _golden_path(name: str) -> Path:
 # off the canonical platform unless explicitly forced.
 _CANONICAL_PLATFORM = "linux"
 
+# Variants whose builders call ``torch.svd_lowrank`` (LAPACK) at construction
+# time. The decomposition is not bit-portable across BLAS backends (Windows MKL
+# vs Linux OpenBLAS diverge at ~1e-2 in bf16), so checked-in goldens written on
+# Linux cannot satisfy ``torch.equal`` on other platforms. These use
+# ``torch.allclose`` with a tolerance that accommodates the BLAS divergence
+# while still catching real refactors (~1e-2 bf16 noise vs meaningful changes).
+_SVD_INIT_VARIANTS = frozenset(
+    {
+        "ortho_init",
+        "ortho_init_channel_scale",
+        "ortho",
+        "ortho_channel_scale",
+        "ortho_hydra",
+        "chimera_frozen",
+        "chimera_ortho_init",
+        "stacked_ortho",
+    }
+)
+
 
 def _write_goldens():
     if sys.platform != _CANONICAL_PLATFORM and "--force-platform" not in sys.argv:
@@ -410,10 +429,16 @@ def test_module_forward_matches_golden(name):
         got = captured[key]
         assert got.shape == ref.shape, f"{name}/{key}: shape {got.shape} != {ref.shape}"
         assert got.dtype == ref.dtype, f"{name}/{key}: dtype {got.dtype} != {ref.dtype}"
-        assert torch.equal(got, ref), (
-            f"{name}/{key}: forward/backward diverged from golden "
-            f"(max abs diff {(got.float() - ref.float()).abs().max().item():.3e})"
-        )
+        if name in _SVD_INIT_VARIANTS:
+            assert torch.allclose(got, ref, atol=1e-2, rtol=1e-2), (
+                f"{name}/{key}: forward/backward diverged from golden "
+                f"(max abs diff {(got.float() - ref.float()).abs().max().item():.3e})"
+            )
+        else:
+            assert torch.equal(got, ref), (
+                f"{name}/{key}: forward/backward diverged from golden "
+                f"(max abs diff {(got.float() - ref.float()).abs().max().item():.3e})"
+            )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,9 @@ resolutions (one ``latents_{H}x{W}`` key each), so the skip is per-resolution
 
 from __future__ import annotations
 
+import os
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -48,99 +51,167 @@ def get_latents_npz_path(
     )
 
 
-def _cache_latents_tree(
+def _decode_batch(
+    batch_paths: list[Path],
+    w: int,
+    h: int,
+    cache_dir: Path | None,
     data_dir: Path,
+) -> tuple[
+    list[Path],
+    list[tuple[Path, str]],
+    list[tuple[Path, tuple[int, int]]],
+    "torch.Tensor | None",
+]:
+    """CPU stage: per-resolution skip-probe + decode + transform a batch.
+
+    Returns ``(skipped, failed, kept, img_batch)`` — already-cached paths,
+    ``(path, reason)`` for images that wouldn't decode (truncated / corrupt),
+    the ``(path, (w, h))`` survivors, and their stacked CPU tensor (``None`` if
+    nothing survived). A bad file is isolated to its own entry rather than
+    raising, so one corrupt staged PNG can't abort the whole run. Runs on a
+    worker thread (pure PIL/numpy/torch-CPU), overlapping the previous GPU encode.
+    """
+    skipped: list[Path] = []
+    failed: list[tuple[Path, str]] = []
+    kept: list[tuple[Path, tuple[int, int]]] = []
+    tensors: list[torch.Tensor] = []
+    for p in batch_paths:
+        npz_path = get_latents_npz_path(
+            p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+        )
+        if npz_path.exists():
+            latents_size = (h // 8, w // 8)
+            key = f"latents_{latents_size[0]}x{latents_size[1]}"
+            try:
+                if key in np.load(npz_path):
+                    skipped.append(p)
+                    continue
+            except Exception:
+                pass
+        try:
+            img_np = np.array(Image.open(p).convert("RGB"))
+        except Exception as e:
+            failed.append((p, f"{type(e).__name__}: {e}"))
+            continue
+        tensors.append(IMAGE_TRANSFORMS(img_np))
+        kept.append((p, (w, h)))
+    img_batch = torch.stack(tensors, dim=0) if tensors else None
+    return skipped, failed, kept, img_batch
+
+
+def _save_batch(items: list[tuple[Path, np.ndarray, tuple[int, int]]]) -> None:
+    """IO stage: write each ``(npz_path, latent, size)``. Preserves any
+    other-resolution keys already in the file (read-modify-write). Each npz_path
+    is written exactly once per ``cache_latents`` call, so threaded saves of a
+    batch don't race. Runs on a worker thread, overlapping the next GPU encode.
+    """
+    for npz_path, lat_np, size in items:
+        key_reso_suffix = f"_{lat_np.shape[-2]}x{lat_np.shape[-1]}"
+        kwargs: dict = {}
+        if npz_path.exists():
+            npz = np.load(npz_path)
+            for key in npz.files:
+                kwargs[key] = npz[key]
+        kwargs[f"latents{key_reso_suffix}"] = lat_np
+        kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
+        kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array([0, 0, size[0], size[1]])
+        np.savez(npz_path, **kwargs)
+
+
+def _run_threaded_pipeline(
+    image_files: list[Path],
     vae,
     *,
+    cache_dir: Path | None = None,
+    data_dir: Path,
     batch_size: int = 4,
     progress: ProgressFn | None = None,
+    io_workers: int | None = None,
 ) -> PreprocessStats:
-    bases: list[Path] = []
-    for d in sorted(data_dir.iterdir()):
-        if d.is_dir() and not d.name.startswith(".") and (d / ".resized").is_dir():
-            bases.append(d)
+    """Threaded decode→encode→save pipeline shared by tree and non-tree modes.
 
-    if (data_dir / ".resized").is_dir():
-        bases.append(data_dir)
-
-    subset_info: list[tuple[Path, Path, list[Path]]] = []
-    all_images: list[Path] = []
-    for base in bases:
-        resized_dir = base / ".resized"
-        lora_dir = base / ".lora"
-        images = walk_images(resized_dir, recursive=False)
-        subset_info.append((resized_dir, lora_dir, images))
-        all_images.extend(images)
-
-    stats = PreprocessStats(seen=len(all_images))
+    The VAE forward stays serial on the calling thread (single GPU stream); the
+    per-batch disk decode + image transform and the npz read-modify-write are
+    CPU/IO, so they're farmed to thread pools that overlap the GPU. Output is
+    byte-identical to the serial path.
+    """
+    reso_groups = group_by_shape(image_files)
+    stats = PreprocessStats(seen=len(image_files))
 
     if progress is not None:
-        progress(0, total=len(all_images))
+        progress(0, total=len(image_files))
 
-    for resized_dir, lora_dir, image_files in subset_info:
-        reso_groups = group_by_shape(image_files)
+    batches: list[tuple[int, int, list[Path]]] = []
+    for (w, h), paths in reso_groups.items():
+        for s in range(0, len(paths), batch_size):
+            batches.append((w, h, paths[s : s + batch_size]))
 
-        for (w, h), paths in reso_groups.items():
-            for batch_start in range(0, len(paths), batch_size):
-                batch_paths = paths[batch_start : batch_start + batch_size]
-                tensors = []
+    workers = io_workers or min(8, (os.cpu_count() or 4))
+    depth = max(2, workers // 2)
+    max_saves = max(2, workers)
+    it = iter(batches)
+    decode_q: deque = deque()
+    save_q: deque = deque()
+    failed_all: list[tuple[Path, str]] = []
 
-                for p in batch_paths:
-                    npz_path = get_latents_npz_path(
-                        p, (w, h), cache_dir=lora_dir, image_dir=resized_dir
-                    )
-                    if npz_path.exists():
-                        latents_size = (h // 8, w // 8)
-                        key = f"latents_{latents_size[0]}x{latents_size[1]}"
-                        try:
-                            npz = np.load(npz_path)
-                            if key in npz:
-                                stats.skipped += 1
-                                if progress is not None:
-                                    progress(1, detail=f"skip {p.name}")
-                                continue
-                        except Exception:
-                            pass
+    def _submit_decode(decode_ex) -> bool:
+        b = next(it, None)
+        if b is None:
+            return False
+        w, h, bp = b
+        decode_q.append(decode_ex.submit(_decode_batch, bp, w, h, cache_dir, data_dir))
+        return True
 
-                    img = Image.open(p).convert("RGB")
-                    img_np = np.array(img)
-                    img_tensor = IMAGE_TRANSFORMS(img_np)
-                    tensors.append((p, img_tensor, (w, h)))
+    with (
+        ThreadPoolExecutor(max_workers=workers) as decode_ex,
+        ThreadPoolExecutor(max_workers=workers) as save_ex,
+    ):
+        for _ in range(depth):
+            if not _submit_decode(decode_ex):
+                break
+        while decode_q:
+            skipped, failed, kept, img_batch = decode_q.popleft().result()
+            _submit_decode(decode_ex)
 
-                if not tensors:
-                    continue
+            for p in skipped:
+                stats.skipped += 1
+                if progress is not None:
+                    progress(1, detail=f"skip {p.name}")
+            for p, reason in failed:
+                failed_all.append((p, reason))
+                if progress is not None:
+                    progress(1, detail=f"FAILED {p.name}")
+            if img_batch is None:
+                continue
 
-                img_batch = torch.stack([t[1] for t in tensors], dim=0)
-                img_batch = img_batch.to(device=vae.device, dtype=vae.dtype)
+            img_batch = img_batch.to(device=vae.device, dtype=vae.dtype)
+            with torch.no_grad():
+                latents = vae.encode_pixels_to_latents(img_batch).cpu()
 
-                with torch.no_grad():
-                    latents = vae.encode_pixels_to_latents(img_batch).cpu()
+            items: list[tuple[Path, np.ndarray, tuple[int, int]]] = []
+            for i, (p, size) in enumerate(kept):
+                npz_path = get_latents_npz_path(
+                    p, size, cache_dir=cache_dir, image_dir=data_dir
+                )
+                items.append((npz_path, latents[i].float().numpy(), size))
+                stats.written += 1
+                if progress is not None:
+                    progress(1, detail=f"{p.name} → {size[0]}x{size[1]}")
+            save_q.append(save_ex.submit(_save_batch, items))
 
-                for i, (p, _, size) in enumerate(tensors):
-                    lat = latents[i]
-                    latents_size = lat.shape[-2:]
-                    key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}"
+            while len(save_q) >= max_saves:
+                save_q.popleft().result()
+        for f in save_q:
+            f.result()
 
-                    npz_path = get_latents_npz_path(
-                        p, size, cache_dir=lora_dir, image_dir=resized_dir
-                    )
-                    kwargs = {}
-                    if npz_path.exists():
-                        npz = np.load(npz_path)
-                        for key in npz.files:
-                            kwargs[key] = npz[key]
-
-                    kwargs[f"latents{key_reso_suffix}"] = lat.float().numpy()
-                    kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
-                    kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array(
-                        [0, 0, size[0], size[1]]
-                    )
-
-                    np.savez(npz_path, **kwargs)
-
-                    stats.written += 1
-                    if progress is not None:
-                        progress(1, detail=f"{p.name} → {size[0]}x{size[1]}")
+    if failed_all:
+        print(
+            f"\n⚠ {len(failed_all)} image(s) could not be decoded and were skipped "
+            f"(no latent cached — re-stage these, e.g. delete + re-run mangafy):"
+        )
+        for p, reason in failed_all:
+            print(f"  {p}  ({reason})")
 
     return stats
 
@@ -154,6 +225,7 @@ def cache_latents(
     tree: bool = False,
     batch_size: int = 4,
     progress: ProgressFn | None = None,
+    io_workers: int | None = None,
 ) -> PreprocessStats:
     """Encode every image under ``data_dir`` through ``vae`` → latent NPZs.
 
@@ -164,79 +236,48 @@ def cache_latents(
     contains a ``.resized/`` folder is treated as an independent subset.
     Latents are written to a sibling ``.lora/`` folder inside the same
     subdirectory.  A root-level ``.resized/`` is also processed the same way.
+
+    The VAE forward stays serial (single GPU stream); per-batch disk decode +
+    image transform and npz read-modify-write run on thread pools that overlap
+    the GPU.
     """
     if tree:
-        return _cache_latents_tree(
-            data_dir, vae, batch_size=batch_size, progress=progress
-        )
+        bases: list[Path] = []
+        for d in sorted(data_dir.iterdir()):
+            if d.is_dir() and not d.name.startswith(".") and (d / ".resized").is_dir():
+                bases.append(d)
+
+        if (data_dir / ".resized").is_dir():
+            bases.append(data_dir)
+
+        total_stats = PreprocessStats()
+        for base in bases:
+            resized_dir = base / ".resized"
+            lora_dir = base / ".lora"
+            images = walk_images(resized_dir, recursive=False)
+            subset_stats = _run_threaded_pipeline(
+                images,
+                vae,
+                cache_dir=lora_dir,
+                data_dir=resized_dir,
+                batch_size=batch_size,
+                progress=progress,
+                io_workers=io_workers,
+            )
+            total_stats.seen += subset_stats.seen
+            total_stats.written += subset_stats.written
+            total_stats.skipped += subset_stats.skipped
+            total_stats.failed += subset_stats.failed
+
+        return total_stats
 
     image_files = walk_images(data_dir, recursive=recursive)
-    reso_groups = group_by_shape(image_files)
-    stats = PreprocessStats(seen=len(image_files))
-
-    if progress is not None:
-        progress(0, total=len(image_files))
-
-    for (w, h), paths in reso_groups.items():
-        for batch_start in range(0, len(paths), batch_size):
-            batch_paths = paths[batch_start : batch_start + batch_size]
-            tensors = []
-
-            for p in batch_paths:
-                npz_path = get_latents_npz_path(
-                    p, (w, h), cache_dir=cache_dir, image_dir=data_dir
-                )
-                if npz_path.exists():
-                    latents_size = (h // 8, w // 8)
-                    key = f"latents_{latents_size[0]}x{latents_size[1]}"
-                    try:
-                        npz = np.load(npz_path)
-                        if key in npz:
-                            stats.skipped += 1
-                            if progress is not None:
-                                progress(1, detail=f"skip {p.name}")
-                            continue
-                    except Exception:
-                        pass
-
-                img = Image.open(p).convert("RGB")
-                img_np = np.array(img)
-                img_tensor = IMAGE_TRANSFORMS(img_np)
-                tensors.append((p, img_tensor, (w, h)))
-
-            if not tensors:
-                continue
-
-            img_batch = torch.stack([t[1] for t in tensors], dim=0)
-            img_batch = img_batch.to(device=vae.device, dtype=vae.dtype)
-
-            with torch.no_grad():
-                latents = vae.encode_pixels_to_latents(img_batch).cpu()
-
-            for i, (p, _, size) in enumerate(tensors):
-                lat = latents[i]  # (16, H/8, W/8)
-                latents_size = lat.shape[-2:]  # H/8, W/8
-                key_reso_suffix = f"_{latents_size[0]}x{latents_size[1]}"
-
-                npz_path = get_latents_npz_path(
-                    p, size, cache_dir=cache_dir, image_dir=data_dir
-                )
-                kwargs = {}
-                if npz_path.exists():
-                    npz = np.load(npz_path)
-                    for key in npz.files:
-                        kwargs[key] = npz[key]
-
-                kwargs[f"latents{key_reso_suffix}"] = lat.float().numpy()
-                kwargs[f"original_size{key_reso_suffix}"] = np.array(list(size))
-                kwargs[f"crop_ltrb{key_reso_suffix}"] = np.array(
-                    [0, 0, size[0], size[1]]
-                )
-
-                np.savez(npz_path, **kwargs)
-
-                stats.written += 1
-                if progress is not None:
-                    progress(1, detail=f"{p.name} → {size[0]}x{size[1]}")
-
-    return stats
+    return _run_threaded_pipeline(
+        image_files,
+        vae,
+        cache_dir=cache_dir,
+        data_dir=data_dir,
+        batch_size=batch_size,
+        progress=progress,
+        io_workers=io_workers,
+    )

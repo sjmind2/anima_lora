@@ -33,12 +33,17 @@ from library.training.came_optimizer import CAME  # Python reference
 
 try:
     from library.training.came_cpp_extension import CAME_C  # C++ version
+    from library.training.came_cpp_extension import (
+        _EXTENSION_AVAILABLE as _CAME_C_EXT_OK,
+    )
+
     _CAME_C_AVAILABLE = True
 except Exception:
     _CAME_C_AVAILABLE = False
+    _CAME_C_EXT_OK = False
 
 _CAME_C_SKIP = pytest.mark.skipif(
-    not _CAME_C_AVAILABLE,
+    not (_CAME_C_AVAILABLE and _CAME_C_EXT_OK),
     reason="CAME_C extension not available",
 )
 
@@ -52,6 +57,7 @@ _CUDA_SKIP = pytest.mark.skipif(
 # Synthetic model
 # ---------------------------------------------------------------------------
 
+
 class SyntheticLoRA(nn.Module):
     """Minimal model that mimics a LoRA adapter.
 
@@ -62,7 +68,9 @@ class SyntheticLoRA(nn.Module):
     def __init__(self, dim: int = 256, rank: int = 16):
         super().__init__()
         self.lora_A = nn.Linear(dim, rank, bias=False)  # weight shape: (rank, dim)
-        self.lora_B = nn.Linear(rank, dim, bias=True)   # weight shape: (dim, rank), bias: (dim,)
+        self.lora_B = nn.Linear(
+            rank, dim, bias=True
+        )  # weight shape: (dim, rank), bias: (dim,)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.lora_B(self.lora_A(x))
@@ -160,6 +168,7 @@ def _collect_optimizer_states(optimizer, model):
 # Test class
 # ---------------------------------------------------------------------------
 
+
 class TestCAMECE2ETraining:
     """End-to-end training simulation: CAME vs CAME_C."""
 
@@ -188,7 +197,10 @@ class TestCAMECE2ETraining:
         ):
             assert n1 == n2
             torch.testing.assert_close(
-                p1.data, p2.data, atol=1e-6, rtol=1e-5,
+                p1.data,
+                p2.data,
+                atol=1e-6,
+                rtol=1e-5,
                 msg=f"Parameter {n1} diverged after 1 step",
             )
 
@@ -211,11 +223,13 @@ class TestCAMECE2ETraining:
             rel_error = abs(lp - lc) / denom
             max_rel_error = max(max_rel_error, rel_error)
             assert rel_error < 0.01, (
-                f"Loss diverged at step {i+1}: Python={lp:.8f}, C++={lc:.8f}, "
+                f"Loss diverged at step {i + 1}: Python={lp:.8f}, C++={lc:.8f}, "
                 f"rel_error={rel_error:.6f} (max 1%)"
             )
 
-        print(f"\n  [multi-step] {n_steps} steps, max relative loss error: {max_rel_error:.2e}")
+        print(
+            f"\n  [multi-step] {n_steps} steps, max relative loss error: {max_rel_error:.2e}"
+        )
 
         # Also verify final parameter values match
         for (n1, p1), (n2, p2) in zip(
@@ -224,7 +238,10 @@ class TestCAMECE2ETraining:
             assert n1 == n2
             # Slightly looser tolerance after 50 steps (accumulated fp differences)
             torch.testing.assert_close(
-                p1.data, p2.data, atol=1e-5, rtol=1e-3,
+                p1.data,
+                p2.data,
+                atol=1e-5,
+                rtol=1e-3,
                 msg=f"Parameter {n1} diverged after {n_steps} steps",
             )
 
@@ -254,7 +271,9 @@ class TestCAMECE2ETraining:
                 val_py = state_py[key]
                 val_cpp = state_cpp[key]
 
-                if isinstance(val_py, torch.Tensor) and isinstance(val_cpp, torch.Tensor):
+                if isinstance(val_py, torch.Tensor) and isinstance(
+                    val_cpp, torch.Tensor
+                ):
                     # exp_avg accumulates reassociation differences from
                     # torch.compile fusion in Python CAME; use a looser
                     # tolerance.  Factored second-moment states (sq_row/col,
@@ -264,8 +283,10 @@ class TestCAMECE2ETraining:
                     else:
                         atol, rtol = 1e-5, 1e-3
                     torch.testing.assert_close(
-                        val_py.float(), val_cpp.float(),
-                        atol=atol, rtol=rtol,
+                        val_py.float(),
+                        val_cpp.float(),
+                        atol=atol,
+                        rtol=rtol,
                         msg=f"State '{key}' for {param_name} differs",
                     )
                 else:
@@ -274,7 +295,9 @@ class TestCAMECE2ETraining:
                         f"State '{key}' for {param_name}: Python={val_py}, C++={val_cpp}"
                     )
 
-        print(f"\n  [state-check] All optimizer states consistent after {n_steps} steps")
+        print(
+            f"\n  [state-check] All optimizer states consistent after {n_steps} steps"
+        )
 
     @_CAME_C_SKIP
     @_CUDA_SKIP
@@ -317,7 +340,7 @@ class TestCAMECE2ETraining:
         print(f"  CAME_C (C++)   : {time_cpp * 1000:8.1f} ms  ({n_benchmark} steps)")
         print(f"  Ratio (C++/Python): {ratio:.3f}x")
         if ratio < 1.0:
-            print(f"  CAME_C is {1/ratio:.2f}x FASTER than CAME")
+            print(f"  CAME_C is {1 / ratio:.2f}x FASTER than CAME")
         else:
             print(f"  CAME_C is {ratio:.2f}x slower than CAME")
         print("  ------------------------------------------------------\n")
@@ -325,7 +348,7 @@ class TestCAMECE2ETraining:
         # CAME_C should not be more than 2x slower
         assert ratio < 2.0, (
             f"CAME_C is {ratio:.2f}x slower than CAME (threshold: 2x). "
-            f"Python: {time_py*1000:.1f}ms, C++: {time_cpp*1000:.1f}ms"
+            f"Python: {time_py * 1000:.1f}ms, C++: {time_cpp * 1000:.1f}ms"
         )
 
 

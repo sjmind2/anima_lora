@@ -94,6 +94,7 @@ compute_fei_nband_high_to_low = _rc.compute_fei_nband_high_to_low
 fei_sigma_low = _rc.fei_sigma_low
 sigma_sinusoidal_features = _rc.sigma_sinusoidal_features
 apply_sigma_band_mask = _rc.apply_sigma_band_mask
+fei_temperature = _rc.fei_temperature
 
 
 def _resolve_module(model, dotted_path: str):

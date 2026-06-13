@@ -99,6 +99,15 @@ def main() -> None:
             "resizing each into its own .resized/ directory."
         ),
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Re-resize all images even if an existing output PNG is already at "
+            "the correct bucket size. Without this flag, already-correct outputs "
+            "are skipped for idempotent re-runs."
+        ),
+    )
     args = parser.parse_args()
 
     constant_token_buckets = (
@@ -107,7 +116,9 @@ def main() -> None:
 
     enabled_families = None
     if args.bucket_families:
-        enabled_families = [f.strip() for f in args.bucket_families.split(",") if f.strip()]
+        enabled_families = [
+            f.strip() for f in args.bucket_families.split(",") if f.strip()
+        ]
 
     resize_to_buckets(
         Path(args.src),
@@ -123,6 +134,7 @@ def main() -> None:
         copy_captions=not args.no_copy_captions,
         recursive=args.recursive,
         tree=args.tree,
+        overwrite=args.overwrite,
         progress=tqdm_progress("Resizing"),
     )
 

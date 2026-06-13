@@ -125,7 +125,7 @@ class TestResizeTreeMode:
 
 class TestCacheLatentsTreeMode:
     def test_tree_discovers_subsets_with_resized_dirs(self, tmp_path: Path) -> None:
-        from library.preprocess.latents import _cache_latents_tree
+        from library.preprocess.latents import cache_latents
 
         data_dir = tmp_path / "data"
         _write_image(data_dir / "4_a" / ".resized" / "img.png", BIG)
@@ -144,14 +144,14 @@ class TestCacheLatentsTreeMode:
                 return torch.randn(c, 16, h // 8, w // 8)
 
         vae = _FakeVAE()
-        stats = _cache_latents_tree(data_dir, vae, batch_size=4)
+        stats = cache_latents(data_dir, vae, tree=True, batch_size=4)
 
         assert stats.seen == 1
         assert stats.written == 1
         assert (data_dir / "4_a" / ".lora").is_dir()
 
     def test_tree_skips_dirs_without_resized(self, tmp_path: Path) -> None:
-        from library.preprocess.latents import _cache_latents_tree
+        from library.preprocess.latents import cache_latents
 
         data_dir = tmp_path / "data"
         _write_image(data_dir / "4_a" / ".resized" / "img.png", BIG)
@@ -169,13 +169,13 @@ class TestCacheLatentsTreeMode:
                 return torch.randn(c, 16, h // 8, w // 8)
 
         vae = _FakeVAE()
-        stats = _cache_latents_tree(data_dir, vae, batch_size=4)
+        stats = cache_latents(data_dir, vae, tree=True, batch_size=4)
 
         assert stats.seen == 1
         assert not (data_dir / "4_b" / ".lora").is_dir()
 
     def test_tree_processes_root_resized(self, tmp_path: Path) -> None:
-        from library.preprocess.latents import _cache_latents_tree
+        from library.preprocess.latents import cache_latents
 
         data_dir = tmp_path / "data"
         _write_image(data_dir / ".resized" / "root.png", BIG)
@@ -192,14 +192,14 @@ class TestCacheLatentsTreeMode:
                 return torch.randn(c, 16, h // 8, w // 8)
 
         vae = _FakeVAE()
-        stats = _cache_latents_tree(data_dir, vae, batch_size=4)
+        stats = cache_latents(data_dir, vae, tree=True, batch_size=4)
 
         assert stats.seen == 1
         assert stats.written == 1
         assert (data_dir / ".lora").is_dir()
 
     def test_tree_empty_returns_zero_stats(self, tmp_path: Path) -> None:
-        from library.preprocess.latents import _cache_latents_tree
+        from library.preprocess.latents import cache_latents
 
         data_dir = tmp_path / "data"
         data_dir.mkdir(parents=True)
@@ -214,7 +214,7 @@ class TestCacheLatentsTreeMode:
                 return torch.zeros(1)
 
         vae = _FakeVAE()
-        stats = _cache_latents_tree(data_dir, vae, batch_size=4)
+        stats = cache_latents(data_dir, vae, tree=True, batch_size=4)
 
         assert stats.seen == 0
         assert stats.written == 0

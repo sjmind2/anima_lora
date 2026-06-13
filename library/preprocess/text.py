@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -24,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 def generate_caption_variants(
-    caption: str, num_variants: int, tag_dropout_rate: float
+    caption: str,
+    num_variants: int,
+    tag_dropout_rate: float,
+    protect_fn: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Generate ``num_variants`` caption variants for stochastic train-time sampling.
 
@@ -33,6 +37,11 @@ def generate_caption_variants(
     is independently dropped with probability ``tag_dropout_rate``. The
     ``@no-artist`` sentinel participates in the boundary but is stripped from
     every variant (including v0) before it is written.
+
+    ``protect_fn`` (when given) marks tags that must survive tag-dropout: a tag
+    for which it returns True is always kept even past the @artist prefix. It is
+    still subject to shuffling — only the dropout is suppressed. Used by the
+    colorize prep to keep copyright tags present in every partial-color variant.
     """
     from library.anima import training as anima_train_utils
 
@@ -54,7 +63,9 @@ def generate_caption_variants(
         if tag_dropout_rate > 0.0 and len(shuffled) > split_idx:
             kept = list(shuffled[:split_idx])
             for tag in shuffled[split_idx:]:
-                if random.random() >= tag_dropout_rate:
+                if (protect_fn is not None and protect_fn(tag)) or (
+                    random.random() >= tag_dropout_rate
+                ):
                     kept.append(tag)
             if not kept:
                 kept = shuffled[:1]

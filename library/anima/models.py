@@ -1648,6 +1648,9 @@ class Anima(nn.Module):
         mode: Optional[str] = None,
         bucket_list=None,
         use_sac: bool = False,
+        n_token_families: Optional[int] = None,
+        dynamic_seq: bool = False,
+        seq_range: Optional[tuple] = None,
     ):
         """Enable native-shape flattening and torch.compile each block.
 
@@ -1690,6 +1693,16 @@ class Anima(nn.Module):
 
         ``bucket_list`` overrides the bucket resolution list used for counting
         token-count families. When ``None``, falls back to ``CONSTANT_TOKEN_BUCKETS``.
+
+        ``n_token_families`` overrides the number of distinct token-count families
+        used for sizing the dynamo cache budget. When ``None``, it is derived from
+        the bucket list (the number of unique ``(W//patch) * (H//patch)`` values).
+
+        ``dynamic_seq`` collapses the per-token-count block graphs to a single
+        graph by marking only the seq-length axis dynamic (via
+        ``_make_dynamic_seq_forward``). When True, ``seq_range`` bounds that
+        symbolic axis as ``(min_tokens, max_tokens)``; both default to the
+        canonical table's own min/max when ``None``.
         """
         self._native_flatten = True
 
@@ -1700,15 +1713,34 @@ class Anima(nn.Module):
         import torch._dynamo as _dynamo
 
         buckets = bucket_list if bucket_list is not None else CONSTANT_TOKEN_BUCKETS
-        n = len(
-            {
-                (h // self.patch_spatial) * (w // self.patch_spatial)
-                for h, w in buckets
-            }
-        )
+
+        # Derive n_token_families from bucket list if not explicitly provided.
+        if n_token_families is not None:
+            n = n_token_families
+        else:
+            n = len(
+                {
+                    (h // self.patch_spatial) * (w // self.patch_spatial)
+                    for h, w in buckets
+                }
+            )
+
         _dynamo.config.cache_size_limit = max(
             _dynamo.config.cache_size_limit, 2 * n + 8
         )
+
+        # Dynamic-seq compile: set model attributes and derive seq bounds.
+        if dynamic_seq:
+            self._dynamic_seq = True
+            if seq_range is not None:
+                self._dynamic_seq_range = seq_range
+            else:
+                # Derive from bucket list — min and max token counts.
+                token_counts = sorted(
+                    (h // self.patch_spatial) * (w // self.patch_spatial)
+                    for h, w in buckets
+                )
+                self._dynamic_seq_range = (token_counts[0], token_counts[-1])
 
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
@@ -1719,14 +1751,24 @@ class Anima(nn.Module):
         # Otherwise, compile `_forward` (required for unsloth compatibility).
         compile_attr = "forward" if use_sac else "_forward"
         for block in self.blocks:
-            setattr(
-                block, compile_attr, torch.compile(getattr(block, compile_attr), **compile_kwargs)
+            compiled_fn = torch.compile(
+                getattr(block, compile_attr), **compile_kwargs
             )
+            if dynamic_seq:
+                lo, hi = self._dynamic_seq_range
+                compiled_fn = _make_dynamic_seq_forward(compiled_fn, lo, hi)
+            setattr(block, compile_attr, compiled_fn)
+
+        seq_info = (
+            f", dynamic_seq range={self._dynamic_seq_range}"
+            if dynamic_seq
+            else ""
+        )
         print(
             f"Anima: native_flatten on, {n} token-count families "
             f"(cache_size_limit={_dynamo.config.cache_size_limit}); compiled "
             f"{len(self.blocks)} block.{compile_attr} with backend={backend}, "
-            f"mode={mode}, use_sac={use_sac}"
+            f"mode={mode}, use_sac={use_sac}{seq_info}"
         )
 
     @property

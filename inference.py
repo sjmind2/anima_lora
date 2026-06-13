@@ -5,7 +5,16 @@ import copy
 import gc
 import os
 import random
+import sys
 from typing import List, Dict, Any
+
+# Windows GBK terminal can't encode Unicode (→, σ, ↔, etc.) in argparse help.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 from library.runtime.proc import install_no_window_default
 
