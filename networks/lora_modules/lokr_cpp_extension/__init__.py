@@ -74,64 +74,139 @@ except Exception as e:
 
 
 # ============================================================================
-# CUDA-accelerated autograd Functions
+# Compile-compatible CUDA kernels via torch.library.custom_op
 # ============================================================================
+#
+# The previous torch.autograd.Function approach forced lokr.py to check
+# torch.compiler.is_compiling() and fall back to slow PyTorch einsum inside
+# compiled graphs — because Dynamo cannot trace through the opaque C++ calls
+# in a Function's forward/backward.
+#
+# custom_op + register_fake + register_autograd solves this: Dynamo sees the
+# op as a single opaque node (shape-only via register_fake), and the CUDA
+# kernel runs in both eager and compiled contexts — including inside
+# torch.utils.checkpoint recomputation during gradient checkpointing.
 
 if _LOKR_KERNEL_AVAILABLE:
 
-    class KronLinearFnCUDA(torch.autograd.Function):
-        """Fused single-stage Kronecker forward/backward (CUDA kernel).
+    # ---- kron1: single-stage (w1 full, w2 full or factored) ---------------
+    #
+    # scalar is deliberately excluded from the custom op: the CUDA kernel
+    # receives 1.0 and the scalar multiply is done outside the op
+    # (`kron1_fwd(...) * scalar`) so autograd handles the scalar gradient.
+    # This avoids float(tensor) during AOTAutograd tracing (which triggers
+    # GuardOnDataDependentSymNode).
 
-        Replaces ~8 forward + ~15 backward kernel launches with 1 + 2.
-        Mathematically identical to the pure-PyTorch KronLinearFn.
-        """
+    @torch.library.custom_op("lokr::kron1_fwd", mutates_args=())
+    def kron1_fwd(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
+        x = x.contiguous()
+        return lokr_cpp.kron1_forward(x, w1, w2, 1.0)
 
-        @staticmethod
-        def forward(ctx, x, w1, w2, scalar):
-            assert x.is_contiguous(), "x must be contiguous"
-            out = lokr_cpp.kron1_forward(x, w1, w2, float(scalar))
-            ctx.save_for_backward(x, w1, w2)
-            ctx.scalar = float(scalar)
-            return out
+    @kron1_fwd.register_fake
+    def _kron1_fwd_fake(x, w1, w2):
+        return torch.empty(
+            (*x.shape[:-1], w1.shape[0] * w2.shape[0]),
+            dtype=x.dtype, device=x.device,
+        )
 
-        @staticmethod
-        def backward(ctx, grad_out):
-            x, w1, w2 = ctx.saved_tensors
-            grad_out = grad_out.contiguous()
-            grad_x, grad_w1, grad_w2, grad_scalar = lokr_cpp.kron1_backward(
-                grad_out, x, w1, w2, ctx.scalar
+    def _kron1_bwd(ctx, grad_out):
+        x, w1, w2 = ctx.saved_tensors
+        grad_out = grad_out.contiguous()
+        grad_x, grad_w1, grad_w2, _ = lokr_cpp.kron1_backward(
+            grad_out, x, w1, w2, 1.0
+        )
+        return grad_x, grad_w1, grad_w2
+
+    def _kron1_setup(ctx, inputs, output):
+        x, w1, w2 = inputs
+        ctx.save_for_backward(x, w1, w2)
+
+    torch.library.register_autograd(
+        "lokr::kron1_fwd", _kron1_bwd, setup_context=_kron1_setup,
+    )
+
+    # ---- kron2: two-stage (decompose_both, w1 and w2 factored) ------------
+    #
+    # kron2's C++ backward uses raw data_ptr access (CUDA kernel launches),
+    # which make_fx cannot trace. We register it as its own custom_op so
+    # AOTAutograd treats it as an opaque node in the backward graph.
+
+    @torch.library.custom_op("lokr::kron2_fwd", mutates_args=())
+    def kron2_fwd(
+        x: torch.Tensor, w1_a: torch.Tensor, w1_b: torch.Tensor,
+        w2_a: torch.Tensor, w2_b: torch.Tensor,
+    ) -> torch.Tensor:
+        x = x.contiguous()
+        out, _temp1 = lokr_cpp.kron2_forward(x, w1_a, w1_b, w2_a, w2_b, 1.0)
+        return out
+
+    @kron2_fwd.register_fake
+    def _kron2_fwd_fake(x, w1_a, w1_b, w2_a, w2_b):
+        return torch.empty(
+            (*x.shape[:-1], w1_a.shape[0] * w2_a.shape[0]),
+            dtype=x.dtype, device=x.device,
+        )
+
+    @torch.library.custom_op("lokr::kron2_bwd_op", mutates_args=())
+    def kron2_bwd_op(
+        grad_out: torch.Tensor, temp1: torch.Tensor,
+        x: torch.Tensor, w1_a: torch.Tensor, w1_b: torch.Tensor,
+        w2_a: torch.Tensor, w2_b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        grad_x, grad_w1a, grad_w1b, grad_w2a, grad_w2b, _ = (
+            lokr_cpp.kron2_backward(
+                grad_out, temp1.contiguous(), x, w1_a, w1_b, w2_a, w2_b, 1.0
             )
-            return grad_x, grad_w1, grad_w2, grad_scalar
+        )
+        return grad_x, grad_w1a, grad_w1b, grad_w2a, grad_w2b
 
-    class KronLinearTwoStageFnCUDA(torch.autograd.Function):
-        """Fused two-stage Kronecker forward/backward (CUDA kernel).
+    @kron2_bwd_op.register_fake
+    def _kron2_bwd_op_fake(grad_out, temp1, x, w1_a, w1_b, w2_a, w2_b):
+        return (
+            torch.empty(x.shape, dtype=x.dtype, device=x.device),
+            torch.empty(w1_a.shape, dtype=w1_a.dtype, device=w1_a.device),
+            torch.empty(w1_b.shape, dtype=w1_b.dtype, device=w1_b.device),
+            torch.empty(w2_a.shape, dtype=w2_a.dtype, device=w2_a.device),
+            torch.empty(w2_b.shape, dtype=w2_b.dtype, device=w2_b.device),
+        )
 
-        Replaces ~12 forward + ~22 backward kernel launches with 1 + 3.
-        For the decompose_both=True path where both w1 and w2 are factored.
-        """
+    def _kron2_bwd(ctx, grad_out):
+        x, w1_a, w1_b, w2_a, w2_b = ctx.saved_tensors
+        grad_out = grad_out.contiguous()
+        # Recompute temp1 (cheap: one small matmul on the backward path).
+        # These are standard ATen ops that make_fx can trace.
+        in_m = w1_b.shape[1]
+        in_n = w2_b.shape[1]
+        x_f = x.float().reshape(-1, in_m * in_n)
+        X = x_f.reshape(x_f.shape[0], in_m, in_n)
+        temp1 = X @ w2_b.float().t()
+        # kron2_bwd_op is an opaque custom_op — make_fx won't trace into it.
+        return kron2_bwd_op(grad_out, temp1, x, w1_a, w1_b, w2_a, w2_b)
+
+    def _kron2_setup(ctx, inputs, output):
+        x, w1_a, w1_b, w2_a, w2_b = inputs
+        ctx.save_for_backward(x, w1_a, w1_b, w2_a, w2_b)
+
+    torch.library.register_autograd(
+        "lokr::kron2_fwd", _kron2_bwd, setup_context=_kron2_setup,
+    )
+
+    # ---- Backward-compatible wrapper classes (.apply API) -----------------
+    # scalar multiply is outside the custom op so autograd handles its grad.
+
+    class KronLinearFnCUDA:
+        """Single-stage Kronecker via compile-compatible custom op."""
 
         @staticmethod
-        def forward(ctx, x, w1_a, w1_b, w2_a, w2_b, scalar):
-            assert x.is_contiguous(), "x must be contiguous"
-            out, temp1 = lokr_cpp.kron2_forward(
-                x, w1_a, w1_b, w2_a, w2_b, float(scalar)
-            )
-            ctx.save_for_backward(x, w1_a, w1_b, w2_a, w2_b)
-            ctx.temp1 = temp1
-            ctx.scalar = float(scalar)
-            return out
+        def apply(x, w1, w2, scalar):
+            return kron1_fwd(x, w1, w2) * scalar
+
+    class KronLinearTwoStageFnCUDA:
+        """Two-stage Kronecker via compile-compatible custom op."""
 
         @staticmethod
-        def backward(ctx, grad_out):
-            x, w1_a, w1_b, w2_a, w2_b = ctx.saved_tensors
-            grad_out = grad_out.contiguous()
-            grad_x, grad_w1a, grad_w1b, grad_w2a, grad_w2b, grad_scalar = (
-                lokr_cpp.kron2_backward(
-                    grad_out, ctx.temp1, x, w1_a, w1_b, w2_a, w2_b, ctx.scalar
-                )
-            )
-            ctx.temp1 = None  # free workspace
-            return grad_x, grad_w1a, grad_w1b, grad_w2a, grad_w2b, grad_scalar
+        def apply(x, w1_a, w1_b, w2_a, w2_b, scalar):
+            return kron2_fwd(x, w1_a, w1_b, w2_a, w2_b) * scalar
 
 else:
     # Fallback to pure-PyTorch implementations

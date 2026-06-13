@@ -226,6 +226,8 @@
         "save_every_n_epochs": "Nエポックごとに保存",
         "checkpointing_epochs": "再開可能チェックポイント間隔",
         "gradient_checkpointing": "勾配チェックポイント",
+        "gradient_checkpointing_last_n": "チェックポイント Block 数",
+        "gradient_checkpointing_sac": "選択的アクティベーションチェックポイント (SAC)",
         "unsloth_offload_checkpointing": "Unslothオフロードチェックポイント",
         "blocks_to_swap": "Block Swap数",
         "torch_compile": "torch.compile高速化",

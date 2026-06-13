@@ -110,6 +110,54 @@ Update later in place with `make update` (release-tarball merge, no git needed).
 
 Compile pipeline details in [docs/optimizations/for_compile.md](docs/optimizations/for_compile.md).
 
+### Bucket families — detail vs. speed trade-off
+
+Anima's `CONSTANT_TOKEN_BUCKETS` table groups resolutions into **token-count (TC) families** — each family has a fixed patch-grid area so `torch.compile` traces exactly one block graph per family. Smaller TC families train faster (fewer patches per step) but sacrifice fine detail; larger families preserve more spatial information at the cost of compute and VRAM.
+
+| Family | Token count | Max resolution | Use case |
+|--------|-------------|----------------|----------|
+| XS | 1680 | 640×672 | Fastest iteration, low detail (face/pose experiments) |
+| S | 2160 | 720×768 | Quick drafts, small datasets |
+| M | 3600 | 960×960 | Balanced quality / speed for most characters |
+| L | 4032 | 1008×1024 | High detail, near-square aspect |
+| S1 | 1024 | 512×512 | Small square, extreme low-VRAM |
+| S2 | 4096 | 1024×1024 | Full 1MP square, max detail |
+| XL | 5040 | 1120×1152 | Max detail, widest aspect range |
+
+Select via `bucket_families` in config (e.g. `bucket_families = ["S2"]` for 1024²-only training). Mixing families from different TC groups is supported — each additional TC family adds one compiled block graph. For best compile cache-hit rates, stick to a single TC family.
+
+### Gradient checkpointing — VRAM vs. speed trade-off
+
+Gradient checkpointing (GC) trades compute for VRAM: instead of keeping all forward activations for backward, it discards them and recomputes during the backward pass. Three knobs control this trade-off:
+
+| Setting | VRAM | Speed | Best for |
+|---------|------|-------|----------|
+| GC off | ~32 GB at 1024² bs=4 | Fastest (no recompute) | 24 GB+ GPUs without memory pressure |
+| Full GC (`last_n=0`) | ~8–10 GB | ~1.7× slower (all 28 blocks recompute) | Tight VRAM, large batch or resolution |
+| Selective GC (`last_n=N`) | Scales with N (fewer checkpoints = more VRAM) | Faster than full GC (fewer blocks recompute) | Balancing speed and VRAM headroom |
+| **GC + SAC** | Full GC + ~2–4 GB extra | 15–25% faster than standard GC | **Recommended** for GC-enabled training |
+
+**SAC (Selective Activation Checkpointing)** uses PyTorch 2.12's `CheckpointPolicy` to save expensive attention operations (flash attention, softmax) and recompute only cheap operations (LayerNorm, element-wise, linear projections) during backward. This eliminates the most expensive part of recompute while keeping the activation memory increase modest. Enable with `gradient_checkpointing_sac = true` in config (requires `torch_compile = true`).
+
+**`last_n` parameter** — when set to a value > 0, only the last N DiT blocks (closest to the output layer) use checkpointing; the remaining blocks run normally. Since `last_n=0` means "checkpoint ALL blocks" (maximum VRAM savings), it is the most aggressive GC setting. Reducing `last_n` (e.g. to 20–22) progressively trades VRAM for speed by removing early blocks from checkpointing. The optimal value depends on your VRAM budget — start high (e.g. `last_n=22`) and increase toward 0 only if you encounter OOM.
+
+### Performance tuning — GPU utilization and baselines
+
+Smaller TC families underutilize high-end GPUs. For example, on an RTX 5090 the S1 family (TC=1024) only sustains 62–69% GPU utilization at `bs=4` — the compute is too light to saturate the GPU. In this case, **increasing batch size** is the most effective lever: it raises GPU utilization without changing per-sample compute. However, larger batches consume more VRAM, so you may need to balance `batch_size` / GC / SAC / `last_n` together to keep the GPU fully fed while minimizing overhead.
+
+**Performance baselines** (RTX 5090, LoKR dim/alpha=16/8 factor=8, CAME_C):
+
+| Config | TC | bs | s/step | s/sample | Notes |
+|--------|-----|-----|--------|----------|-------|
+| S1 | 1024 | 4 | ~0.4 | ~0.10 | Near theoretical limit for this TC |
+| S2 | 4096 | 1 | ~0.42 | ~0.42 | Compute scales linearly: 4096/1024 ≈ 0.42/0.10 |
+
+At `bs=4` with S1, each step processes 4 samples in ~0.4 s, yielding ~0.1 s/sample — essentially the compute floor. S2 at `bs=1` processes 1 sample per step with 4× the token count, so per-sample time rises to ~0.42 s, consistent with the 4096/1024 compute ratio. Both are near their respective performance ceilings.
+
+**CAME_C vs fused AdamW** — CAME_C has a millisecond-level overhead per step compared to fused AdamW, but this is negligible above ~0.1 s/step (sub-1% of step time).
+
+**Numerical accuracy** — CAME/CAME_C may accumulate ~1e-5 error over 15k steps compared to AdamW. Enabling SAC adds ~1e-5 additional error. Both are within acceptable tolerance for LoRA training and have limited practical impact on final model quality.
+
 ---
 
 ## 2. Solid conventional implementations

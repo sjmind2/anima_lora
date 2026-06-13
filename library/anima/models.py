@@ -1,6 +1,7 @@
 # Anima Model Architecture
 # Original code: NVIDIA CORPORATION & AFFILIATES, licensed under Apache-2.0
 
+import functools
 import math
 from typing import Any, Optional, Tuple
 
@@ -11,10 +12,43 @@ from torch import nn
 import torch.nn.functional as F
 
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
+)
 
 from library.runtime import offloading as custom_offloading_utils
 from library.runtime.device import weighs_to_device
 from networks import attention_dispatch
+
+
+def _sac_policy(ctx, op, *args, **kwargs):
+    """Selective Activation Checkpointing policy for DiT blocks.
+
+    Saves expensive attention ops (flash_attn, SDPA, softmax) whose outputs
+    are relatively small but whose compute is expensive to recompute.
+    Recomputes cheap ops (norms, element-wise, activations) whose outputs
+    are cheap to regenerate.
+
+    This keeps the additional activation memory minimal (~1-2 GB for 22
+    checkpointed blocks at 1024²) while eliminating the most expensive
+    part of backward recompute.
+    """
+    op_name = str(op).lower()
+    # Save attention-related ops (flash attention, SDPA, softmax)
+    if (
+        "flash_attn" in op_name
+        or "scaled_dot_product" in op_name
+        or "_softmax" in op_name
+    ):
+        return CheckpointPolicy.MUST_SAVE
+    # Recompute everything else (norms, linears, activations, element-wise)
+    return CheckpointPolicy.MUST_RECOMPUTE
+
+
+_sac_context_fn = functools.partial(
+    create_selective_checkpoint_contexts, _sac_policy
+)
 
 
 def to_device(x, device):
@@ -960,18 +994,24 @@ class Block(nn.Module):
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
         self.unsloth_offload_checkpointing = False
+        self.use_sac_checkpoint = False
 
     def enable_gradient_checkpointing(
-        self, cpu_offload: bool = False, unsloth_offload: bool = False
+        self,
+        cpu_offload: bool = False,
+        unsloth_offload: bool = False,
+        use_sac: bool = False,
     ):
         self.gradient_checkpointing = True
         self.cpu_offload_checkpointing = cpu_offload if not unsloth_offload else False
         self.unsloth_offload_checkpointing = unsloth_offload
+        self.use_sac_checkpoint = use_sac and not unsloth_offload
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
         self.cpu_offload_checkpointing = False
         self.unsloth_offload_checkpointing = False
+        self.use_sac_checkpoint = False
 
     def reset_parameters(self) -> None:
         self.layer_norm_self_attn.reset_parameters()
@@ -1138,6 +1178,7 @@ class Block(nn.Module):
                 )
             else:
                 # Standard gradient checkpointing (no offload)
+                context_fn = _sac_context_fn if self.use_sac_checkpoint else None
                 return torch_checkpoint(
                     self._forward,
                     x_B_T_H_W_D,
@@ -1147,6 +1188,7 @@ class Block(nn.Module):
                     rope_cos_sin,
                     adaln_lora_B_T_3D,
                     use_reentrant=False,
+                    **({"context_fn": context_fn} if context_fn else {}),
                 )
         else:
             return self._forward(
@@ -1338,19 +1380,48 @@ class Anima(nn.Module):
         nn.init.zeros_(self.pooled_text_proj[-1].bias)
 
     def enable_gradient_checkpointing(
-        self, cpu_offload: bool = False, unsloth_offload: bool = False
+        self,
+        cpu_offload: bool = False,
+        unsloth_offload: bool = False,
+        last_n: int = 0,
+        use_sac: bool = False,
     ):
-        for block in self.blocks:
-            block.enable_gradient_checkpointing(
-                cpu_offload=cpu_offload, unsloth_offload=unsloth_offload
-            )
+        """Enable gradient checkpointing on blocks.
+
+        Args:
+            cpu_offload: Offload activations to CPU during checkpointing.
+            unsloth_offload: Use unsloth async offload (overrides cpu_offload).
+            last_n: If > 0, only checkpoint the last N blocks (closest to the
+                output). The remaining blocks run without checkpointing. This
+                trades a small activation-memory increase for fewer recompute
+                ops in the backward pass.
+            use_sac: Use Selective Activation Checkpointing (PyTorch 2.12+).
+                Saves expensive attention ops and recomputes cheap ops during
+                backward, reducing recompute cost. Incompatible with
+                unsloth_offload. Requires compile_blocks(use_sac=True).
+        """
+        n = len(self.blocks)
+        start = n - last_n if last_n > 0 else 0
+        for i, block in enumerate(self.blocks):
+            if i >= start:
+                block.enable_gradient_checkpointing(
+                    cpu_offload=cpu_offload,
+                    unsloth_offload=unsloth_offload,
+                    use_sac=use_sac,
+                )
 
     def disable_gradient_checkpointing(self):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-    def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None, bucket_list=None):
-        """Enable native-shape flattening and torch.compile each block's _forward.
+    def compile_blocks(
+        self,
+        backend: str = "inductor",
+        mode: Optional[str] = None,
+        bucket_list=None,
+        use_sac: bool = False,
+    ):
+        """Enable native-shape flattening and torch.compile each block.
 
         Two coupled effects, both owned by this one call:
 
@@ -1363,11 +1434,19 @@ class Anima(nn.Module):
            flash self-attention sees no padded tokens (bit-exact to the eager
            5D path; the gap=0 control of the retired pad-leak probe verified it).
 
-        2. Compiles ``_forward`` (the actual attention/MLP computation) rather
-           than ``forward`` (the checkpointing wrapper). This is critical because
-           unsloth_checkpoint has @torch._disable_dynamo, which causes an
-           immediate graph break if forward itself is compiled — dynamo compiles
-           nothing useful but still checks shape guards, causing recompile storms.
+        2. Compiles each block. The compilation target depends on ``use_sac``:
+
+           - ``use_sac=False`` (default): compiles ``_forward`` (the actual
+             attention/MLP computation). This is required because
+             unsloth_checkpoint has @torch._disable_dynamo, which causes an
+             immediate graph break if ``forward`` itself is compiled.
+
+           - ``use_sac=True``: compiles ``forward`` (the checkpointing wrapper).
+             This is necessary because SAC's context_fn must be inside the
+             compiled region to intercept ops. Without this, SAC is "blind"
+             (ops are fused into triton kernels and invisible to dispatch mode).
+             Incompatible with unsloth_checkpoint (they are mutually exclusive
+             at the config level).
 
         Also raises the dynamo cache-size budget to fit those token-count
         families. ``2 * n + 8``: the ``2 *`` covers fwd+bwd sharing the one
@@ -1406,12 +1485,20 @@ class Anima(nn.Module):
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
             compile_kwargs["mode"] = mode
+
+        # When SAC is enabled, compile `forward` (includes checkpoint wrapper)
+        # so that SAC's context_fn is visible inside the compiled region.
+        # Otherwise, compile `_forward` (required for unsloth compatibility).
+        compile_attr = "forward" if use_sac else "_forward"
         for block in self.blocks:
-            block._forward = torch.compile(block._forward, **compile_kwargs)
+            setattr(
+                block, compile_attr, torch.compile(getattr(block, compile_attr), **compile_kwargs)
+            )
         print(
             f"Anima: native_flatten on, {n} token-count families "
             f"(cache_size_limit={_dynamo.config.cache_size_limit}); compiled "
-            f"{len(self.blocks)} block._forward with backend={backend}, mode={mode}"
+            f"{len(self.blocks)} block.{compile_attr} with backend={backend}, "
+            f"mode={mode}, use_sac={use_sac}"
         )
 
     @property

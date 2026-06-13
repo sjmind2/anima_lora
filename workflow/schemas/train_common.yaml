@@ -291,6 +291,20 @@ groups:
         layer: common
         default: false
         label: "梯度检查点"
+      - key: gradient_checkpointing_last_n
+        type: int
+        required: false
+        layer: common
+        default: 0
+        label: "选择检查点 Block 数"
+        help: "仅对最后 N 个 Block 启用 GC（0=全部 Block 启用 GC，即最大显存节省）。N 越小 → 检查点越少 → 反向重计算越少 → 训练越快，但显存占用越高。Anima DiT 共 28 个 Block"
+      - key: gradient_checkpointing_sac
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "选择性激活检查点 (SAC)"
+        help: "保存昂贵的 attention 运算、重计算廉价运算，减少 GC 反向开销约 15-25%。需要 torch.compile"
       - key: unsloth_offload_checkpointing
         type: bool
         required: false

@@ -226,6 +226,8 @@
         "save_every_n_epochs": "Save Every N Epochs",
         "checkpointing_epochs": "Checkpointable Resume Interval",
         "gradient_checkpointing": "Gradient Checkpointing",
+        "gradient_checkpointing_last_n": "Checkpointed Block Count",
+        "gradient_checkpointing_sac": "Selective Activation Checkpointing (SAC)",
         "unsloth_offload_checkpointing": "Unsloth Offload Checkpointing",
         "blocks_to_swap": "Block Swap Count",
         "torch_compile": "torch.compile Acceleration",

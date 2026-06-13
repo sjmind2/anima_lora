@@ -544,9 +544,11 @@ class AnimaTrainer:
         # on the flatten (one block graph per token-count family: 4032/4200) and
         # raises the dynamo cache-size budget itself.
         if args.torch_compile:
+            _use_sac = bool(getattr(args, "gradient_checkpointing_sac", False))
             model.compile_blocks(
                 args.dynamo_backend,
                 mode=getattr(args, "compile_inductor_mode", None),
+                use_sac=_use_sac,
             )
 
         # Store unsloth preference so that when the base trainer calls
@@ -966,7 +968,10 @@ class AnimaTrainer:
     ) -> torch.nn.Module:
         # Re-apply with unsloth_offload if needed (after base has already enabled it).
         if self._use_unsloth_offload_checkpointing and args.gradient_checkpointing:
-            unet.enable_gradient_checkpointing(unsloth_offload=True)
+            gc_last_n = getattr(args, "gradient_checkpointing_last_n", 0)
+            unet.enable_gradient_checkpointing(
+                unsloth_offload=True, last_n=gc_last_n
+            )
 
         if not self.is_swapping_blocks:
             return accelerator.prepare(unet)
@@ -1628,10 +1633,16 @@ class AnimaTrainer:
             )
 
         if args.gradient_checkpointing:
+            gc_last_n = getattr(args, "gradient_checkpointing_last_n", 0)
+            gc_use_sac = bool(getattr(args, "gradient_checkpointing_sac", False))
             if args.cpu_offload_checkpointing:
-                unet.enable_gradient_checkpointing(cpu_offload=True)
+                unet.enable_gradient_checkpointing(
+                    cpu_offload=True, last_n=gc_last_n
+                )
             else:
-                unet.enable_gradient_checkpointing()
+                unet.enable_gradient_checkpointing(
+                    last_n=gc_last_n, use_sac=gc_use_sac
+                )
 
             for t_enc, flag in zip(
                 text_encoders, self.get_text_encoders_train_flags(args, text_encoders)

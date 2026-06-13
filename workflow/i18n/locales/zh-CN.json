@@ -226,6 +226,8 @@
         "save_every_n_epochs": "每N个Epoch保存",
         "checkpointing_epochs": "可恢复检查点间隔",
         "gradient_checkpointing": "梯度检查点",
+        "gradient_checkpointing_last_n": "选择检查点 Block 数",
+        "gradient_checkpointing_sac": "选择性激活检查点 (SAC)",
         "unsloth_offload_checkpointing": "Unsloth 卸载检查点",
         "blocks_to_swap": "Block Swap 数量",
         "torch_compile": "torch.compile 加速",

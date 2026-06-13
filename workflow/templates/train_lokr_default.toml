@@ -8,9 +8,14 @@ decompose_both = true
 use_tucker = true
 scale_weight_norms = 1.0
 
-learning_rate = 0.0004
+learning_rate = 0.0002
 lr_scheduler = "cosine"
 max_train_epochs = 10
-optimizer_type = "CAME"
+optimizer_type = "CAME_C"
+
+gradient_checkpointing = false
+gradient_checkpointing_last_n = 28
+gradient_checkpointing_sac = true
+torch_compile = true
 
 output_name = "anima_lokr"

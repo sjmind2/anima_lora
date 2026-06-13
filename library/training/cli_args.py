@@ -425,6 +425,28 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="enable gradient checkpointing",
     )
     parser.add_argument(
+        "--gradient_checkpointing_last_n",
+        type=int,
+        default=0,
+        help=(
+            "Only checkpoint the last N DiT blocks (closest to output). "
+            "0 = checkpoint ALL 28 blocks (max VRAM savings, max recompute). "
+            "Smaller N = fewer checkpoints = less backward recompute = faster "
+            "training, but higher activation memory. Requires --gradient_checkpointing."
+        ),
+    )
+    parser.add_argument(
+        "--gradient_checkpointing_sac",
+        action="store_true",
+        help=(
+            "Use Selective Activation Checkpointing (PyTorch 2.12+). Saves "
+            "expensive attention ops and recomputes cheap ops during backward, "
+            "reducing GC recompute overhead by ~15-25%. Requires "
+            "--gradient_checkpointing and --torch_compile. Incompatible with "
+            "--unsloth_offload_checkpointing."
+        ),
+    )
+    parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
