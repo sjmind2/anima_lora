@@ -233,7 +233,12 @@ class JobManager:
             # in flight is that step's still-releasing allocation, which the
             # guard would needlessly wait on. Standalone jobs still guard.
             if not job.from_chain:
-                self._gpu_guard(job)
+                try:
+                    self._gpu_guard(job)
+                except Exception:  # noqa: BLE001
+                    # gpu_guard is best-effort: if cleanup/probing fails, still
+                    # launch the job rather than killing the worker thread.
+                    logger.exception("gpu_guard failed; launching job anyway")
             self._launch_and_monitor(job)
 
     def _launch_and_monitor(self, job: Job) -> None:

@@ -25,8 +25,18 @@ from typing import Optional, List
 # Load the C++ extension via JIT compilation (handles DLL paths on Windows).
 # Returns (module, None) on success or (None, error) on failure.
 def _load_extension():
-    from torch.utils.cpp_extension import load
+    from torch.utils.cpp_extension import _get_build_directory, load
     ext_dir = os.path.dirname(os.path.abspath(__file__))
+    # Stale lock cleanup — see lokr_cpp_extension for full rationale.
+    # A crashed prior process leaves a "lock" file that makes load() block
+    # forever in FileBaton.wait() → time.sleep().
+    try:
+        build_dir = _get_build_directory("came_cpp", verbose=False)
+        lock_file = os.path.join(build_dir, "lock")
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+    except OSError:
+        pass
     return load(
         name='came_cpp',
         sources=[

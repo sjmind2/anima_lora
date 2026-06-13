@@ -416,3 +416,36 @@ def test_tail_while_write(tmp_path):
         ev = tail.last_event(str(p))
         assert ev["ev"] == "step" and ev["global_step"] == 5
     assert tail.last_ckpt_path(str(p)) is None
+
+
+def test_kill_tree_survives_access_denied(monkeypatch):
+    """kill_tree must not raise when wait_procs hits AccessDenied.
+
+    This is the regression that killed the daemon worker thread on
+    2026-05-27 and 2026-06-12: wait_procs() internally calls
+    proc.wait(), which raises AccessDenied (WinError 5) on permission-
+    denied Pids. terminate()/kill() already caught it; wait_procs didn't.
+    """
+    from scripts.daemon import proc
+
+    class FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=True):
+            return []
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    def fake_wait_procs(procs, timeout=None):
+        raise psutil.AccessDenied(99999)
+
+    monkeypatch.setattr(psutil, "Process", lambda pid: FakeProc(pid))
+    monkeypatch.setattr(psutil, "wait_procs", fake_wait_procs)
+
+    # Must not raise — previously this killed the worker thread.
+    proc.kill_tree(99999)

@@ -137,7 +137,14 @@ def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
-    _, alive = psutil.wait_procs(family, timeout=grace_seconds)
+    try:
+        _, alive = psutil.wait_procs(family, timeout=grace_seconds)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        # wait_procs calls proc.wait() internally, which raises AccessDenied
+        # on Windows when the process handle can't be opened (WinError 5).
+        # terminate()/kill() above already catch this — wait_procs must too,
+        # or the exception propagates and kills the daemon worker thread.
+        alive = []
     for p in alive:
         try:
             p.kill()

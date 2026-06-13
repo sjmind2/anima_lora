@@ -27,8 +27,22 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 def _load_extension():
-    from torch.utils.cpp_extension import load
+    from torch.utils.cpp_extension import _get_build_directory, load
     ext_dir = os.path.dirname(os.path.abspath(__file__))
+    # Stale lock cleanup: if a previous process crashed during JIT compile,
+    # torch's FileBaton leaves a "lock" file in the build directory. The next
+    # load() call then blocks forever in baton.wait() → time.sleep() — which
+    # hangs the daemon worker and every downstream import (this module is
+    # pulled in transitively via networks → weights → strategy → TE caching).
+    # The .pyd already exists from a prior successful build, so removing the
+    # stale lock lets load() find and reuse it without recompiling.
+    try:
+        build_dir = _get_build_directory("lokr_cpp", verbose=False)
+        lock_file = os.path.join(build_dir, "lock")
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+    except OSError:
+        pass
     return load(
         name='lokr_cpp',
         sources=[
