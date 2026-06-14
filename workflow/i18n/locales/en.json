@@ -212,6 +212,10 @@
         "output_cross_attn": "Output Cross-Attn",
         "output_mlp": "Output MLP",
         "output_adaln": "Output AdaLN",
+        "train_final_layer_linear": "Train FinalLayer Linear",
+        "train_final_layer_adaln_modulation": "Train FinalLayer AdaLN",
+        "output_final_layer_linear": "Output FinalLayer Linear",
+        "output_final_layer_adaln_modulation": "Output FinalLayer AdaLN",
         "datasets": "Input Datasets",
         "reg_datasets": "Regularization Datasets",
         "prior_loss_weight": "Prior Loss Weight",
@@ -247,7 +251,11 @@
         "output_self_attn": "Save self-attention LoRA weights to the output file",
         "output_cross_attn": "Save cross-attention LoRA weights to the output file",
         "output_mlp": "Save MLP LoRA weights to the output file",
-        "output_adaln": "Save AdaLN modulation LoRA weights to the output file (default off)"
+        "output_adaln": "Save AdaLN modulation LoRA weights to the output file (default off)",
+        "train_final_layer_linear": "Attach LoRA to FinalLayer linear (output projection / velocity head) -- default off",
+        "train_final_layer_adaln_modulation": "Attach LoRA to FinalLayer AdaLN modulation -- default off",
+        "output_final_layer_linear": "Save FinalLayer linear LoRA weights to the output file",
+        "output_final_layer_adaln_modulation": "Save FinalLayer AdaLN modulation LoRA weights to the output file"
       }
     },
     "train_lora": {

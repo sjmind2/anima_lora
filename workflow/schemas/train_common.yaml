@@ -135,6 +135,14 @@ groups:
         default: true
         label: "训练 Self-Attn"
         help: "对 self-attention 投影层附加 LoRA（空间构图/姿势/布局）"
+      - key: train_self_attn_layers
+        type: str
+        required: false
+        layer: common
+        default: ""
+        label: "Self-Attn 层选择"
+        help: "指定训练的 Block 编号（0-27），留空=全部。格式：逗号/分号分隔，支持范围。例：\"0,1\" / \"0-20\" / \"0,1,5-8;11-13\"，重叠自动消重"
+        paired_with: train_self_attn
       - key: train_cross_attn
         type: bool
         required: false
@@ -142,6 +150,14 @@ groups:
         default: true
         label: "训练 Cross-Attn"
         help: "对 cross-attention 投影层附加 LoRA（文本-图像绑定）"
+      - key: train_cross_attn_layers
+        type: str
+        required: false
+        layer: common
+        default: ""
+        label: "Cross-Attn 层选择"
+        help: "指定训练的 Block 编号（0-27），留空=全部。格式：逗号/分号分隔，支持范围。例：\"0,1\" / \"0-20\" / \"0,1,5-8;11-13\"，重叠自动消重"
+        paired_with: train_cross_attn
       - key: train_mlp
         type: bool
         required: false
@@ -149,6 +165,14 @@ groups:
         default: true
         label: "训练 MLP"
         help: "对 MLP 层附加 LoRA（视觉特征/纹理/色彩/渲染风格）"
+      - key: train_mlp_layers
+        type: str
+        required: false
+        layer: common
+        default: ""
+        label: "MLP 层选择"
+        help: "指定训练的 Block 编号（0-27），留空=全部。格式：逗号/分号分隔，支持范围。例：\"0,1\" / \"0-20\" / \"0,1,5-8;11-13\"，重叠自动消重"
+        paired_with: train_mlp
       - key: train_adaln
         type: bool
         required: false
@@ -156,6 +180,14 @@ groups:
         default: false
         label: "训练 AdaLN"
         help: "对 AdaLN 调制投影附加 LoRA（时间步条件）— 默认冻结以保持稳定性"
+      - key: train_adaln_layers
+        type: str
+        required: false
+        layer: common
+        default: ""
+        label: "AdaLN 层选择"
+        help: "指定训练的 Block 编号（0-27），留空=全部。格式：逗号/分号分隔，支持范围。例：\"0,1\" / \"0-20\" / \"0,1,5-8;11-13\"，重叠自动消重"
+        paired_with: train_adaln
       - key: output_self_attn
         type: bool
         required: false
@@ -184,6 +216,34 @@ groups:
         default: false
         label: "输出 AdaLN"
         help: "保存 AdaLN 调制 LoRA 权重到输出文件（默认关闭）"
+      - key: train_final_layer_linear
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "训练 FinalLayer Linear"
+        help: "对最终输出投影层（速度场预测头）附加 LoRA — 默认关闭"
+      - key: train_final_layer_adaln_modulation
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "训练 FinalLayer AdaLN"
+        help: "对 FinalLayer AdaLN 调制层附加 LoRA — 默认关闭"
+      - key: output_final_layer_linear
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "输出 FinalLayer Linear"
+        help: "保存 FinalLayer Linear LoRA 权重到输出文件"
+      - key: output_final_layer_adaln_modulation
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "输出 FinalLayer AdaLN"
+        help: "保存 FinalLayer AdaLN 调制 LoRA 权重到输出文件"
 
   - name: data
     label: "数据"

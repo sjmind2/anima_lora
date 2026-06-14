@@ -200,6 +200,10 @@ _GROUPS = {
         "output_cross_attn",
         "output_mlp",
         "output_adaln",
+        "train_final_layer_linear",
+        "train_final_layer_adaln_modulation",
+        "output_final_layer_linear",
+        "output_final_layer_adaln_modulation",
     },
     "Paths": {
         "pretrained_model_name_or_path",

@@ -38,6 +38,46 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return str(value).lower() == "true"
 
 
+def parse_layer_selection(spec: Optional[str]) -> Optional[set[int]]:
+    """Parse a block-index selection string into a set of ints.
+
+    Supports comma/semicolon-separated tokens, each either a single index
+    (``"3"``) or an inclusive range (``"0-5"``). Overlapping ranges are
+    auto-deduplicated. Returns ``None`` (meaning "all blocks") when *spec*
+    is empty / None.
+
+    Examples::
+
+        "0,1"           → {0, 1}
+        "0-20"          → {0, 1, …, 20}
+        "0,1,5-8;11-13" → {0, 1, 5, 6, 7, 8, 11, 12, 13}
+        "1-3,2-4"       → {1, 2, 3, 4}   # dedup
+    """
+    if spec is None:
+        return None
+    s = str(spec).strip()
+    if not s:
+        return None
+    result: set[int] = set()
+    for token in s.replace(";", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2:
+                raise ValueError(
+                    f"Invalid range token '{token}' in layer selection '{spec}'"
+                )
+            lo, hi = int(parts[0].strip()), int(parts[1].strip())
+            if lo > hi:
+                lo, hi = hi, lo
+            result.update(range(lo, hi + 1))
+        else:
+            result.add(int(token))
+    return result
+
+
 def _as_moe_style(value: Any) -> MoEStyle:
     """Parse the three-valued ``use_moe_style`` kwarg.
 
@@ -166,8 +206,9 @@ def _parse_kv_pairs(kv_pair_str: str, *, is_int: bool) -> Dict[str, Any]:
 # Default exclude regex appended to user-supplied excludes in `from_kwargs`.
 # Skips embedders / norms that are never adapted. AdaLN modulation projectors
 # are controlled separately by the train_adaln flag (default: false).
+# FinalLayer modules are controlled by the train_final_layer_* flags (default: false).
 _DEFAULT_EXCLUDE = (
-    r".*(_norm|_embedder|final_layer|adaln_fused_down|adaln_up_|"
+    r".*(_norm|_embedder|adaln_fused_down|adaln_up_|"
     r"pooled_text_proj).*"
 )
 
@@ -214,6 +255,14 @@ class LoRANetworkCfg:
     train_mlp: bool = True
     train_adaln: bool = False
 
+    # Per-layer-index targeting within each family. A string like "0,1,5-8"
+    # limits LoRA to only those block indices for the corresponding family.
+    # None/empty = all blocks. Inert when the family's train_* toggle is False.
+    train_self_attn_layers: Optional[str] = None
+    train_cross_attn_layers: Optional[str] = None
+    train_mlp_layers: Optional[str] = None
+    train_adaln_layers: Optional[str] = None
+
     # Layer-type output gating: which trained DiT layer families are written
     # to the saved .safetensors. Independent of train_* (a family may be
     # trained but stripped at save time). Defaults preserve pre-feature
@@ -222,6 +271,14 @@ class LoRANetworkCfg:
     output_cross_attn: bool = True
     output_mlp: bool = True
     output_adaln: bool = False
+
+    # FinalLayer sub-module targeting (default: off — FinalLayer is excluded
+    # from LoRA by default because it is the ODE output decoder; perturbing
+    # it risks artifacts / instability).
+    train_final_layer_linear: bool = False
+    train_final_layer_adaln_modulation: bool = False
+    output_final_layer_linear: bool = False
+    output_final_layer_adaln_modulation: bool = False
 
     # dropouts
     dropout: Optional[float] = None
@@ -461,12 +518,32 @@ class LoRANetworkCfg:
         train_mlp = _as_bool(kwargs.get("train_mlp", True))
         train_adaln = _as_bool(kwargs.get("train_adaln", False))
 
+        # Per-layer-index selection strings (None/empty = all blocks)
+        train_self_attn_layers = kwargs.get("train_self_attn_layers") or None
+        train_cross_attn_layers = kwargs.get("train_cross_attn_layers") or None
+        train_mlp_layers = kwargs.get("train_mlp_layers") or None
+        train_adaln_layers = kwargs.get("train_adaln_layers") or None
+
         # Layer-type output gating (default: write all trained families;
         # output_adaln=False pairs with the default train_adaln=False).
         output_self_attn = _as_bool(kwargs.get("output_self_attn", True))
         output_cross_attn = _as_bool(kwargs.get("output_cross_attn", True))
         output_mlp = _as_bool(kwargs.get("output_mlp", True))
         output_adaln = _as_bool(kwargs.get("output_adaln", False))
+
+        # FinalLayer sub-module targeting (default: off)
+        train_final_layer_linear = _as_bool(
+            kwargs.get("train_final_layer_linear", False)
+        )
+        train_final_layer_adaln_modulation = _as_bool(
+            kwargs.get("train_final_layer_adaln_modulation", False)
+        )
+        output_final_layer_linear = _as_bool(
+            kwargs.get("output_final_layer_linear", False)
+        )
+        output_final_layer_adaln_modulation = _as_bool(
+            kwargs.get("output_final_layer_adaln_modulation", False)
+        )
 
         exclude_patterns = _as_str_list(kwargs.get("exclude_patterns")) or []
         exclude_patterns.append(_DEFAULT_EXCLUDE)
@@ -733,7 +810,9 @@ class LoRANetworkCfg:
         verbose = _as_bool(kwargs.get("verbose"))
 
         network_type_raw = kwargs.get("network_type", "lora")
-        network_type = str(network_type_raw).strip().lower() if network_type_raw else "lora"
+        network_type = (
+            str(network_type_raw).strip().lower() if network_type_raw else "lora"
+        )
         use_tucker = _as_bool(kwargs.get("use_tucker"))
         decompose_both = _as_bool(kwargs.get("decompose_both"))
         lokr_factor = int(kwargs.get("lokr_factor", -1))
@@ -746,7 +825,11 @@ class LoRANetworkCfg:
         conv_alpha_raw = kwargs.get("conv_alpha")
         conv_alpha = float(conv_alpha_raw) if conv_alpha_raw is not None else None
         scale_weight_norms_raw = kwargs.get("scale_weight_norms")
-        scale_weight_norms = float(scale_weight_norms_raw) if scale_weight_norms_raw is not None else None
+        scale_weight_norms = (
+            float(scale_weight_norms_raw)
+            if scale_weight_norms_raw is not None
+            else None
+        )
 
         return cls(
             lora_dim=network_dim,
@@ -771,10 +854,18 @@ class LoRANetworkCfg:
             train_cross_attn=train_cross_attn,
             train_mlp=train_mlp,
             train_adaln=train_adaln,
+            train_self_attn_layers=train_self_attn_layers,
+            train_cross_attn_layers=train_cross_attn_layers,
+            train_mlp_layers=train_mlp_layers,
+            train_adaln_layers=train_adaln_layers,
             output_self_attn=output_self_attn,
             output_cross_attn=output_cross_attn,
             output_mlp=output_mlp,
             output_adaln=output_adaln,
+            train_final_layer_linear=train_final_layer_linear,
+            train_final_layer_adaln_modulation=train_final_layer_adaln_modulation,
+            output_final_layer_linear=output_final_layer_linear,
+            output_final_layer_adaln_modulation=output_final_layer_adaln_modulation,
             dropout=neuron_dropout,
             rank_dropout=rank_dropout,
             module_dropout=module_dropout,

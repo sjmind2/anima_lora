@@ -1035,6 +1035,14 @@ body {
   display: none;
 }
 
+/* Layer-selector paired with a toggle — visually nested */
+.form-group.layer-selector {
+  margin-left: 20px;
+  margin-bottom: 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
 .field-condition-met .form-label {
   opacity: 1;
 }

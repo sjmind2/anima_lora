@@ -19,7 +19,13 @@
     },
     computed: {
       isHidden: function () {
-        return this.field.hidden === true;
+        if (this.field.hidden === true) return true;
+        // Hide paired layer-selector when its parent toggle is off
+        if (this.field.paired_with) {
+          var parentVal = this.allValues[this.field.paired_with];
+          if (!parentVal || parentVal === "false") return true;
+        }
+        return false;
       },
       conditionMet: function () {
         return this.evaluateCondition(this.field.condition);
@@ -162,7 +168,7 @@
       },
     },
     template: [
-      '<div class="form-group" :class="{ \'field-hidden\': isHidden || !conditionMet }">',
+      '<div class="form-group" :class="{ \'field-hidden\': isHidden || !conditionMet, \'layer-selector\': !!field.paired_with }">',
       '  <label class="form-label">',
       '    <span v-if="labelMarker === \'required\'" class="required" :title="t(\'fieldRenderer.required\')">*</span>',
       '    <span v-if="labelMarker === \'conditional_required\'" class="conditional-required" :title="t(\'fieldRenderer.conditionalRequired\')">*</span>',

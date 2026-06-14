@@ -212,6 +212,10 @@
         "output_cross_attn": "Cross-Attn 出力",
         "output_mlp": "MLP 出力",
         "output_adaln": "AdaLN 出力",
+        "train_final_layer_linear": "FinalLayer Linear 訓練",
+        "train_final_layer_adaln_modulation": "FinalLayer AdaLN 訓練",
+        "output_final_layer_linear": "FinalLayer Linear 出力",
+        "output_final_layer_adaln_modulation": "FinalLayer AdaLN 出力",
         "datasets": "入力データセット",
         "reg_datasets": "正則化データセット",
         "prior_loss_weight": "事前損失重み",
@@ -247,7 +251,11 @@
         "output_self_attn": "self-attention LoRA 重みを出力ファイルに保存",
         "output_cross_attn": "cross-attention LoRA 重みを出力ファイルに保存",
         "output_mlp": "MLP LoRA 重みを出力ファイルに保存",
-        "output_adaln": "AdaLN 変調 LoRA 重みを出力ファイルに保存 (デフォルト OFF)"
+        "output_adaln": "AdaLN 変調 LoRA 重みを出力ファイルに保存 (デフォルト OFF)",
+        "train_final_layer_linear": "最終出力投影層（速度場予測ヘッド）に LoRA を適用 — デフォルト OFF",
+        "train_final_layer_adaln_modulation": "FinalLayer AdaLN 変調層に LoRA を適用 — デフォルト OFF",
+        "output_final_layer_linear": "FinalLayer Linear LoRA 重みを出力ファイルに保存",
+        "output_final_layer_adaln_modulation": "FinalLayer AdaLN 変調 LoRA 重みを出力ファイルに保存"
       }
     },
     "train_lora": {
