@@ -225,6 +225,54 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Save AdaLN modulation LoRA weights to output file. None=config default.",
     )
     parser.add_argument(
+        "--train_final_layer_linear",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to FinalLayer linear (output projection). None=config default.",
+    )
+    parser.add_argument(
+        "--train_final_layer_adaln_modulation",
+        type=_bool_from_str,
+        default=None,
+        help="Attach LoRA to FinalLayer AdaLN modulation. None=config default.",
+    )
+    parser.add_argument(
+        "--output_final_layer_linear",
+        type=_bool_from_str,
+        default=None,
+        help="Save FinalLayer linear LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
+        "--output_final_layer_adaln_modulation",
+        type=_bool_from_str,
+        default=None,
+        help="Save FinalLayer AdaLN modulation LoRA weights to output file. None=config default.",
+    )
+    parser.add_argument(
+        "--train_self_attn_layers",
+        type=str,
+        default=None,
+        help="Per-block-index selection for self-attn (e.g. '0,1,5-8'). None/empty=all blocks.",
+    )
+    parser.add_argument(
+        "--train_cross_attn_layers",
+        type=str,
+        default=None,
+        help="Per-block-index selection for cross-attn (e.g. '0,1,5-8'). None/empty=all blocks.",
+    )
+    parser.add_argument(
+        "--train_mlp_layers",
+        type=str,
+        default=None,
+        help="Per-block-index selection for MLP (e.g. '0,1,5-8'). None/empty=all blocks.",
+    )
+    parser.add_argument(
+        "--train_adaln_layers",
+        type=str,
+        default=None,
+        help="Per-block-index selection for AdaLN (e.g. '0,1,5-8'). None/empty=all blocks.",
+    )
+    parser.add_argument(
         "--t5_tokenizer_path",
         type=str,
         default=None,

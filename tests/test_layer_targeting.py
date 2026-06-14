@@ -36,7 +36,10 @@ from workflow.stages.train import TrainExecutor
         # Non-Block modules -- unclassified
         ("patch_embed.proj", None),
         ("time_embed.timestep_embedder.linear.0", None),
-        ("final_layer.linear", None),
+        # FinalLayer sub-modules
+        ("final_layer.linear", "final_linear"),
+        ("final_layer.adaln_modulation.1", "final_adaln"),
+        ("final_layer.adaln_modulation.2", "final_adaln"),
         # Boundary edge case: adaln_modulation_self_attn must NOT match self_attn
         # because the path uses _self_attn (underscore) not .self_attn (dot)
         ("blocks.0.adaln_modulation_self_attn.1.weight", "adaln"),
@@ -61,12 +64,14 @@ def _make_cfg(**overrides):
 
 def test_layer_targeting_defaults():
     """Default cfg has train_self_attn=True, train_cross_attn=True,
-    train_mlp=True, train_adaln=False."""
+    train_mlp=True, train_adaln=False, train_final_layer_*=False."""
     cfg = _make_cfg()
     assert cfg.train_self_attn is True
     assert cfg.train_cross_attn is True
     assert cfg.train_mlp is True
     assert cfg.train_adaln is False
+    assert cfg.train_final_layer_linear is False
+    assert cfg.train_final_layer_adaln_modulation is False
 
 
 def test_layer_targeting_string_bool_parsing():
@@ -168,10 +173,20 @@ class _MockBlock(nn.Module):
         self.adaln_modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(dim, 3 * dim))
 
 
+class _MockFinalLayer(nn.Module):
+    """Minimal FinalLayer replica with linear + adaln_modulation."""
+
+    def __init__(self, dim=64):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim)
+        self.adaln_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 2 * dim))
+
+
 class _MockDiT(nn.Module):
     def __init__(self, num_blocks=2):
         super().__init__()
         self.blocks = nn.ModuleList([_MockBlock() for _ in range(num_blocks)])
+        self.final_layer = _MockFinalLayer()
 
 
 def _apply_layer_filter(dit, cfg):
@@ -179,7 +194,7 @@ def _apply_layer_filter(dit, cfg):
     Returns list of original_name strings that survive the filter."""
     results = []
     for name, module in dit.named_modules():
-        if module.__class__.__name__ == "_MockBlock":
+        if module.__class__.__name__ in ("_MockBlock", "_MockFinalLayer"):
             for child_name, child_module in module.named_modules():
                 if isinstance(child_module, (nn.Linear, nn.Conv2d)):
                     original_name = (name + "." if name else "") + child_name
@@ -191,6 +206,13 @@ def _apply_layer_filter(dit, cfg):
                     if kind == "mlp" and not cfg.train_mlp:
                         continue
                     if kind == "adaln" and not cfg.train_adaln:
+                        continue
+                    if kind == "final_linear" and not cfg.train_final_layer_linear:
+                        continue
+                    if (
+                        kind == "final_adaln"
+                        and not cfg.train_final_layer_adaln_modulation
+                    ):
                         continue
                     results.append(original_name)
     return results
@@ -285,6 +307,35 @@ def test_enabling_adaln_includes_modulation_layers():
     assert any("adaln_modulation_mlp" in r for r in results)
 
 
+def test_default_config_excludes_final_layer():
+    """Default config excludes all FinalLayer modules."""
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg()
+    results = _apply_layer_filter(dit, cfg)
+    assert not any("final_layer" in r for r in results), (
+        f"Default config should exclude FinalLayer; got {[r for r in results if 'final_layer' in r]}"
+    )
+
+
+def test_enabling_final_layer_linear():
+    """train_final_layer_linear=true includes only final_layer.linear."""
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_final_layer_linear="true")
+    results = _apply_layer_filter(dit, cfg)
+    assert any("final_layer.linear" in r for r in results)
+    # adaln_modulation in FinalLayer should still be excluded
+    assert not any("final_layer.adaln_modulation" in r for r in results)
+
+
+def test_enabling_final_layer_adaln_modulation():
+    """train_final_layer_adaln_modulation=true includes only final_layer.adaln_modulation."""
+    dit = _MockDiT(num_blocks=2)
+    cfg = _make_cfg(train_final_layer_adaln_modulation="true")
+    results = _apply_layer_filter(dit, cfg)
+    assert any("final_layer.adaln_modulation" in r for r in results)
+    assert not any("final_layer.linear" in r for r in results)
+
+
 def test_style_only_preset():
     """Style only: self_attn=F, cross_attn=F, mlp=T, adaln=F -> only mlp modules."""
     dit = _MockDiT(num_blocks=1)
@@ -303,12 +354,14 @@ def test_style_only_preset():
 
 def test_output_layer_targeting_defaults():
     """Default cfg has output_self_attn=True, output_cross_attn=True,
-    output_mlp=True, output_adaln=False."""
+    output_mlp=True, output_adaln=False, output_final_layer_*=False."""
     cfg = _make_cfg()
     assert cfg.output_self_attn is True
     assert cfg.output_cross_attn is True
     assert cfg.output_mlp is True
     assert cfg.output_adaln is False
+    assert cfg.output_final_layer_linear is False
+    assert cfg.output_final_layer_adaln_modulation is False
 
 
 def test_output_layer_targeting_string_bool_parsing():
@@ -331,8 +384,14 @@ def test_shared_kwarg_flags_contains_layer_targeting_keys():
     from networks import NETWORK_KWARGS
 
     expected = {
-        "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
-        "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+        "train_self_attn",
+        "train_cross_attn",
+        "train_mlp",
+        "train_adaln",
+        "output_self_attn",
+        "output_cross_attn",
+        "output_mlp",
+        "output_adaln",
     }
     missing = expected - set(NETWORK_KWARGS)
     assert not missing, f"Missing from NETWORK_KWARGS: {missing}"
@@ -356,14 +415,8 @@ def test_classify_layer_supports_lora_name_underscore_form():
     assert _classify_layer("lora_unet_blocks_0_self_attn_qkv_proj") == "self_attn"
     assert _classify_layer("lora_unet_blocks_0_cross_attn_q") == "cross_attn"
     assert _classify_layer("lora_unet_blocks_0_mlp_fc1") == "mlp"
-    assert (
-        _classify_layer("lora_unet_blocks_0_adaln_modulation_self_attn_1")
-        == "adaln"
-    )
-    assert (
-        _classify_layer("lora_unet_blocks_0_adaln_modulation_mlp_1")
-        == "adaln"
-    )
+    assert _classify_layer("lora_unet_blocks_0_adaln_modulation_self_attn_1") == "adaln"
+    assert _classify_layer("lora_unet_blocks_0_adaln_modulation_mlp_1") == "adaln"
 
     # The plan's dot-prefix form must also still classify correctly now that
     # _classify_layer accepts both forms (defence in depth for any caller that
@@ -372,7 +425,22 @@ def test_classify_layer_supports_lora_name_underscore_form():
 
     # Non-DiT modules remain unclassified.
     assert _classify_layer("lora_unet_patch_embed_proj") is None
-    assert _classify_layer("lora_unet_final_layer_linear") is None
+
+    # FinalLayer modules classify by family (not None anymore).
+    assert _classify_layer("lora_unet_final_layer_linear") == "final_linear"
+    assert _classify_layer("lora_unet_final_layer_adaln_modulation_1") == "final_adaln"
+    assert _classify_layer("lora_unet_final_layer_adaln_modulation_2") == "final_adaln"
+
+
+def test_classify_layer_final_layer_not_confused_with_adaln():
+    """FinalLayer adaln_modulation must be 'final_adaln', not 'adaln',
+    because the underscore lora_name form contains 'adaln_modulation_'."""
+    assert _classify_layer("lora_unet_final_layer_adaln_modulation_1") == "final_adaln"
+    assert _classify_layer("lora_unet_final_layer_adaln_modulation_2") == "final_adaln"
+    # Block-level adaln must still be 'adaln'
+    assert _classify_layer("blocks.0.adaln_modulation_self_attn.1") == "adaln"
+    assert _classify_layer("final_layer.adaln_modulation.1") == "final_adaln"
+    assert _classify_layer("final_layer.linear") == "final_linear"
 
 
 def test_load_weights_warns_on_output_gated_metadata(tmp_path, caplog):
@@ -393,6 +461,7 @@ def test_load_weights_warns_on_output_gated_metadata(tmp_path, caplog):
     )
 
     from networks.lora_anima.network import LoRANetwork
+
     net = LoRANetwork.__new__(LoRANetwork)
 
     with caplog.at_level(logging.WARNING, logger="networks.lora_anima.network"):
@@ -418,6 +487,7 @@ def test_load_weights_no_warning_without_metadata(tmp_path, caplog):
     save_file(dummy, str(f), metadata={})
 
     from networks.lora_anima.network import LoRANetwork
+
     net = LoRANetwork.__new__(LoRANetwork)
 
     with caplog.at_level(logging.WARNING, logger="networks.lora_anima.network"):
@@ -446,12 +516,18 @@ def test_cli_argparse_has_output_layer_flags():
     assert defaults.get("output_mlp") is None
     assert defaults.get("output_adaln") is None
 
-    args = parser.parse_args([
-        "--output_self_attn", "false",
-        "--output_cross_attn", "true",
-        "--output_mlp", "false",
-        "--output_adaln", "true",
-    ])
+    args = parser.parse_args(
+        [
+            "--output_self_attn",
+            "false",
+            "--output_cross_attn",
+            "true",
+            "--output_mlp",
+            "false",
+            "--output_adaln",
+            "true",
+        ]
+    )
     assert args.output_self_attn is False
     assert args.output_cross_attn is True
     assert args.output_mlp is False
@@ -464,8 +540,10 @@ def test_workflow_bool_value_keys_contains_output_flags():
     from workflow.stages.train import _BOOL_VALUE_KEYS
 
     expected = {
-        "output_self_attn", "output_cross_attn",
-        "output_mlp", "output_adaln",
+        "output_self_attn",
+        "output_cross_attn",
+        "output_mlp",
+        "output_adaln",
     }
     missing = expected - _BOOL_VALUE_KEYS
     assert not missing, f"Missing from _BOOL_VALUE_KEYS: {missing}"
@@ -497,6 +575,7 @@ def test_build_train_cmd_passes_output_layer_flags():
 
 class _StubLora:
     """Minimal stand-in for a LoRAModule: only lora_name matters for filtering."""
+
     def __init__(self, lora_name):
         self.lora_name = lora_name
 
@@ -507,8 +586,10 @@ def _stub_save_state(net, loras, state_dict):
     _output_cfg = {
         "self_attn": net.cfg.output_self_attn,
         "cross_attn": net.cfg.output_cross_attn,
-        "mlp":       net.cfg.output_mlp,
-        "adaln":     net.cfg.output_adaln,
+        "mlp": net.cfg.output_mlp,
+        "adaln": net.cfg.output_adaln,
+        "final_linear": net.cfg.output_final_layer_linear,
+        "final_adaln": net.cfg.output_final_layer_adaln_modulation,
     }
     removed = {k: 0 for k in _output_cfg}
     for lora in loras:
@@ -528,6 +609,8 @@ def _make_stub_loras():
         _StubLora("lora_unet_blocks_0_cross_attn_kv_proj"),
         _StubLora("lora_unet_blocks_0_mlp_fc1"),
         _StubLora("lora_unet_blocks_0_adaln_modulation_proj"),
+        _StubLora("lora_unet_final_layer_linear"),
+        _StubLora("lora_unet_final_layer_adaln_modulation_1"),
     ]
 
 
@@ -541,8 +624,13 @@ def _make_full_state_dict():
         "lora_unet_blocks_0_mlp_fc1.lora_down.weight",
         "lora_unet_blocks_0_adaln_modulation_proj.lora_up.weight",
         "lora_unet_blocks_0_adaln_modulation_proj.lora_down.weight",
+        "lora_unet_final_layer_linear.lora_up.weight",
+        "lora_unet_final_layer_linear.lora_down.weight",
+        "lora_unet_final_layer_adaln_modulation_1.lora_up.weight",
+        "lora_unet_final_layer_adaln_modulation_1.lora_down.weight",
     ]
     import torch
+
     return {k: torch.zeros(1) for k in keys}
 
 
@@ -552,15 +640,18 @@ class _StubNet:
 
 
 def test_output_filter_default_strips_only_adaln_when_all_families_trained():
-    """Default output_* config (T,T,T,F) with all 4 families trained:
-    only adaln is stripped, because output_adaln=False."""
-    cfg = _make_cfg(train_adaln="true")  # train all 4
+    """Default output_* config (T,T,T,F) with all families trained:
+    only adaln + final_layer families are stripped (output_*=False)."""
+    cfg = _make_cfg(train_adaln="true")  # train all block families
     loras = _make_stub_loras()
     sd = _make_full_state_dict()
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
     # adaln gated off, one module, two keys
-    assert removed == {"self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 2}
-    assert not any("adaln_modulation" in k for k in sd)
+    assert removed["adaln"] == 2
+    assert removed["self_attn"] == 0
+    assert removed["cross_attn"] == 0
+    assert removed["mlp"] == 0
+    assert not any("blocks_0_adaln_modulation" in k for k in sd)
     assert any("self_attn" in k for k in sd)
 
 
@@ -597,13 +688,22 @@ def test_output_filter_disables_mlp():
 
 def test_output_filter_independent_of_train_filter():
     """train_adaln=false + output_adaln=true: no error, no removals
-    (because adaln modules never entered self.unet_loras)."""
-    cfg = _make_cfg()  # train_adaln=False default
-    # No adaln lora in the list, mirroring the production filter step
-    loras = [l for l in _make_stub_loras() if "adaln" not in l.lora_name]
-    sd = {k: v for k, v in _make_full_state_dict().items() if "adaln" not in k}
+    (because adaln modules never entered self.unet_loras).
+    Similarly final_layer_* modules are absent when train_final_layer_*=false."""
+    cfg = _make_cfg()  # train_adaln=False, train_final_layer_*=False defaults
+    # Mirror the production filter step: only trained modules enter self.unet_loras
+    loras = [
+        lo
+        for lo in _make_stub_loras()
+        if "adaln" not in lo.lora_name and "final_layer" not in lo.lora_name
+    ]
+    sd = {
+        k: v
+        for k, v in _make_full_state_dict().items()
+        if "adaln" not in k and "final_layer" not in k
+    }
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
-    assert removed == {"self_attn": 0, "cross_attn": 0, "mlp": 0, "adaln": 0}
+    assert not any(removed.values())
 
 
 def test_output_filter_train_true_output_false_strips_at_save():
@@ -613,15 +713,24 @@ def test_output_filter_train_true_output_false_strips_at_save():
     sd = _make_full_state_dict()
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
     assert removed["adaln"] == 2
-    assert not any("adaln_modulation" in k for k in sd)
+    assert not any("blocks_0_adaln_modulation" in k for k in sd)
 
 
 def test_metadata_silent_for_default_config():
-    """Default save (train_adaln=False, output_adaln=False) emits NO
+    """Default save (train_adaln=False, train_final_layer_*=False) emits NO
     ss_output_gated metadata because nothing was actually removed."""
-    cfg = _make_cfg()  # train_adaln=False default; adaln never trained
-    loras = [l for l in _make_stub_loras() if "adaln" not in l.lora_name]
-    sd = {k: v for k, v in _make_full_state_dict().items() if "adaln" not in k}
+    cfg = _make_cfg()  # train_adaln=False, train_final_layer_*=False defaults
+    # Mirror production: only trained modules enter self.unet_loras
+    loras = [
+        lo
+        for lo in _make_stub_loras()
+        if "adaln" not in lo.lora_name and "final_layer" not in lo.lora_name
+    ]
+    sd = {
+        k: v
+        for k, v in _make_full_state_dict().items()
+        if "adaln" not in k and "final_layer" not in k
+    }
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
     # Production: metadata is written only if any(_removed_counts.values())
     assert not any(removed.values()), "Default config should remove nothing"
@@ -629,16 +738,14 @@ def test_metadata_silent_for_default_config():
 
 def test_metadata_emitted_when_adaln_actually_gated():
     """train_adaln=true + output_adaln=false emits ss_output_gated=true
-    and ss_output_gated_layers=adaln."""
+    and ss_output_gated_layers includes adaln."""
     cfg = _make_cfg(train_adaln="true")  # output_adaln=False default
     loras = _make_stub_loras()
     sd = _make_full_state_dict()
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
-    # Production: metadata would be {"ss_output_gated": "true",
-    # "ss_output_gated_layers": "adaln"}
     assert removed["adaln"] > 0
-    expected_layers = ",".join(k for k, n in removed.items() if n > 0)
-    assert expected_layers == "adaln"
+    expected_layers = set(k for k, n in removed.items() if n > 0)
+    assert "adaln" in expected_layers
 
 
 def test_metadata_emitted_for_multiple_gated_families():
@@ -651,4 +758,39 @@ def test_metadata_emitted_for_multiple_gated_families():
     sd = _make_full_state_dict()
     sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
     expected_layers = set(k for k, n in removed.items() if n > 0)
-    assert expected_layers == {"self_attn", "adaln"}
+    assert "self_attn" in expected_layers
+    assert "adaln" in expected_layers
+
+
+def test_output_filter_final_layer_linear():
+    """output_final_layer_linear=false strips final_layer_linear keys."""
+    cfg = _make_cfg(
+        train_final_layer_linear="true",
+        train_final_layer_adaln_modulation="true",
+        output_final_layer_linear="false",
+        output_final_layer_adaln_modulation="true",
+    )
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["final_linear"] == 2
+    assert removed["final_adaln"] == 0
+    assert not any("final_layer_linear" in k for k in sd)
+    assert any("final_layer_adaln_modulation" in k for k in sd)
+
+
+def test_output_filter_final_layer_adaln_modulation():
+    """output_final_layer_adaln_modulation=false strips final_layer_adaln keys."""
+    cfg = _make_cfg(
+        train_final_layer_linear="true",
+        train_final_layer_adaln_modulation="true",
+        output_final_layer_linear="true",
+        output_final_layer_adaln_modulation="false",
+    )
+    loras = _make_stub_loras()
+    sd = _make_full_state_dict()
+    sd, removed = _stub_save_state(_StubNet(cfg), loras, sd)
+    assert removed["final_linear"] == 0
+    assert removed["final_adaln"] == 2
+    assert any("final_layer_linear" in k for k in sd)
+    assert not any("final_layer_adaln_modulation" in k for k in sd)

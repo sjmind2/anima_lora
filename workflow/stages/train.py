@@ -57,6 +57,10 @@ _BOOL_VALUE_KEYS = {
     "output_cross_attn",
     "output_mlp",
     "output_adaln",
+    "train_final_layer_linear",
+    "train_final_layer_adaln_modulation",
+    "output_final_layer_linear",
+    "output_final_layer_adaln_modulation",
 }
 
 
@@ -259,10 +263,20 @@ class TrainExecutor(StageBase):
         skip_keys = _DATASET_KEYS | _METADATA_KEYS | _NETWORK_MODULE_KWARGS
         skip_keys = skip_keys | {"bucket_families"}
 
+        # Layer-index selection keys: skip when empty (means "all blocks")
+        _LAYER_SELECT_KEYS = {
+            "train_self_attn_layers",
+            "train_cross_attn_layers",
+            "train_mlp_layers",
+            "train_adaln_layers",
+        }
+
         for key, value in resolved_config.items():
             if key in skip_keys:
                 continue
             if value is None:
+                continue
+            if key in _LAYER_SELECT_KEYS and not value:
                 continue
             if key in _NARGS_STAR_KEYS:
                 cmd.append(f"--{key}")

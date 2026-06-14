@@ -12,7 +12,7 @@ import torch
 from library.log import setup_logging
 from networks import NETWORK_REGISTRY, NetworkSpec, lora_save
 from networks.attn_fuse import match_fused_spec
-from networks.lora_anima.config import LoRANetworkCfg
+from networks.lora_anima.config import LoRANetworkCfg, parse_layer_selection
 from networks.lora_anima.loading import (
     _refuse_split_hydra_keys,
     _refuse_split_loha_keys,
@@ -56,10 +56,12 @@ _BLOCK_IDX_RE = re.compile(r"blocks\.(\d+)\.")
 
 
 def _classify_layer(original_name: str) -> str | None:
-    """Classify a DiT module path as self_attn / cross_attn / mlp / adaln / None.
+    """Classify a DiT module path as self_attn / cross_attn / mlp / adaln /
+    final_linear / final_adaln / None.
 
     Used by ``create_modules`` to skip layer types the user has disabled via
-    ``train_self_attn`` / ``train_cross_attn`` / ``train_mlp`` / ``train_adaln``,
+    ``train_self_attn`` / ``train_cross_attn`` / ``train_mlp`` / ``train_adaln``
+    / ``train_final_layer_linear`` / ``train_final_layer_adaln_modulation``,
     and by ``save_weights`` to strip layer types disabled for output via the
     parallel ``output_*`` flags.
 
@@ -71,16 +73,25 @@ def _classify_layer(original_name: str) -> str | None:
         ``save_weights`` only has ``lora.lora_name`` available.
 
     Boundary rules (checked in order):
-      1. ``adaln_modulation_`` (underscore suffix) -- matches all three
-         modulation projections (self/cross/mlp). Must be checked first so
-         that ``adaln_modulation_self_attn`` / ``adaln_modulation_mlp`` do
-         not get pulled into the self_attn / mlp families by the underscore
-         boundary checks below.
-      2. ``.self_attn.`` / ``.cross_attn.`` / ``.mlp.`` (dot boundaries) for
+      1. ``final_layer`` -- matches FinalLayer sub-modules (linear /
+         adaln_modulation). MUST be checked before ``adaln_modulation_``
+         because the underscore lora_name form
+         ``final_layer_adaln_modulation_1`` contains ``adaln_modulation_``.
+      2. ``adaln_modulation_`` (underscore suffix) -- matches all three
+         modulation projections (self/cross/mlp). Must be checked before
+         ``self_attn`` / ``mlp`` families by the underscore boundary checks
+         below.
+      3. ``.self_attn.`` / ``.cross_attn.`` / ``.mlp.`` (dot boundaries) for
          the dotted ``original_name`` form.
-      3. ``_self_attn_`` / ``_cross_attn_`` / ``_mlp_`` (underscore
+      4. ``_self_attn_`` / ``_cross_attn_`` / ``_mlp_`` (underscore
          boundaries) for the underscore ``lora_name`` form.
     """
+    if "final_layer" in original_name:
+        if "adaln_modulation" in original_name:
+            return "final_adaln"
+        if "linear" in original_name:
+            return "final_linear"
+        return None
     if "adaln_modulation_" in original_name:
         return "adaln"
     if ".self_attn." in original_name:
@@ -290,12 +301,16 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                 "cross_attn": 0,
                 "mlp": 0,
                 "adaln": 0,
+                "final_linear": 0,
+                "final_adaln": 0,
             }
             attached_by_target: dict[str, int] = {
                 "self_attn": 0,
                 "cross_attn": 0,
                 "mlp": 0,
                 "adaln": 0,
+                "final_linear": 0,
+                "final_adaln": 0,
             }
             for name, module in root_module.named_modules():
                 if (
@@ -386,6 +401,52 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                                         f"layer_target exclude: {original_name} (adaln disabled)"
                                     )
                                 continue
+                            if (
+                                layer_kind == "final_linear"
+                                and not cfg.train_final_layer_linear
+                            ):
+                                skipped_by_target["final_linear"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (final_layer_linear disabled)"
+                                    )
+                                continue
+                            if (
+                                layer_kind == "final_adaln"
+                                and not cfg.train_final_layer_adaln_modulation
+                            ):
+                                skipped_by_target["final_adaln"] += 1
+                                if verbose:
+                                    logger.info(
+                                        f"layer_target exclude: {original_name} (final_layer_adaln_modulation disabled)"
+                                    )
+                                continue
+
+                            # ── Per-layer-index selection filter ───────
+                            # Applies *within* a family: only the listed
+                            # block indices get adapters. None/empty = all.
+                            if layer_kind is not None and is_unet:
+                                _layer_spec_map = {
+                                    "self_attn": cfg.train_self_attn_layers,
+                                    "cross_attn": cfg.train_cross_attn_layers,
+                                    "mlp": cfg.train_mlp_layers,
+                                    "adaln": cfg.train_adaln_layers,
+                                }
+                                _layer_spec = _layer_spec_map.get(layer_kind)
+                                if _layer_spec:
+                                    _block_set = parse_layer_selection(_layer_spec)
+                                    if _block_set is not None:
+                                        _bm = _BLOCK_IDX_RE.match(original_name)
+                                        if _bm:
+                                            _bi = int(_bm.group(1))
+                                            if _bi not in _block_set:
+                                                skipped_by_target[layer_kind] += 1
+                                                if verbose:
+                                                    logger.info(
+                                                        f"layer_index exclude: {original_name}"
+                                                        f" (block {_bi} not in selection)"
+                                                    )
+                                                continue
 
                             dim = None
                             alpha_val = None
@@ -467,7 +528,9 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                 "[%s] Layer targeting: self_attn=%s (%d attached, %d skipped), "
                 "cross_attn=%s (%d attached, %d skipped), "
                 "mlp=%s (%d attached, %d skipped), "
-                "adaln=%s (%d attached, %d skipped)",
+                "adaln=%s (%d attached, %d skipped), "
+                "final_linear=%s (%d attached, %d skipped), "
+                "final_adaln=%s (%d attached, %d skipped)",
                 _label,
                 cfg.train_self_attn,
                 attached_by_target["self_attn"],
@@ -481,6 +544,12 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                 cfg.train_adaln,
                 attached_by_target["adaln"],
                 skipped_by_target["adaln"],
+                cfg.train_final_layer_linear,
+                attached_by_target["final_linear"],
+                skipped_by_target["final_linear"],
+                cfg.train_final_layer_adaln_modulation,
+                attached_by_target["final_adaln"],
+                skipped_by_target["final_adaln"],
             )
 
             # Second pass: create LoRA modules with progress bar
@@ -1633,7 +1702,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             self.content_router._last_gates = None
             self.content_router._last_input = None
 
-
     @staticmethod
     def _strip_orig_mod_keys(state_dict):
         """Strip torch.compile '_orig_mod_' from state_dict keys for compat with old checkpoints."""
@@ -2207,8 +2275,10 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         _output_cfg = {
             "self_attn": self.cfg.output_self_attn,
             "cross_attn": self.cfg.output_cross_attn,
-            "mlp":       self.cfg.output_mlp,
-            "adaln":     self.cfg.output_adaln,
+            "mlp": self.cfg.output_mlp,
+            "adaln": self.cfg.output_adaln,
+            "final_linear": self.cfg.output_final_layer_linear,
+            "final_adaln": self.cfg.output_final_layer_adaln_modulation,
         }
         _removed_counts = {k: 0 for k in _output_cfg}
         for _lora in self.text_encoder_loras + self.unet_loras:
@@ -2227,7 +2297,9 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                 f"self_attn={_removed_counts['self_attn']}, "
                 f"cross_attn={_removed_counts['cross_attn']}, "
                 f"mlp={_removed_counts['mlp']}, "
-                f"adaln={_removed_counts['adaln']}"
+                f"adaln={_removed_counts['adaln']}, "
+                f"final_linear={_removed_counts['final_linear']}, "
+                f"final_adaln={_removed_counts['final_adaln']}"
             )
             metadata["ss_output_gated"] = "true"
             metadata["ss_output_gated_layers"] = ",".join(

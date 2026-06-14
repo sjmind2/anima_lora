@@ -82,8 +82,23 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         # --- layer-type targeting (fork) ---
         # Training-time: which DiT layer families receive adapters at all.
         # Save-time: which trained families are written to the .safetensors.
-        "train_self_attn", "train_cross_attn", "train_mlp", "train_adaln",
-        "output_self_attn", "output_cross_attn", "output_mlp", "output_adaln",
+        "train_self_attn",
+        "train_cross_attn",
+        "train_mlp",
+        "train_adaln",
+        "output_self_attn",
+        "output_cross_attn",
+        "output_mlp",
+        "output_adaln",
+        "train_final_layer_linear",
+        "train_final_layer_adaln_modulation",
+        "output_final_layer_linear",
+        "output_final_layer_adaln_modulation",
+        # Per-layer-index selection within each family (string like "0,1,5-8")
+        "train_self_attn_layers",
+        "train_cross_attn_layers",
+        "train_mlp_layers",
+        "train_adaln_layers",
         # --- core targeting / knobs (every variant) ---
         "train_llm_adapter",
         "exclude_patterns",
@@ -315,7 +330,14 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         name="lokr",
         module_class=LokrModule,
         save_variant="standard",
-        kwarg_flags=("use_tucker", "decompose_both", "lokr_factor", "use_scalar", "weight_decompose", "full_matrix"),
+        kwarg_flags=(
+            "use_tucker",
+            "decompose_both",
+            "lokr_factor",
+            "use_scalar",
+            "weight_decompose",
+            "full_matrix",
+        ),
     ),
 }
 

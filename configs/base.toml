@@ -26,6 +26,10 @@ output_self_attn = true
 output_cross_attn = true
 output_mlp = true
 output_adaln = false
+train_final_layer_linear = false
+train_final_layer_adaln_modulation = false
+output_final_layer_linear = false
+output_final_layer_adaln_modulation = false
 
 # ── Dataset paths (shared preprocess ↔ training contract) ──────────────────
 # Top-level scalars so any preset / method can override (the merge chain is

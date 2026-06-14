@@ -212,6 +212,10 @@
         "output_cross_attn": "输出 Cross-Attn",
         "output_mlp": "输出 MLP",
         "output_adaln": "输出 AdaLN",
+        "train_final_layer_linear": "训练 FinalLayer Linear",
+        "train_final_layer_adaln_modulation": "训练 FinalLayer AdaLN",
+        "output_final_layer_linear": "输出 FinalLayer Linear",
+        "output_final_layer_adaln_modulation": "输出 FinalLayer AdaLN",
         "datasets": "输入数据集",
         "reg_datasets": "正则化数据集",
         "prior_loss_weight": "先验损失权重",
@@ -247,7 +251,11 @@
         "output_self_attn": "保存 self-attention LoRA 权重到输出文件",
         "output_cross_attn": "保存 cross-attention LoRA 权重到输出文件",
         "output_mlp": "保存 MLP LoRA 权重到输出文件",
-        "output_adaln": "保存 AdaLN 调制 LoRA 权重到输出文件（默认关闭）"
+        "output_adaln": "保存 AdaLN 调制 LoRA 权重到输出文件（默认关闭）",
+        "train_final_layer_linear": "对最终输出投影层（速度场预测头）附加 LoRA — 默认关闭",
+        "train_final_layer_adaln_modulation": "对 FinalLayer AdaLN 调制层附加 LoRA — 默认关闭",
+        "output_final_layer_linear": "保存 FinalLayer Linear LoRA 权重到输出文件",
+        "output_final_layer_adaln_modulation": "保存 FinalLayer AdaLN 调制 LoRA 权重到输出文件"
       }
     },
     "train_lora": {
