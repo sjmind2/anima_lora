@@ -1,25 +1,33 @@
 network_dim = 8
 network_alpha = 16
-learning_rate = 0.0004
-max_train_epochs = 2
-save_every_n_epochs = 2
+learning_rate = 1e-5
+max_train_epochs = 4
+save_every_n_epochs = 4
 checkpointing_epochs = 2
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
-caption_dropout_rate = 0.03
+caption_dropout_rate = 0.0
 output_name = "anima_lora"
 blocks_to_swap = 0
 use_cmmd = false
 output_dir = "output/ckpt_12"
 source_image_dir = "O:/LoRATraining/hanechan"
 lr_scheduler = "cosine"
-bucket_families = [ "S2",]
+bucket_families = [ "S1",]
 optimizer_args = [ "weight_decay=0.01", "betas=0.9,0.999,0.9999",]
 optimizer_type = "CAME"
-gradient_checkpointing = true
+gradient_checkpointing = false
+sample_prompts = []
+sample_every_n_epochs = 0
+sample_at_first = false
+sample_decode_inline = "false"
+repa_target_dog = true
+repa_weight = 0.5
+use_repa = true
 [[datasets]]
 validation_split_num = 0
 validation_split = 0.0
+batch_size = 4
 [[datasets.subsets]]
 image_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.resized"
 cache_dir = "post_image_dataset/hanechan/1_hanechan_v8_full/.lora"
@@ -82,4 +90,16 @@ family = "lora"
 label = "LoRA"
 description = "Plain classic LoRA — simplest baseline."
 order = 10
-target_res = [ 896, 1024,]
+target_res = [ 512,]
+drop_lowres_images = false
+caption_tag_dropout_rate = 0.05
+run_sam_mask = true
+run_mit_mask = true
+mask_path_pattern = "*"
+mit_text_threshold = 0.8
+mit_dilate = 5
+[[variant.mask_rules]]
+prompts = [ "speech bubble", "text bubble",]
+threshold = 0.7
+dilate = 3
+

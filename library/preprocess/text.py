@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import torch
@@ -135,6 +135,7 @@ def _cache_text_embeddings_subset(
     device: torch.device,
     cache_dir: Path | None = None,
     recursive: bool = False,
+    keep_stems: Collection[str] | None = None,
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
@@ -143,6 +144,15 @@ def _cache_text_embeddings_subset(
     progress: ProgressFn | None = None,
 ) -> PreprocessStats:
     candidates = walk_images(image_dir, recursive=recursive)
+    if keep_stems is not None:
+        keep = frozenset(keep_stems)
+        pre = len(candidates)
+        candidates = [p for p in candidates if p.stem in keep]
+        if verbose and len(candidates) != pre:
+            print(
+                f"Stem filter: keeping {len(candidates)}/{pre} captions "
+                "(matched-subset only)."
+            )
 
     entries: list[tuple[Path, str]] = []
     skipped_small = 0
@@ -279,6 +289,7 @@ def cache_text_embeddings(
     cache_dir: Path | None = None,
     recursive: bool = False,
     tree: bool = False,
+    keep_stems: Collection[str] | None = None,
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
@@ -311,6 +322,7 @@ def cache_text_embeddings(
             device=device,
             cache_dir=cache_dir,
             recursive=recursive,
+            keep_stems=keep_stems,
             batch_size=batch_size,
             caption_shuffle_variants=caption_shuffle_variants,
             caption_tag_dropout_rate=caption_tag_dropout_rate,

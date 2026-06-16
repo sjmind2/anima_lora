@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import toml
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QTabWidget,
     QTextBrowser,
@@ -26,7 +30,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui import (
+    DEFAULT_AUTOTAG_CONFIDENCE,
+    get_setting,
+    set_setting,
+)
 from gui import daemon as gui_daemon
+from gui import theme as gui_theme
 from gui.i18n import (
     available_languages,
     current_language,
@@ -44,6 +54,7 @@ from gui.tabs.queue_tab import QueueTab
 from gui.tensorboard import TensorBoardTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
+    GITHUB_REPO_URL,
     check_for_update_async,
     open_models_dialog,
     open_update_dialog,
@@ -73,65 +84,11 @@ _WINDOW: MainWindow | None = None
 
 
 def _dark(app: QApplication):
-    # Use a font that supports Korean glyphs on Windows
-    font = QFont("Malgun Gothic", 9)
-    font.setStyleHint(QFont.SansSerif)
-    app.setFont(font)
+    """Apply the user's chosen named theme (Dark / Light / Sepia).
 
-    p = QPalette()
-    for role, color in [
-        (QPalette.Window, QColor(30, 30, 30)),
-        (QPalette.WindowText, QColor(220, 220, 220)),
-        (QPalette.Base, QColor(25, 25, 25)),
-        (QPalette.AlternateBase, QColor(35, 35, 35)),
-        (QPalette.ToolTipBase, QColor(50, 50, 50)),
-        (QPalette.ToolTipText, QColor(220, 220, 220)),
-        (QPalette.Text, QColor(220, 220, 220)),
-        (QPalette.Button, QColor(45, 45, 45)),
-        (QPalette.ButtonText, QColor(220, 220, 220)),
-        (QPalette.Highlight, QColor(60, 120, 200)),
-        (QPalette.HighlightedText, QColor(255, 255, 255)),
-        # Default Qt link blue (#0000ff-ish) is unreadable on dark bg.
-        (QPalette.Link, QColor(0xFF, 0xB8, 0x6B)),
-        (QPalette.LinkVisited, QColor(0xE6, 0x94, 0x4E)),
-    ]:
-        p.setColor(role, color)
-    app.setPalette(p)
-    app.setStyleSheet("""
-        QGroupBox {
-            font-weight: bold; border: 1px solid #444;
-            border-radius: 4px; margin-top: 8px; padding-top: 16px;
-        }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-        QPushButton { padding: 4px 12px; border: 1px solid #555; border-radius: 3px; }
-        QPushButton:hover { background: #555; }
-        QScrollArea { border: none; }
-        QSplitter::handle { background: #444; }
-        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #555; border-radius: 3px;
-            padding: 2px 4px;
-        }
-        QComboBox QAbstractItemView {
-            background: #2a2a2a; color: #dcdcdc; selection-background-color: #3c78c8;
-        }
-        QTabWidget::pane { border: 1px solid #444; }
-        QTabBar::tab {
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;
-            padding: 6px 14px;
-            font-size: 12.5px; font-weight: 500;
-            border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
-        }
-        QTabBar::tab:selected { background: #1e1e1e; color: #ffffff; }
-        QTabBar::tab:hover { background: #3a3a3a; }
-        QToolTip { max-width: 400px; }
-        QMenu {
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #555;
-        }
-        QMenu::item { padding: 4px 20px; background: transparent; color: #dcdcdc; }
-        QMenu::item:selected { background: #3c78c8; color: #ffffff; }
-        QMenu::item:disabled { color: #777; }
-        QMenu::separator { height: 1px; background: #444; margin: 4px 8px; }
-    """)
+    Thin wrapper kept for call-site stability; the palette + stylesheet now live
+    in ``gui.theme`` so individual widgets can share the same tokens."""
+    gui_theme.apply_theme(app)
 
 
 class GuidebookDialog(QDialog):
@@ -246,6 +203,70 @@ class SettingsDialog(QDialog):
         lang_row.addStretch()
         lay.addLayout(lang_row)
 
+        prefs_group = QGroupBox(t("settings_prefs_header"))
+        prefs_lay = QVBoxLayout(prefs_group)
+
+        # Autotagger confidence floor (applied on top of the model's per-tag F1
+        # thresholds; see AnimaTagger.predict_caption min_confidence).
+        conf_row = QHBoxLayout()
+        conf_label = QLabel(t("settings_autotag_confidence"))
+        conf_label.setToolTip(t("settings_autotag_confidence_tooltip"))
+        conf_row.addWidget(conf_label)
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.0, 1.0)
+        self.conf_spin.setSingleStep(0.05)
+        self.conf_spin.setDecimals(2)
+        self.conf_spin.setToolTip(t("settings_autotag_confidence_tooltip"))
+        self.conf_spin.setValue(
+            float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
+        )
+        self.conf_spin.valueChanged.connect(
+            lambda v: set_setting("autotag_confidence", round(float(v), 2))
+        )
+        self.conf_spin.setFixedWidth(80)
+        conf_row.addWidget(self.conf_spin)
+        conf_row.addStretch()
+        prefs_lay.addLayout(conf_row)
+
+        # Theme selector — Dark / Light / Sepia. Applied live across the app
+        # palette + stylesheet; closing the dialog rebuilds the window so each
+        # tab's per-widget tokens (gui.theme.tok) repaint in the new theme.
+        theme_row = QHBoxLayout()
+        theme_label = QLabel(t("settings_theme"))
+        theme_label.setToolTip(t("settings_theme_tooltip"))
+        theme_row.addWidget(theme_label)
+        self.theme_combo = QComboBox()
+        for code in gui_theme.THEME_ORDER:
+            self.theme_combo.addItem(t(gui_theme.THEME_LABEL_KEYS[code]), code)
+        cur = gui_theme.current_theme_name()
+        self.theme_combo.setCurrentIndex(gui_theme.THEME_ORDER.index(cur))
+        self.theme_combo.setToolTip(t("settings_theme_tooltip"))
+        self.theme_combo.currentIndexChanged.connect(self._change_theme)
+        self.theme_combo.setFixedWidth(140)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch()
+        prefs_lay.addLayout(theme_row)
+
+        # App font size — point size handed to QApplication.setFont. Applied live
+        # (apply_theme re-runs); closing the dialog rebuilds the window so widgets
+        # that sized themselves to the old metrics relayout cleanly.
+        font_row = QHBoxLayout()
+        font_label = QLabel(t("settings_font_size"))
+        font_label.setToolTip(t("settings_font_size_tooltip"))
+        font_row.addWidget(font_label)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(gui_theme.FONT_SIZE_MIN, gui_theme.FONT_SIZE_MAX)
+        self.font_spin.setSuffix(" pt")
+        self.font_spin.setToolTip(t("settings_font_size_tooltip"))
+        self.font_spin.setValue(gui_theme.current_font_size())
+        self.font_spin.valueChanged.connect(self._change_font_size)
+        self.font_spin.setFixedWidth(80)
+        font_row.addWidget(self.font_spin)
+        font_row.addStretch()
+        prefs_lay.addLayout(font_row)
+
+        lay.addWidget(prefs_group)
+
         mcp_group = QGroupBox(t("settings_mcp_header"))
         mcp_lay = QVBoxLayout(mcp_group)
         self._add_command_block(
@@ -308,6 +329,32 @@ class SettingsDialog(QDialog):
             self.reload_requested = True
             self.accept()
 
+    def _change_theme(self, idx: int) -> None:
+        """Persist + apply the chosen theme live, then request a window rebuild.
+
+        ``apply_theme`` restyles app-level chrome immediately; the rebuild on
+        close makes per-widget ``tok()`` lookups (log boxes, previews, …) repaint
+        too. Unlike a language change there's no confirm prompt — it's cheap and
+        reversible."""
+        name = self.theme_combo.itemData(idx)
+        gui_theme.set_theme(name)
+        app = QApplication.instance()
+        if app is not None:
+            gui_theme.apply_theme(app, name)
+        self.reload_requested = True
+
+    def _change_font_size(self, size: int) -> None:
+        """Persist + apply the chosen app font size live, then request a rebuild.
+
+        ``apply_theme`` re-reads the size into ``app.setFont``; the rebuild on
+        close lets widgets that cached the old font metrics relayout. Like the
+        theme, it's cheap and reversible, so there's no confirm prompt."""
+        gui_theme.set_font_size(size)
+        app = QApplication.instance()
+        if app is not None:
+            gui_theme.apply_theme(app)
+        self.reload_requested = True
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -316,6 +363,16 @@ class MainWindow(QMainWindow):
         self.resize(1100, 750)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
+
+        # Right-click anywhere — including over text widgets that would otherwise
+        # show Qt's default copy/select-all menu (explanation panels, log
+        # consoles) — opens our app menu. An app-wide event filter catches the
+        # ContextMenu event before it reaches the target widget so the menu is
+        # uniform everywhere. Removed in closeEvent so a _reload_ui rebuild
+        # doesn't stack filters.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         central = QWidget()
         main_lay = QVBoxLayout(central)
@@ -469,6 +526,12 @@ class MainWindow(QMainWindow):
         self._update_queue_btn_style(False)
 
     def closeEvent(self, event):
+        # Drop the app-wide context-menu filter so a _reload_ui rebuild (which
+        # closes this window and constructs a fresh one) doesn't leave a dead
+        # window filtering events.
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         # Without this, closing the window leaves training subprocesses
         # (accelerate → train.py) orphaned and still holding VRAM.
         for i in range(self.tabs.count()):
@@ -528,6 +591,42 @@ class MainWindow(QMainWindow):
             self._queue_active_style if on else self._queue_idle_style
         )
 
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt event handler name
+        """Intercept every right-click in the app and show our menu instead of
+        the target widget's default one (text widgets ship a copy/select-all
+        menu we want to override). Returning True consumes the event."""
+        if event.type() == QEvent.ContextMenu:
+            self._show_context_menu(event.globalPos())
+            return True
+        return super().eventFilter(obj, event)
+
+    def _show_context_menu(self, global_pos):
+        """Walk up from the widget under the cursor; the first ancestor exposing
+        a callable ``app_context_menu(target, global_pos)`` gets to supply the
+        menu (e.g. the dataset image view → open-in-system-viewer). If none does
+        — or it declines by returning None — fall back to the app default."""
+        target = QApplication.widgetAt(global_pos)
+        w = target
+        while w is not None:
+            provider = getattr(w, "app_context_menu", None)
+            if callable(provider):
+                menu = provider(target, global_pos)
+                if menu is not None:
+                    menu.exec(global_pos)
+                    return
+                break
+            w = w.parentWidget()
+        self._show_app_menu(global_pos)
+
+    def _show_app_menu(self, global_pos):
+        """The default right-click menu — currently just a link to the repo."""
+        menu = QMenu(self)
+        visit = menu.addAction(t("visit_github"))
+        visit.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPO_URL))
+        )
+        menu.exec(global_pos)
+
     def _open_guidebook(self):
         path = _guidebook_path()
         if not path.exists():
@@ -545,9 +644,10 @@ class MainWindow(QMainWindow):
             self._reload_ui()
 
     def _reload_ui(self):
-        """Rebuild the main window in place to apply a language change — every
-        string is resolved at construction, so a fresh window is the cleanest
-        way to retranslate. The daemon owns running jobs, so only local UI
+        """Rebuild the main window in place to apply a language or theme change —
+        every string and per-widget theme token is resolved at construction, so a
+        fresh window is the cleanest way to re-render. The daemon owns running
+        jobs, so only local UI
         state (unsaved edits, overlay subprocesses) resets; closeEvent reaps
         the old window's TensorBoard/Queue children as usual. New window is
         shown before the old closes so quitOnLastWindowClosed never fires."""
@@ -588,9 +688,58 @@ def _ensure_source_image_dir() -> None:
         print(f"warn: could not create {src_path}: {e}", file=sys.stderr)
 
 
+def _prefer_cleartype_font_engine() -> None:
+    """Use Qt's GDI font engine on Windows — but only at integer DPI scaling.
+
+    Qt 6 defaults to the DirectWrite font engine on Windows, which rasterizes
+    small UI text with *grayscale* antialiasing — it reads soft/blurry next to
+    native apps, and the effect is worse on lightly-hinted modern faces like the
+    bundled Pretendard. The GDI engine uses ClearType subpixel rendering (what
+    native Windows controls use), which snaps small text crisp.
+
+    But GDI ClearType is tied to the *physical* pixel grid: at the fractional
+    display scaling most laptops ship (125% / 150%) it renders fringed and can
+    come out undersized, because the GDI engine honors Qt's device-pixel-ratio
+    less cleanly than DirectWrite. So we only force GDI when the display is at an
+    integer scale (100% / 200%, where ClearType lines up) and let DirectWrite
+    handle fractional-scaled screens.
+
+    Reading the real scaling requires the process to be DPI-aware first — an
+    unaware process always reports 96 DPI (100%). We set per-monitor-v2 awareness
+    up front (the same context Qt 6 sets itself, so this only moves the call
+    earlier) and query ``GetDpiForSystem``. The platform option must be set
+    *before* ``QApplication`` is constructed. Skipped if the user already pinned
+    ``QT_QPA_PLATFORM`` (explicit choice, or offscreen in tests), and falls back
+    to DirectWrite on older Windows where the DPI APIs are missing."""
+    if sys.platform != "win32" or "QT_QPA_PLATFORM" in os.environ:
+        return
+    try:
+        import ctypes
+
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4. Harmless if it fails
+        # (awareness already set) — we still get a usable DPI below.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+        dpi = ctypes.windll.user32.GetDpiForSystem()  # 96 == 100%
+    except (OSError, AttributeError):
+        return  # pre-1607 Windows / no DPI API — leave Qt on DirectWrite
+    if not dpi:
+        return
+    scale = dpi / 96.0
+    if abs(scale - round(scale)) < 0.01:  # integer scaling only
+        os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=gdi"
+
+
 def main():
     load_language()
     _ensure_source_image_dir()
+    _prefer_cleartype_font_engine()
+    # Don't round fractional display scaling (125% / 150%) to the nearest
+    # integer — pass it through so the UI scales to the screen's real DPI
+    # instead of snapping to 100%/200% (which is what made text look small on
+    # HiDPI Windows laptops). Must be set before QApplication is constructed.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))

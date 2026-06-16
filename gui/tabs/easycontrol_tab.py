@@ -58,7 +58,9 @@ from gui import (
 from gui import daemon as gui_daemon
 from gui.explanations import field_help
 from gui.i18n import t
-from gui.tabs.config_tab import ClickableLabel, ConfigTab
+from gui.tabs.config_tab import ConfigTab
+from gui.theme import tok
+from gui.widgets import make_field_label
 
 # EasyControl descriptor projects live here as self-contained
 # configs/easycontrol/<stem>.toml files (the near_twins-style multi-table shape).
@@ -268,7 +270,7 @@ class EasyControlTab(ConfigTab):
         header = QLabel(t("easycontrol_descriptor_form_header", path=str(rel)))
         header.setWordWrap(True)
         header.setTextFormat(Qt.RichText)
-        header.setStyleSheet("color:#cfcfcf; padding:4px 2px 8px 2px;")
+        header.setStyleSheet(f"color:{tok('text')}; padding:4px 2px 8px 2px;")
         self._fl.addWidget(header)
 
         # Top-level scalars (the `name` slug, etc.) → a leading "descriptor" group.
@@ -310,10 +312,10 @@ class EasyControlTab(ConfigTab):
         for k, raw in items.items():  # tomlkit preserves file order
             plain = self._plain(raw)
             w = _widget(plain, key=k)
-            lbl = ClickableLabel(k)
             help_text = field_help(k)
-            lbl.clicked.connect(
-                lambda _k=k, _h=help_text: self._show_explain(_k, _h, ())
+            lbl = make_field_label(
+                k,
+                on_click=lambda _k=k, _h=help_text: self._show_explain(_k, _h, ()),
             )
             form.addRow(lbl, w)
             self._desc_widgets.append((table, k, w, plain))

@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import difflib
 import json
+import sys
 from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, Qt, QUrl
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QEvent,
+    QProcess,
+    QProcessEnvironment,
+    QRect,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -24,6 +34,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -33,11 +44,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QStackedWidget,
     QTextBrowser,
     QTextEdit,
     QTreeWidget,
@@ -46,8 +57,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui import ROOT, LazyTabMixin, ScaledImageLabel, _image_dirs, _imgs
+from gui import (
+    DEFAULT_AUTOTAG_CONFIDENCE,
+    ROOT,
+    LazyTabMixin,
+    ScaledImageLabel,
+    _image_dirs,
+    _imgs,
+    get_setting,
+)
+from gui import daemon as gui_daemon
+from gui._job_mixin import DaemonJobMixin
 from gui.i18n import t
+from gui.progress import TqdmProgressTracker, make_progress_bar
+from gui.theme import tok
+
+# Stdio protocol sentinels of the resident autotag worker (kept in sync with
+# ``scripts/anima_tagger/autotag_server.py``). Hardcoded rather than imported
+# because that module pulls in torch, which the GUI must stay free of for fast
+# startup (see gui/CLAUDE.md).
+_AUTOTAG_READY = "ANIMA_AUTOTAG_READY"
+_AUTOTAG_RESULT_PREFIX = "ANIMA_AUTOTAG_RESULT\t"
+_AUTOTAG_ERROR_PREFIX = "ANIMA_AUTOTAG_ERROR\t"
+
+# Free the resident tagger (VRAM) after this many ms with no autotag request.
+_AUTOTAG_IDLE_MS = 10 * 60 * 1000
+# Poll cadence (ms) for "did some other GPU job start?" while resident.
+_AUTOTAG_GPU_WATCH_MS = 700
 
 
 # Mask overlay tint — translucent red on top of the *masked-out* region (the
@@ -57,6 +93,10 @@ from gui.i18n import t
 # from the mask + QPainter.setOpacity rather than baking alpha into the color.
 _MASK_OVERLAY_COLOR_OPAQUE = QColor(255, 60, 60, 255)
 _MASK_OVERLAY_OPACITY = 0.55
+
+# Foreground tint for images marked for deletion (toggled with the Delete key,
+# removed by the 삭제 button). Bright red so marks stand out in both views.
+_DELETE_MARK_COLOR = QColor("#e74c3c")
 
 
 def _resolve_mask_path(image_path: Path, current_dir: Path | None) -> Path | None:
@@ -422,13 +462,13 @@ def _unified_diff_html(old: str, new: str) -> str:
         if line.startswith("---") or line.startswith("+++"):
             continue  # filenames are noise here
         if line.startswith("@@"):
-            rows.append(f'<span style="color:#7aa6da;">{escape(line)}</span>')
+            rows.append(f'<span style="color:{tok("link")};">{escape(line)}</span>')
         elif line.startswith("+"):
             rows.append(f'<span style="color:#9ad17a;">{escape(line)}</span>')
         elif line.startswith("-"):
             rows.append(f'<span style="color:#e07a7a;">{escape(line)}</span>')
         else:
-            rows.append(f'<span style="color:#aaa;">{escape(line)}</span>')
+            rows.append(f'<span style="color:{tok("text_dim")};">{escape(line)}</span>')
     if not rows:
         return ""
     return (
@@ -471,8 +511,8 @@ class CaptionVersionsDialog(QDialog):
         rl.setContentsMargins(0, 0, 0, 0)
         self.diff = QTextBrowser()
         self.diff.setStyleSheet(
-            "QTextBrowser { background:#1e1e1e; color:#dcdcdc; "
-            "border:1px solid #444; padding:6px; }"
+            f"QTextBrowser {{ background:{tok('base')}; color:{tok('text')}; "
+            f"border:1px solid {tok('border_dim')}; padding:6px; }}"
         )
         rl.addWidget(self.diff, 1)
         sp.addWidget(right)
@@ -502,7 +542,9 @@ class CaptionVersionsDialog(QDialog):
         prev = self._history[row]["text"]
         html = _unified_diff_html(prev, self._current)
         if not html:
-            self.diff.setHtml(f'<i style="color:#aaa;">{t("caption_diff_clean")}</i>')
+            self.diff.setHtml(
+                f'<i style="color:{tok("text_dim")};">{t("caption_diff_clean")}</i>'
+            )
         else:
             self.diff.setHtml(html)
         self.restore_btn.setEnabled(True)
@@ -518,9 +560,12 @@ class CaptionVersionsDialog(QDialog):
         return self._restored
 
 
-class ImageViewerTab(LazyTabMixin, QWidget):
+class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
+        # Daemon job observer (curate-group runs as a command job) so the
+        # grouping progress bar lives in this tab, not only the Queue tab.
+        self._init_job_observer()
         self._all_images: list[Path] = []  # unfiltered, alphabetical (from _imgs)
         self._images: list[Path] = []  # currently displayed (filter + sort applied)
         self._dirs = _image_dirs()
@@ -530,8 +575,36 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self._current_caption_path: Path | None = None
         self._disk_text: str = ""  # last value seen on disk (for diff baseline)
         self._suspend_dirty = False  # while we set text programmatically
+        # Resident autotag worker (a torch subprocess holding the tagger model
+        # so consecutive Autotag clicks skip the reload). GUI-owned via QProcess
+        # — spawned on first use, kept alive ("loaded, waiting"), torn down
+        # before any other GPU work (grouping/training/preprocess) frees the
+        # card. See _run_autotag / _kill_tagger_worker.
+        self._tagger_proc: QProcess | None = None
+        self._tagger_ready = False
+        self._tagger_buf = ""  # partial-line buffer for the worker's stdout
+        self._autotag_inflight_image: Path | None = None  # image awaiting a result
+        self._autotag_idle = QElapsedTimer()
+        # Polls "did another GPU job start?" only while the worker is resident.
+        self._gpu_watch_timer = QTimer(self)
+        self._gpu_watch_timer.setInterval(_AUTOTAG_GPU_WATCH_MS)
+        self._gpu_watch_timer.timeout.connect(self._autotag_gpu_watch_tick)
+        # Make sure the resident worker (and its VRAM) dies with the app.
+        _app = QApplication.instance()
+        if _app is not None:
+            _app.aboutToQuit.connect(self._kill_tagger_worker)
         self._search_text: str = ""
         self._sort_desc: bool = False
+        # Similarity-group curation (make curate-group). _groups is the manifest's
+        # group list; the tree view folds images under green per-group nodes (the
+        # old dropdown filter was replaced by this always-on tree grouping).
+        # Grouping is stem-keyed so it works whether this tab views image_dataset/
+        # or post_image_dataset/resized/ (stems are unique + shared).
+        self._groups: list[dict] = []
+        # Images marked for deletion (Delete key toggles the current one red; the
+        # 삭제 button moves the whole set to the OS trash). Keyed by full path so a
+        # mark survives filter/sort/view rebuilds; cleared when the dir changes.
+        self._marked: set[Path] = set()
         # Source pixmap + resolved mask for the currently shown image.
         # _overlay_pm is lazily composed on first toggle and cached so flipping
         # the checkbox doesn't re-run the QPainter pipeline.
@@ -555,6 +628,16 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.open_dir_btn.setToolTip(t("dataset_open_dir_tooltip"))
         self.open_dir_btn.clicked.connect(self._open_current_dir)
         top.addWidget(self.open_dir_btn)
+        # Group button, accented blue like the preprocess "run" buttons. Submits
+        # `make curate-group`; results surface as green folds in the tree view.
+        self.group_btn = QPushButton(t("dataset_group_rebuild"))
+        self.group_btn.setToolTip(t("dataset_group_rebuild_tooltip"))
+        self.group_btn.setStyleSheet(
+            "QPushButton{background:#2980b9;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
+        )
+        self.group_btn.clicked.connect(self._rebuild_groups)
+        top.addWidget(self.group_btn)
         self.add_dir_btn = QPushButton(t("dataset_add_dir"))
         self.add_dir_btn.setToolTip(t("dataset_add_dir_tooltip"))
         self.add_dir_btn.clicked.connect(self._add_dir)
@@ -563,13 +646,17 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         top.addWidget(self.cnt)
         lay.addLayout(top)
 
+        # Grouping progress bar (curate-group). Hidden until a run starts; the
+        # tracker drives it from the job's tqdm stdout, then hides it on finish.
+        self.group_progress = make_progress_bar()
+        self._progress_tracker = TqdmProgressTracker(self.group_progress)
+        lay.addWidget(self.group_progress)
+
         sp = QSplitter(Qt.Horizontal)
 
-        # Left panel: search + sort + view-toggle row, then a stack holding
-        # the list and tree widgets. The two views are kept in sync via the
-        # _images array (selecting either one routes through _select_path).
-        # ``_view_mode`` is "list" by default — flipping the toggle button
-        # swaps the stacked widget without reloading images.
+        # Left panel: search + sort row, then the tree of images. The tree folds
+        # images under their folder + green per-similarity-group nodes; selecting
+        # a leaf routes through _show(index) via the _images array.
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -581,11 +668,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._on_search_changed)
         search_row.addWidget(self.search, 1)
-        self.view_btn = QPushButton("⊞")
-        self.view_btn.setFixedWidth(28)
-        self.view_btn.setToolTip(t("dataset_view_list_tooltip"))
-        self.view_btn.clicked.connect(self._toggle_view_mode)
-        search_row.addWidget(self.view_btn)
         self.sort_btn = QPushButton("↑")
         self.sort_btn.setFixedWidth(28)
         self.sort_btn.setToolTip(t("dataset_sort_asc_tooltip"))
@@ -593,22 +675,13 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         search_row.addWidget(self.sort_btn)
         ll.addLayout(search_row)
 
-        self._view_mode = "list"
-        self.fl = QListWidget()
-        self.fl.currentRowChanged.connect(self._on_row_changed)
-
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.tree.currentItemChanged.connect(self._on_tree_item_changed)
-        # Map item → image index so selections in the tree route through the
-        # same _show(index) flow as list-row clicks.
+        # Map item → image index so tree selections route through _show(index).
         self._tree_item_to_index: dict[QTreeWidgetItem, int] = {}
-
-        self.view_stack = QStackedWidget()
-        self.view_stack.addWidget(self.fl)
-        self.view_stack.addWidget(self.tree)
-        ll.addWidget(self.view_stack, 1)
+        ll.addWidget(self.tree, 1)
         sp.addWidget(left)
 
         right = QWidget()
@@ -625,6 +698,21 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.overlay_cb.setEnabled(False)
         self.overlay_cb.toggled.connect(self._on_overlay_toggled)
         img_head.addWidget(self.overlay_cb)
+        # Delete button: removes the images marked red via the Delete key. Red
+        # accent to match the marks; disabled until at least one is marked.
+        self.delete_btn = QPushButton(t("dataset_delete"))
+        self.delete_btn.setToolTip(t("dataset_delete_tooltip"))
+        self.delete_btn.setStyleSheet(
+            "QPushButton{background:#c0392b;color:white;font-weight:bold;"
+            "padding:4px 16px;}QPushButton:disabled{background:#5a3a37;color:#aaa;}"
+        )
+        self.delete_btn.clicked.connect(self._delete_marked)
+        img_head.addWidget(self.delete_btn)
+        # Cancel button: clears all deletion marks (same as pressing Esc).
+        self.cancel_mark_btn = QPushButton(t("dataset_delete_clear"))
+        self.cancel_mark_btn.setToolTip(t("dataset_delete_clear_tooltip"))
+        self.cancel_mark_btn.clicked.connect(self._clear_marks)
+        img_head.addWidget(self.cancel_mark_btn)
         img_head.addStretch()
         rl.addLayout(img_head)
 
@@ -637,6 +725,14 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         cap_head = QHBoxLayout()
         self.cap_label = QLabel(t("caption"))
         cap_head.addWidget(self.cap_label)
+        # Resident-tagger status ("loading…" / "loaded, waiting"). Hidden until
+        # the worker is spawned; updated from the worker's stdout sentinels.
+        self.autotag_status = QLabel()
+        self.autotag_status.setStyleSheet(
+            f"QLabel{{color:{tok('link')};font-size:11px;}}"
+        )
+        self.autotag_status.setVisible(False)
+        cap_head.addWidget(self.autotag_status)
         cap_head.addStretch()
         self.save_btn = QPushButton(t("caption_save"))
         self.save_btn.setEnabled(False)
@@ -644,10 +740,21 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.revert_btn = QPushButton(t("caption_revert"))
         self.revert_btn.setEnabled(False)
         self.revert_btn.clicked.connect(self._revert)
+        # Autotag: run the Anima Tagger on the current image and append its
+        # predicted tags into the editor (review, then Save writes the .txt).
+        # Accented blue like the other "run a model" actions.
+        self.autotag_btn = QPushButton(t("caption_autotag"))
+        self.autotag_btn.setToolTip(t("caption_autotag_tooltip"))
+        self.autotag_btn.setStyleSheet(
+            "QPushButton{background:#2980b9;color:white;font-weight:bold;}"
+            "QPushButton:disabled{background:#2a4763;color:#aaa;}"
+        )
+        self.autotag_btn.clicked.connect(self._run_autotag)
         self.versions_btn = QPushButton(t("caption_versions"))
         self.versions_btn.clicked.connect(self._open_versions)
         cap_head.addWidget(self.save_btn)
         cap_head.addWidget(self.revert_btn)
+        cap_head.addWidget(self.autotag_btn)
         cap_head.addWidget(self.versions_btn)
         rl.addLayout(cap_head)
 
@@ -666,17 +773,25 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.guide.setWordWrap(True)
         self.guide.setTextFormat(Qt.RichText)
         self.guide.setStyleSheet(
-            "QLabel { color:#888; font-size:11px; padding:2px 4px; }"
+            f"QLabel {{ color:{tok('text_dim')}; font-size:11px; padding:2px 4px; }}"
         )
         rl.addWidget(self.guide)
 
         sp.addWidget(right)
-        sp.setSizes([220, 750])
+        sp.setSizes([340, 700])
         lay.addWidget(sp)
 
         QShortcut(QKeySequence("Right"), self, lambda: self._nav(1))
         QShortcut(QKeySequence("Left"), self, lambda: self._nav(-1))
         QShortcut(QKeySequence.Save, self, self._save)
+        # Delete toggles the deletion mark on the current image; Esc un-marks it.
+        # Both act per-current-image and are scoped to the tree (WidgetShortcut)
+        # so they don't hijack the caption editor on focus.
+        _del = QShortcut(QKeySequence.Delete, self.tree, self._toggle_mark_current)
+        _del.setContext(Qt.WidgetShortcut)
+        _esc = QShortcut(QKeySequence(Qt.Key_Escape), self.tree, self._unmark_current)
+        _esc.setContext(Qt.WidgetShortcut)
+        self._refresh_delete_button()
 
     def _lazy_init(self) -> None:
         # Walking the image dir + building the tree is deferred to first show.
@@ -691,6 +806,270 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._current_dir)))
 
+    # ── similarity groups (curate-group) ──────────────────────
+
+    def _groups_manifest_path(self) -> Path:
+        return ROOT / "post_image_dataset" / "groups" / "groups.json"
+
+    def _load_groups(self) -> None:
+        """Read groups.json (if present) into ``self._groups``.
+
+        Pure JSON — keeps the GUI torch-free. The tree view folds images under
+        green per-group nodes built from this list (ordered as written, largest
+        first). A missing/unreadable manifest just leaves the plain folder tree.
+        """
+        self._groups = []
+        path = self._groups_manifest_path()
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                groups = data.get("groups", [])
+                if isinstance(groups, list):
+                    self._groups = groups
+            except (json.JSONDecodeError, OSError):
+                self._groups = []
+
+    def _rebuild_groups(self) -> None:
+        """Submit `make curate-group` and observe it in-tab (progress bar here)."""
+        if self._job_id:  # a grouping run is already attached
+            QMessageBox.information(
+                self, "", t("dataset_group_queued", job_id=self._job_id)
+            )
+            return
+        # Grouping is GPU work (PE-Spatial) — free the resident tagger first so
+        # the two don't fight over VRAM.
+        self._kill_tagger_worker()
+        # Busy UI + indeterminate bar before the submit so a cold-start daemon
+        # spin-up still feels responsive.
+        self.group_btn.setEnabled(False)
+        self._progress_tracker.reset()
+        self._progress_tracker.mark_starting(t("dataset_group_rebuild"))
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
+                label="curate-group", argv=["tasks.py", "curate-group"], start=True
+            ),
+            on_fail=self._restore_group_idle_ui,
+        )
+        if not job_id:
+            return
+        self._watch_job(job_id, replay_log=False)
+
+    def _emit_log_line(self, line: str) -> None:
+        """No log widget on this tab — non-progress stdout lines are dropped.
+
+        The progress bar (tqdm) and the finish banner carry the user-facing
+        signal; a full log belongs to the Queue tab.
+        """
+
+    def _on_job_finished(self, state: str | None) -> None:
+        self._job_timer.stop()
+        self._drain_job_stdout()
+        self._stdout_buf = ""
+        job_id = self._job_id
+        self._job_id = None
+        self._stdout_tailer.reset()
+        self._progress_tracker.reset()
+        self._restore_group_idle_ui()
+        if gui_daemon.is_success(state):
+            # Reload the manifest + re-render both views so new groups show now.
+            prev = (
+                self._current_caption_path.stem
+                if self._current_caption_path is not None
+                else None
+            )
+            self._load_groups()
+            self._apply_filter_and_sort(prev_stem=prev)
+        else:
+            QMessageBox.warning(
+                self, t("error"), gui_daemon.format_finish_banner(job_id, state)
+            )
+
+    def _restore_group_idle_ui(self) -> None:
+        self.group_btn.setEnabled(True)
+
+    # ── autotag (resident tagger worker) ──────────────────────
+
+    def _run_autotag(self) -> None:
+        """Tag the current image with the resident Anima Tagger.
+
+        First click spawns a torch subprocess that loads the model once; it then
+        stays alive so later clicks just stream an image path to it. The
+        predicted tags are appended into the editor when the result comes back —
+        the user reviews, then Save writes the ``.txt`` (creating it if absent).
+        The worker is freed before any other GPU work (see _kill_tagger_worker).
+        """
+        idx = self._current_index()
+        if not 0 <= idx < len(self._images):
+            return
+        # Don't grab the card while a daemon job (train/preprocess/group) holds
+        # it — those take priority; tagging can wait until it's idle.
+        if gui_daemon.active_job_id():
+            QMessageBox.information(self, "", t("caption_autotag_busy"))
+            return
+        if self._autotag_inflight_image is not None:
+            return  # a request is already in flight; ignore the double-click
+        image_path = self._images[idx]
+        self._autotag_inflight_image = image_path
+        self._autotag_idle.restart()
+        self.autotag_btn.setEnabled(False)
+        if self._tagger_proc is None:
+            self._spawn_tagger_worker()
+            self._set_autotag_status(t("caption_autotag_loading"))
+        elif self._tagger_ready:
+            self._set_autotag_status(t("caption_autotag_running"))
+            self._send_autotag_request(image_path)
+        # else: worker still loading — _on_tagger_stdout sends it on READY.
+
+    def _spawn_tagger_worker(self) -> None:
+        """Launch the resident worker subprocess (torch lives here, not the GUI)."""
+        proc = QProcess(self)
+        proc.setProgram(sys.executable)
+        proc.setArguments(["-m", "scripts.anima_tagger.autotag_server"])
+        proc.setWorkingDirectory(str(ROOT))
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")  # stream sentinel lines live
+        proc.setProcessEnvironment(env)
+        proc.readyReadStandardOutput.connect(self._on_tagger_stdout)
+        proc.finished.connect(self._on_tagger_finished)
+        proc.errorOccurred.connect(lambda _e: self._on_tagger_finished(-1, None))
+        self._tagger_proc = proc
+        self._tagger_ready = False
+        self._tagger_buf = ""
+        self.autotag_status.setVisible(True)
+        self._gpu_watch_timer.start()
+        proc.start()
+
+    def _send_autotag_request(self, image_path: Path) -> None:
+        if self._tagger_proc is None:
+            return
+        # Prefix the per-request confidence floor (Settings → Autotag
+        # confidence); read fresh each request so a settings change applies
+        # without respawning the resident worker.
+        try:
+            conf = float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
+        except (TypeError, ValueError):
+            conf = DEFAULT_AUTOTAG_CONFIDENCE
+        conf = max(0.0, min(1.0, conf))
+        self._tagger_proc.write(f"{conf}\t{image_path}\n".encode("utf-8"))
+
+    def _on_tagger_stdout(self) -> None:
+        if self._tagger_proc is None:
+            return
+        self._tagger_buf += bytes(self._tagger_proc.readAllStandardOutput()).decode(
+            "utf-8", "replace"
+        )
+        *lines, self._tagger_buf = self._tagger_buf.split("\n")
+        for line in lines:
+            line = line.rstrip("\r")
+            if not line:
+                continue
+            if line == _AUTOTAG_READY:
+                self._tagger_ready = True
+                self._set_autotag_status(t("caption_autotag_ready"))
+                # Send the click that spawned the worker, now that it's loaded.
+                if self._autotag_inflight_image is not None:
+                    self._set_autotag_status(t("caption_autotag_running"))
+                    self._send_autotag_request(self._autotag_inflight_image)
+            elif line.startswith(_AUTOTAG_RESULT_PREFIX):
+                self._apply_autotag_result(line[len(_AUTOTAG_RESULT_PREFIX) :])
+            elif line.startswith(_AUTOTAG_ERROR_PREFIX):
+                self._finish_autotag_request()
+                QMessageBox.warning(
+                    self,
+                    t("error"),
+                    t("caption_autotag_error", err=line[len(_AUTOTAG_ERROR_PREFIX) :]),
+                )
+
+    def _apply_autotag_result(self, caption: str) -> None:
+        """Append the predicted caption into the editor (dirty → Save lights up)."""
+        image = self._autotag_inflight_image
+        self._finish_autotag_request()
+        caption = caption.strip()
+        if not caption:
+            QMessageBox.information(self, "", t("caption_autotag_empty"))
+            return
+        # The user may have navigated away while the worker ran — only apply the
+        # result if it still belongs to the caption currently on screen.
+        if image is None or self._current_caption_path != image.with_suffix(".txt"):
+            return
+        existing = self.cap.toPlainText().strip()
+        if existing:
+            combined = existing.rstrip().rstrip(",").rstrip() + ", " + caption
+        else:
+            combined = caption
+        # Set programmatically, then refresh manually so the diff highlight +
+        # Save/Revert dirty state pick up the appended span (the suspend-dirty
+        # guard otherwise swallows the textChanged signal).
+        self._set_caption_text(combined)
+        self._refresh_buttons()
+        self._refresh_inline_diff()
+
+    def _finish_autotag_request(self) -> None:
+        """Clear the in-flight state and re-arm the button after a reply."""
+        self._autotag_inflight_image = None
+        self.autotag_btn.setEnabled(True)
+        self._autotag_idle.restart()
+        if self._tagger_ready:
+            self._set_autotag_status(t("caption_autotag_ready"))
+
+    def _set_autotag_status(self, text: str) -> None:
+        self.autotag_status.setText(text)
+        self.autotag_status.setVisible(bool(text))
+
+    def _autotag_gpu_watch_tick(self) -> None:
+        """While the worker is resident: free it on any other GPU job or idle."""
+        if self._tagger_proc is None:
+            self._gpu_watch_timer.stop()
+            return
+        if gui_daemon.active_job_id():  # train/preprocess/group grabbed the card
+            self._kill_tagger_worker()
+            return
+        if (
+            self._autotag_inflight_image is None
+            and self._autotag_idle.isValid()
+            and self._autotag_idle.hasExpired(_AUTOTAG_IDLE_MS)
+        ):
+            self._kill_tagger_worker()
+
+    def _kill_tagger_worker(self) -> None:
+        """Tear down the resident worker and free its VRAM. Idempotent."""
+        self._gpu_watch_timer.stop()
+        proc = self._tagger_proc
+        self._tagger_proc = None
+        self._tagger_ready = False
+        self._tagger_buf = ""
+        self._autotag_inflight_image = None
+        self.autotag_btn.setEnabled(True)
+        self._set_autotag_status("")
+        if proc is None:
+            return
+        try:
+            proc.readyReadStandardOutput.disconnect()
+            proc.finished.disconnect()
+            proc.errorOccurred.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        if proc.state() != QProcess.NotRunning:
+            proc.closeWriteChannel()  # EOF on stdin → worker exits cleanly
+            proc.kill()
+            proc.waitForFinished(2000)
+        proc.deleteLater()
+
+    def _on_tagger_finished(self, _code, _status) -> None:
+        """Worker exited (crash, kill, or EOF) — reset to the no-worker state."""
+        was_inflight = self._autotag_inflight_image is not None
+        self._gpu_watch_timer.stop()
+        self._tagger_proc = None
+        self._tagger_ready = False
+        self._tagger_buf = ""
+        self._autotag_inflight_image = None
+        self.autotag_btn.setEnabled(True)
+        self._set_autotag_status("")
+        if was_inflight:
+            QMessageBox.warning(
+                self, t("error"), t("caption_autotag_error", err="exit")
+            )
+
     def _load_dir(self, name: str, *, preserve_selection: bool = False):
         if not self._confirm_discard_if_dirty():
             # Roll the combo back without re-firing _load_dir.
@@ -701,7 +1080,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         prev_stem: str | None = None
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
+        if d != self._current_dir:
+            # Deletion marks are path-scoped to one dir; drop them on a switch.
+            self._marked.clear()
+            self._refresh_delete_button()
         self._current_dir = d
+        self._load_groups()  # reload the group manifest for the tree folds
         self._all_images = _imgs(d)
         had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
         if not self._images:
@@ -711,8 +1095,8 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             self._refresh_buttons()
             self._refresh_inline_diff()
         elif not had_match:
-            # Fresh dir, no prior selection to restore — pick the first row.
-            self.fl.setCurrentRow(0)
+            # Fresh dir, no prior selection to restore — pick the first image.
+            self._select_tree_index(0)
 
     def _display_label(self, p: Path) -> str:
         """``stem`` for top-level images, ``parent/stem`` for nested ones.
@@ -733,12 +1117,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         return f"{rel.parent.as_posix()}/{p.stem}"
 
     def _apply_filter_and_sort(self, *, prev_stem: str | None = None) -> bool:
-        """Rebuild the visible list from ``_all_images`` using the current
+        """Rebuild the visible tree from ``_all_images`` using the current
         search text and sort direction.
 
         Returns True if a row matching ``prev_stem`` was selected, False
         otherwise. Block-signals while rebuilding so search keystrokes don't
-        trigger ``_on_row_changed`` (which would prompt to save unsaved
+        trigger ``_on_tree_item_changed`` (which would prompt to save unsaved
         caption edits on every keystroke).
         """
         q = self._search_text.strip().lower()
@@ -764,43 +1148,55 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                 target_row = i
                 break
 
-        self.fl.blockSignals(True)
         self.tree.blockSignals(True)
         try:
-            self.fl.clear()
-            for p in visible:
-                self.fl.addItem(self._display_label(p))
             self._rebuild_tree(visible)
             if target_row >= 0:
-                self.fl.setCurrentRow(target_row)
                 self._select_tree_index(target_row)
             else:
-                self.fl.setCurrentRow(-1)
                 self.tree.setCurrentItem(None)
         finally:
-            self.fl.blockSignals(False)
             self.tree.blockSignals(False)
+
+        # Re-apply deletion marks to the freshly rebuilt items.
+        self._refresh_mark_styles()
 
         total = len(self._all_images)
         shown = len(visible)
-        if q and shown != total:
+        if shown != total:  # narrowed by search
             self.cnt.setText(t("n_images_filtered", shown=shown, total=total))
         else:
             self.cnt.setText(t("n_images", n=total))
         return target_row >= 0
 
     def _rebuild_tree(self, visible: list[Path]) -> None:
-        """Rebuild the tree widget from ``visible``, mirroring the relative
-        folder structure under ``self._current_dir``. Leaves are image stems;
-        folders auto-expand the first time the user enters tree view so the
-        hierarchy is visible without an extra click."""
+        """Rebuild the tree widget from ``visible``.
+
+        The folder structure under ``self._current_dir`` is primary. Within a
+        folder, images that belong to a similarity group (from
+        ``make curate-group``) nest one level deeper under a green per-group
+        node; ungrouped images sit directly in the folder. Group nodes are
+        per-folder, so a group spanning folders shows up once under each. Leaves
+        are image stems; everything auto-expands so the hierarchy is visible
+        without an extra click."""
         self.tree.clear()
         self._tree_item_to_index.clear()
         if not visible:
             return
+        # Map each member stem → group index so grouped images get routed under
+        # a green sub-node within their folder; the rest stay flat in the folder.
+        stem_to_group: dict[str, int] = {}
+        for gi, g in enumerate(self._groups):
+            for m in g.get("members", []):
+                stem_to_group[Path(m).stem] = gi
+
         # Cache folder QTreeWidgetItems by their relative parent path so
-        # sibling images in the same folder share one parent node.
+        # sibling images in the same folder share one parent node. Group
+        # sub-nodes are keyed by (folder, group index) so each folder gets its
+        # own green node per group.
         folder_items: dict[Path, QTreeWidgetItem] = {}
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem] = {}
+        group_counts: dict[tuple[Path, int], int] = {}
         for idx, p in enumerate(visible):
             rel: Path
             if self._current_dir is None:
@@ -810,10 +1206,69 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                     rel = p.relative_to(self._current_dir)
                 except ValueError:
                     rel = Path(p.name)
-            parent = self._ensure_tree_folder(rel.parent, folder_items)
+            folder = self._ensure_tree_folder(rel.parent, folder_items)
+            gi = stem_to_group.get(p.stem)
+            if gi is not None:
+                key = (rel.parent, gi)
+                parent = self._ensure_group_node(folder, key, group_nodes)
+                group_counts[key] = group_counts.get(key, 0) + 1
+            else:
+                parent = folder
             leaf = QTreeWidgetItem(parent, [p.stem])
             self._tree_item_to_index[leaf] = idx
+        # Label group nodes once their per-folder visible member count is known.
+        for key, node in group_nodes.items():
+            node.setText(
+                0, t("dataset_group_label", n=key[1] + 1, size=group_counts[key])
+            )
+        self._float_groups_to_top(folder_items, group_nodes)
         self.tree.expandAll()
+
+    def _float_groups_to_top(
+        self,
+        folder_items: dict[Path, QTreeWidgetItem],
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
+    ) -> None:
+        """Reorder each folder's children so green group nodes sit above the
+        ungrouped files at the *same* level (groups never cross into another
+        folder — they stay children of their own folder, so they can't rise
+        above a higher tree level). Within the group block and within the rest,
+        the original filename order is preserved.
+        """
+        group_set = set(group_nodes.values())
+        # Every parent that can hold a mix: each folder node + the invisible root
+        # (top-level images that live directly under the viewed directory).
+        parents = [*folder_items.values(), self.tree.invisibleRootItem()]
+        for parent in parents:
+            children = parent.takeChildren()
+            grouped = [c for c in children if c in group_set]
+            rest = [c for c in children if c not in group_set]
+            if grouped:  # only touch folders that actually hold a group node
+                parent.addChildren(grouped + rest)
+            else:
+                parent.addChildren(children)
+
+    def _ensure_group_node(
+        self,
+        folder: QTreeWidget | QTreeWidgetItem,
+        key: tuple[Path, int],
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
+    ) -> QTreeWidgetItem:
+        """Lazily create the green similarity-group node under ``folder``.
+
+        ``key`` is (folder rel-path, group index). Text is set later (in
+        ``_rebuild_tree``) once the per-folder visible member count is known;
+        only created for groups with a visible member in that folder."""
+        cached = group_nodes.get(key)
+        if cached is not None:
+            return cached
+        node = QTreeWidgetItem(folder, [""])
+        node.setForeground(0, QColor("#27ae60"))
+        font = node.font(0)
+        font.setBold(True)
+        node.setFont(0, font)
+        group_nodes[key] = node
+        return node
 
     def _ensure_tree_folder(
         self, rel_parent: Path, folder_items: dict[Path, QTreeWidgetItem]
@@ -845,40 +1300,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
     def _on_search_changed(self, text: str) -> None:
         self._search_text = text
         self._apply_filter_and_sort()
-
-    def _toggle_view_mode(self) -> None:
-        """Flip between list and tree view of the same image set.
-
-        We rebuild on every flip (rather than only on _apply_filter_and_sort)
-        so the tree picks up structural changes (newly added subfolders) from
-        operations performed while it wasn't visible.
-        """
-        if self._view_mode == "list":
-            self._view_mode = "tree"
-            self.view_btn.setText("☰")
-            self.view_btn.setToolTip(t("dataset_view_tree_tooltip"))
-            self.view_stack.setCurrentWidget(self.tree)
-            row = self.fl.currentRow()
-            if 0 <= row < len(self._images):
-                self.tree.blockSignals(True)
-                try:
-                    self._select_tree_index(row)
-                finally:
-                    self.tree.blockSignals(False)
-        else:
-            self._view_mode = "list"
-            self.view_btn.setText("⊞")
-            self.view_btn.setToolTip(t("dataset_view_list_tooltip"))
-            self.view_stack.setCurrentWidget(self.fl)
-            item = self.tree.currentItem()
-            if item is not None:
-                idx = self._tree_item_to_index.get(item)
-                if idx is not None:
-                    self.fl.blockSignals(True)
-                    try:
-                        self.fl.setCurrentRow(idx)
-                    finally:
-                        self.fl.blockSignals(False)
 
     def _toggle_sort(self) -> None:
         self._sort_desc = not self._sort_desc
@@ -927,30 +1348,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.dc.addItem(label)
         self.dc.setCurrentText(label)
 
-    def _on_row_changed(self, row: int):
-        if not self._confirm_discard_if_dirty():
-            # Snap back to the previous selection without recursing.
-            prev = self._row_for_path(self._current_caption_path)
-            if prev is not None and prev != row:
-                self.fl.blockSignals(True)
-                self.fl.setCurrentRow(prev)
-                self.fl.blockSignals(False)
-            return
-        self._show(row)
-        # Keep the tree's highlight in sync so a later view-mode flip lands
-        # on the same image rather than resetting selection.
-        self.tree.blockSignals(True)
-        try:
-            self._select_tree_index(row)
-        finally:
-            self.tree.blockSignals(False)
-
     def _on_tree_item_changed(self, current, _previous) -> None:
-        """Tree-side equivalent of ``_on_row_changed``.
+        """Show the image for the newly selected tree leaf.
 
         Folder rows (no index) are non-selectable in the data sense; only
         leaves correspond to an image. We confirm-discard before switching so
-        the unsaved-edit prompt works identically across views.
+        the unsaved-edit prompt fires on navigation.
         """
         if current is None:
             return
@@ -967,12 +1370,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                     self.tree.blockSignals(False)
             return
         self._show(idx)
-        # Keep the list selection aligned for next view-mode flip / arrow nav.
-        self.fl.blockSignals(True)
-        try:
-            self.fl.setCurrentRow(idx)
-        finally:
-            self.fl.blockSignals(False)
 
     def _show(self, row: int):
         if not 0 <= row < len(self._images):
@@ -1019,6 +1416,200 @@ class ImageViewerTab(LazyTabMixin, QWidget):
 
     def _on_overlay_toggled(self, _checked: bool) -> None:
         self._apply_image_view()
+
+    # ── deletion marking ──────────────────────────────────────
+
+    def _current_index(self) -> int:
+        """Index into ``self._images`` of the currently selected image.
+
+        Reads the selected tree leaf; -1 if nothing is on an image (e.g. a
+        folder/group node is selected)."""
+        item = self.tree.currentItem()
+        if item is not None:
+            idx = self._tree_item_to_index.get(item)
+            if idx is not None:
+                return idx
+        return -1
+
+    def app_context_menu(self, target, global_pos):
+        """Right-click hook (called by MainWindow's global filter). Over an
+        image — the preview or a tree leaf — offer "open in system viewer"
+        instead of the app default; return None elsewhere so the default shows."""
+        path = self._image_under_cursor(target, global_pos)
+        if path is None:
+            return None
+        menu = QMenu(self)
+        act = menu.addAction(t("open_in_system_viewer"))
+        act.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        )
+        return menu
+
+    def _image_under_cursor(self, target, global_pos) -> Path | None:
+        """The image path the right-click landed on: the tree leaf under the
+        cursor, or the currently shown preview. None if neither applies."""
+        if target is self.tree or self.tree.isAncestorOf(target):
+            pos = self.tree.viewport().mapFromGlobal(global_pos)
+            item = self.tree.itemAt(pos)
+            idx = self._tree_item_to_index.get(item) if item is not None else None
+            if idx is not None and 0 <= idx < len(self._images):
+                return self._images[idx]
+            return None
+        if target is self.img or self.img.isAncestorOf(target):
+            idx = self._current_index()
+            if 0 <= idx < len(self._images):
+                return self._images[idx]
+        return None
+
+    def _toggle_mark_current(self) -> None:
+        """Toggle the deletion mark on the currently selected image."""
+        idx = self._current_index()
+        if not 0 <= idx < len(self._images):
+            return
+        p = self._images[idx]
+        if p in self._marked:
+            self._marked.discard(p)
+        else:
+            self._marked.add(p)
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _refresh_mark_styles(self) -> None:
+        """Repaint tree leaves red iff marked for deletion.
+
+        Unmarked items clear the ForegroundRole entirely (rather than setting a
+        default QBrush, which paints black — invisible on the dark theme) so
+        they fall back to the palette text color."""
+        for leaf, idx in self._tree_item_to_index.items():
+            marked = idx < len(self._images) and self._images[idx] in self._marked
+            if marked:
+                leaf.setForeground(0, _DELETE_MARK_COLOR)
+            else:
+                leaf.setData(0, Qt.ForegroundRole, None)
+
+    def _unmark_current(self) -> None:
+        """Remove the deletion mark from the currently selected image (Esc)."""
+        idx = self._current_index()
+        if not 0 <= idx < len(self._images):
+            return
+        p = self._images[idx]
+        if p not in self._marked:
+            return
+        self._marked.discard(p)
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _clear_marks(self) -> None:
+        """Deselect every deletion target (취소 button)."""
+        if not self._marked:
+            return
+        self._marked.clear()
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _refresh_delete_button(self) -> None:
+        n = len(self._marked)
+        self.delete_btn.setEnabled(n > 0)
+        self.delete_btn.setText(t("dataset_delete") + (f" ({n})" if n else ""))
+        self.cancel_mark_btn.setEnabled(n > 0)
+
+    def _delete_marked(self) -> None:
+        """Move every marked image (+ its caption sidecars) to the OS trash."""
+        targets = sorted(self._marked)
+        if not targets:
+            return
+        reply = QMessageBox.question(
+            self,
+            t("dataset_delete_confirm_title"),
+            t("dataset_delete_confirm_body", n=len(targets)),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # Remember where the user was so the rebuilt tree doesn't snap back to
+        # the top: prefer the image they currently have open; if that one is
+        # itself being deleted, anchor on its position so we can land on the
+        # nearest surviving neighbour instead.
+        open_stem = (
+            self._current_caption_path.stem
+            if self._current_caption_path is not None
+            else None
+        )
+        old_images = list(self._images)
+        anchor_row = self._current_index()
+        targets_set = set(targets)
+
+        from send2trash import send2trash  # lazy: keeps GUI startup light
+
+        errors: list[str] = []
+        for p in targets:
+            try:
+                for f in self._deletion_files(p):
+                    if f.exists():
+                        send2trash(str(f))
+            except OSError as e:
+                errors.append(f"{p.name}: {e}")
+        self._marked.clear()
+        self._refresh_delete_button()
+        # Drop the editor context so the post-delete reload doesn't prompt about
+        # a caption whose image we just removed, then re-scan from disk.
+        self._current_caption_path = None
+        self._disk_text = ""
+        self._set_caption_text("")
+        if self._current_dir is not None:
+            self._all_images = _imgs(self._current_dir)
+        self._apply_filter_and_sort()
+        if self._images:
+            self._select_tree_index(
+                self._post_delete_row(open_stem, old_images, anchor_row, targets_set)
+            )
+        else:
+            self._set_image_none()
+            self._refresh_buttons()
+            self._refresh_inline_diff()
+        if errors:
+            QMessageBox.warning(
+                self, t("error"), t("dataset_delete_failed", err="\n".join(errors))
+            )
+
+    def _post_delete_row(
+        self,
+        open_stem: str | None,
+        old_images: list[Path],
+        anchor_row: int,
+        deleted: set[Path],
+    ) -> int:
+        """Pick which row to reselect after a delete so the view stays put.
+
+        If the image the user had open survived, return its new row. Otherwise
+        walk outward from ``anchor_row`` (forward first, then backward) over the
+        pre-delete order to find the nearest surviving neighbour, and return its
+        new row. Falls back to the top only when nothing else matches.
+        """
+        new_row = {p.stem: i for i, p in enumerate(self._images)}
+        if open_stem is not None and open_stem in new_row:
+            return new_row[open_stem]
+        if old_images:
+            start = anchor_row if anchor_row >= 0 else 0
+            order = list(range(start, len(old_images))) + list(range(start - 1, -1, -1))
+            for j in order:
+                if old_images[j] not in deleted and old_images[j].stem in new_row:
+                    return new_row[old_images[j].stem]
+        return 0
+
+    def _deletion_files(self, image: Path) -> list[Path]:
+        """Image + its caption sidecar + caption history (all trashed together)."""
+        cap = image.with_suffix(".txt")
+        return [image, cap, _history_path(cap)]
+
+    def _set_image_none(self) -> None:
+        """Clear the preview pane (used after deleting the last image)."""
+        self._source_pm = None
+        self._mask_path = None
+        self._overlay_pm = None
+        self.overlay_cb.setEnabled(False)
+        self.img.clear()
 
     # ── caption editing ───────────────────────────────────────
 
@@ -1149,6 +1740,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         return True
 
     def _nav(self, d: int):
-        r = self.fl.currentRow() + d
-        if 0 <= r < self.fl.count():
-            self.fl.setCurrentRow(r)
+        r = self._current_index() + d
+        if 0 <= r < len(self._images):
+            self._select_tree_index(r)

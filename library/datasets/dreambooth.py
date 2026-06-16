@@ -25,21 +25,29 @@ from library.datasets.subsets import (
 logger = logging.getLogger(__name__)
 
 
-# Colorization targets are sourced from post_image_dataset/resized/, whose images
-# carry no .txt sidecar — the caption master lives in image_dataset/. To drop pure
-# B&W pages from the colorize set (they have no color to learn, and would teach the
-# adapter "B&W in → B&W out"), scan the master once for a standalone `monochrome`
-# tag and exclude those stems at enumeration. Scoped to subsets that set a
-# `cond_cache_dir` (the colorize cond↔target pairing knob) — a no-op everywhere else.
-_MONOCHROME_CAPTION_MASTER = "image_dataset"
-_monochrome_stems_cache: dict = {}
+# Colorization (and other cond≠target tasks) pair a synthetic *condition* latent
+# with each target. Staging (easycontrol_adapters/colorization/prep.py) decides
+# which targets get a condition synthesized via the descriptor's
+# `[staging].only_data_includes` / `exclude_data_includes` tag filters (net set =
+# only − exclude). The tag scan below backs that staging-time selection (the colorize
+# targets live under post_image_dataset/resized/ with no .txt sidecar, so tags are
+# read from the caption master in image_dataset/). At *train* time the loader does
+# NOT re-scan tags — it simply keeps the targets that actually have a cached cond
+# latent (see the cond_cache_dir branch below), so whatever staging selected is
+# paired out automatically.
+_tag_stems_cache: dict = {}
 
 
-def monochrome_stems(caption_master_dir: str) -> frozenset:
-    """Stems whose caption sidecar under ``caption_master_dir`` carries a standalone
-    ``monochrome`` tag. Scanned once per dir (``os.walk`` follows the symlinked master)
-    and memoized; returns an empty set if the dir is absent."""
-    cached = _monochrome_stems_cache.get(caption_master_dir)
+def stems_with_any_tag(caption_master_dir: str, tags) -> frozenset:
+    """Stems whose caption sidecar under ``caption_master_dir`` carries any of the
+    standalone comma-separated ``tags`` (case-insensitive). Scanned once per
+    (dir, tags) via ``os.walk`` (follows the symlinked master) and memoized; returns
+    an empty set when the dir is absent or ``tags`` is empty."""
+    wanted = frozenset(t.strip().lower() for t in (tags or ()) if t and t.strip())
+    if not wanted:
+        return frozenset()
+    key = (caption_master_dir, wanted)
+    cached = _tag_stems_cache.get(key)
     if cached is not None:
         return cached
     stems: set = set()
@@ -55,10 +63,10 @@ def monochrome_stems(caption_master_dir: str) -> frozenset:
                         line = f.readline()
                 except (OSError, UnicodeDecodeError):
                     continue
-                if any(t.strip().lower() == "monochrome" for t in line.split(",")):
+                if any(t.strip().lower() in wanted for t in line.split(",")):
                     stems.add(os.path.splitext(name)[0])
     result = frozenset(stems)
-    _monochrome_stems_cache[caption_master_dir] = result
+    _tag_stems_cache[key] = result
     return result
 
 
@@ -277,8 +285,44 @@ class DreamBoothDataset(BaseDataset):
                 f"found directory {subset.image_dir} contains {len(img_paths)} image files"
             )
 
+            # cond≠target task (cond_cache_dir set): keep only the targets that
+            # actually have a cached condition latent — BEFORE reading captions.
+            # Staging's tag filters ([staging].only_data_includes /
+            # exclude_data_includes) synthesize a cond + text cache for only a
+            # subset of the shared `resized` corpus, but image_dir still
+            # enumerates the whole corpus. Filtering here (rather than after the
+            # caption read, as this used to) keeps the TE-cache check below from
+            # spamming "neither caption file nor class tokens" for the thousands
+            # of unpaired targets we're about to drop anyway. A target with no
+            # cond latent would also crash at load time (_load_cond_latent raises).
+            if getattr(subset, "cond_cache_dir", None):
+                from library.io.cache import discover_latents_by_stem
+
+                cond_stems = set(discover_latents_by_stem(subset.cond_cache_dir))
+                if not cond_stems:
+                    raise FileNotFoundError(
+                        f"No condition latents under {subset.cond_cache_dir!r} — run "
+                        f"the cond prep step first (e.g. `make easycontrol-preprocess "
+                        f"EASYADAPTER=colorize`)."
+                    )
+                pre = len(img_paths)
+                kept = [
+                    (p, s)
+                    for p, s in zip(img_paths, sizes)
+                    if os.path.splitext(os.path.basename(p))[0] in cond_stems
+                ]
+                img_paths, sizes = (
+                    (list(t) for t in zip(*kept)) if kept else ([], [])
+                )
+                if len(img_paths) != pre:
+                    logger.info(
+                        f"colorize: kept {len(img_paths)}/{pre} targets with a cached "
+                        f"condition latent (dropped {pre - len(img_paths)} unpaired) "
+                        f"from {subset.image_dir}"
+                    )
+
             if use_cached_info_for_subset:
-                captions = [meta["caption"] for meta in metas.values()]
+                captions = [metas[p]["caption"] for p in img_paths]
                 missing_captions = [
                     img_path
                     for img_path, caption in zip(img_paths, captions)
@@ -401,32 +445,6 @@ class DreamBoothDataset(BaseDataset):
                     f"artist_filter='{_base._ARTIST_FILTER}' → kept {len(img_paths)}/{pre} "
                     f"images from {subset.image_dir}"
                 )
-
-            # Colorize (cond_cache_dir set): drop monochrome-tagged targets. Their
-            # tag lives only in the caption master (image_dataset/), not beside the
-            # resized targets, so match by stem against a one-time scan of the master.
-            if getattr(subset, "cond_cache_dir", None):
-                from library.env import resolve_under_home
-
-                mono = monochrome_stems(
-                    str(resolve_under_home(_MONOCHROME_CAPTION_MASTER))
-                )
-                if mono:
-                    pre = len(img_paths)
-                    kept = [
-                        (p, c, s)
-                        for p, c, s in zip(img_paths, captions, sizes)
-                        if os.path.splitext(os.path.basename(p))[0] not in mono
-                    ]
-                    if kept:
-                        img_paths, captions, sizes = (list(t) for t in zip(*kept))
-                    else:
-                        img_paths, captions, sizes = [], [], []
-                    if len(img_paths) != pre:
-                        logger.info(
-                            f"colorize: dropped {pre - len(img_paths)} monochrome-tagged "
-                            f"images from {subset.image_dir}"
-                        )
 
             return img_paths, captions, sizes
 

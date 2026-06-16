@@ -20,13 +20,20 @@ _NETWORK_MODULE_KWARGS = {
     "weight_decompose",
     "full_matrix",
     "use_custom_down_autograd",
-    "block_lr",
-    "down_lr_weight",
-    "mid_lr_weight",
-    "up_lr_weight",
-    "dora_wd",
-    "cp_alpha",
-    "cp_scale",
+    # REPA / REPA-DoG — network_module kwargs (via --network_args)
+    "use_repa",
+    "repa_mode",
+    "repa_weight",
+    "repa_layer",
+    "repa_encoder",
+    "repa_lr_scale",
+    "repa_anneal_steps",
+    "repa_spatial_norm",
+    "repa_grad_heatmap",
+    "repa_target_dog",
+    "repa_dog_sigma1_div",
+    "repa_dog_sigma2_div",
+    "repa_dog_norm_std",
 }
 
 _DATASET_KEYS = {
@@ -39,7 +46,6 @@ _DATASET_KEYS = {
     "dataset_subsets",
     "general",
     "batch_size",
-    "keep_tokens",
 }
 
 _METADATA_KEYS = {
@@ -61,6 +67,25 @@ _BOOL_VALUE_KEYS = {
     "train_final_layer_adaln_modulation",
     "output_final_layer_linear",
     "output_final_layer_adaln_modulation",
+}
+
+# BooleanOptionalAction(default=True) args: argparse supports --flag (True) and
+# --no-flag (False). When the workflow value is False, we must emit --no-key
+# because skipping the flag would make argparse use default=True instead.
+_BOOL_OPTIONAL_DEFAULT_TRUE_KEYS = {
+    "use_cmmd",
+    "use_vae_cache",
+    "use_text_cache",
+    "validation_baselines",
+}
+
+# Keys that exist in the workflow config but are NOT accepted by argparse (no CLI
+# flag) and NOT accepted by the dataset TOML schema (voluptuous rejects them).
+# These must be completely excluded from CLI forwarding — if they fall through to
+# the generic handler, argparse would reject them as "unrecognized arguments".
+_SKIP_KEYS = {
+    "keep_tokens",  # Removed upstream; neither argparse nor dataset schema accepts it
+    "weight_decay",  # Only valid inside optimizer_args string; no --weight_decay flag
 }
 
 
@@ -160,10 +185,6 @@ class TrainExecutor(StageBase):
 
         toml_data: dict = {}
         general = dict(resolved_config.get("general", {}))
-        # Dataset-ascendable keys that belong in [general] rather than CLI args
-        keep_tokens = resolved_config.get("keep_tokens")
-        if keep_tokens is not None:
-            general["keep_tokens"] = int(keep_tokens)
         if general:
             toml_data["general"] = general
 
@@ -260,7 +281,7 @@ class TrainExecutor(StageBase):
                 cmd += ["--bucket_families", str(bf)]
 
         network_kwargs: dict[str, str] = {}
-        skip_keys = _DATASET_KEYS | _METADATA_KEYS | _NETWORK_MODULE_KWARGS
+        skip_keys = _DATASET_KEYS | _METADATA_KEYS | _NETWORK_MODULE_KWARGS | _SKIP_KEYS
         skip_keys = skip_keys | {"bucket_families"}
 
         # Layer-index selection keys: skip when empty (means "all blocks")
@@ -297,6 +318,14 @@ class TrainExecutor(StageBase):
                 if key in _BOOL_VALUE_KEYS:
                     cmd.append(f"--{key}")
                     cmd.append("true" if value else "false")
+                elif key in _BOOL_OPTIONAL_DEFAULT_TRUE_KEYS:
+                    # BooleanOptionalAction(default=True): --flag for True,
+                    # --no-flag for False. Skipping the flag would let argparse
+                    # default to True, silently overriding the intended False.
+                    if value:
+                        cmd.append(f"--{key}")
+                    else:
+                        cmd.append(f"--no-{key}")
                 elif value:
                     cmd.append(f"--{key}")
             elif isinstance(value, list):

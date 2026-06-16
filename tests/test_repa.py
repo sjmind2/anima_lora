@@ -16,7 +16,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from library.training.repa import REPAHead, REPAMethodAdapter
+from library.training.repa import (
+    REPAHead,
+    REPAMethodAdapter,
+    dog_standardize,
+)
 from library.vision.buckets import get_bucket_spec
 
 
@@ -436,3 +440,153 @@ def test_repa_loss_handler_weighting():
     net0 = types.SimpleNamespace(_repa_weight=0.0)
     ctx0 = LossContext(network=net0, aux={"repa": torch.tensor(2.0)}, **base)
     assert _repa_loss(ctx0).item() == 0.0
+
+
+# ------------------------------------------------------------------- REPA-DoG
+
+
+def test_dog_reduces_to_spatial_norm_at_small_sigma1():
+    """DoG at σ₁→0 (huge sigma1_div) is the DC-removal spatial_norm corner.
+
+    ``Z − LP(Z, σ₁)`` with σ₁→0 → ``Z − Z = 0``; but with norm by spatial std
+    the *direction field* matches spatial_norm's DC-removed field once the low
+    band collapses to the DC mean. We check the looser invariant the proposal
+    leans on: an aggressive low band-strip (small div) differs from DC-only.
+    """
+    b, n, d, gh, gw = 2, 1024, 768, 32, 32
+    pe = torch.randn(b, n, d)
+    # spatial_norm = DC removal: subtract per-channel token mean, /std.
+    dc = (pe - pe.mean(dim=1, keepdim=True)) / (pe.std(dim=1, keepdim=True) + 1e-6)
+    dog = dog_standardize(pe, gh, gw, sigma1_div=16.0)
+    assert dog.shape == pe.shape
+    assert torch.isfinite(dog).all()
+    # A broad low-band strip removes more than DC alone → must differ.
+    assert not torch.allclose(dog, dc, atol=1e-3)
+
+
+def test_dog_bandpass_differs_from_highpass():
+    """σ₂ on (band-pass) ≠ σ₂ off (high-pass): the inner kernel rolls off the
+    very-high tail, so the two operators are distinct."""
+    b, n, d, gh, gw = 2, 1024, 768, 32, 32
+    pe = torch.randn(b, n, d)
+    hp = dog_standardize(pe, gh, gw, sigma1_div=16.0, sigma2_div=0.0)
+    bp = dog_standardize(pe, gh, gw, sigma1_div=16.0, sigma2_div=64.0)
+    assert torch.isfinite(bp).all()
+    assert not torch.allclose(hp, bp, atol=1e-3)
+
+
+def test_dog_norm_std_fixed_vs_empirical():
+    """norm_std>0 divides by a fixed constant (the paper's regime); norm_std=0
+    by the empirical spatial std (matches spatial_norm). The two scale the field
+    differently per-channel, so a fixed const changes the per-token directions."""
+    b, n, d, gh, gw = 2, 1024, 768, 32, 32
+    pe = torch.randn(b, n, d)
+    emp = dog_standardize(pe, gh, gw, sigma1_div=16.0, norm_std=0.0)
+    fixed = dog_standardize(pe, gh, gw, sigma1_div=16.0, norm_std=1.0)
+    assert torch.isfinite(fixed).all()
+    assert not torch.allclose(emp, fixed, atol=1e-3)
+
+
+def test_dog_replaces_spatial_norm_in_adapter():
+    """With _dog on the adapter band-passes the target then Gram-matches — it
+    must equal hand-computed dog_standardize + relational_gram_loss(spatial_norm
+    off), proving DoG slots in *instead of* the spatial_norm block."""
+    from library.training.repa import (
+        pool_dit_tokens_to_grid,
+        relational_gram_loss,
+    )
+
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64)
+
+    a_dog = _make_adapter("relational")
+    a_dog._dog = True
+    a_dog._dog_sigma1_div = 16.0
+    a_dog._captured, a_dog._pe_features, a_dog._latent_hw = cap, pe, (64, 64)
+    loss_dog = a_dog.extra_forwards(_ctx(), _primary(latents))["repa"]
+    assert torch.isfinite(loss_dog)
+
+    # Hand-built reference: pool DiT to the 32×32 grid, DoG the CLS-dropped PE.
+    dit_tok = pool_dit_tokens_to_grid(cap, (64, 64), 2, 32, 32)
+    pe_dog = dog_standardize(pe[:, 1:, :].float(), 32, 32, 16.0)
+    expected = relational_gram_loss(dit_tok, pe_dog, spatial_norm=False)
+    assert torch.equal(loss_dog, expected)
+
+
+def test_dog_off_is_bit_identical_to_relational():
+    """Default-off DoG must not perturb the existing relational loss."""
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64)
+    a = _make_adapter("relational")  # _dog defaults to False
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    loss_default = a.extra_forwards(_ctx(), _primary(latents))["repa"]
+
+    tokens = cap.reshape(2, -1, 64)
+    dit_grid = tokens.reshape(2, 32, 32, 64).permute(0, 3, 1, 2)
+    dit_tok = (
+        F.adaptive_avg_pool2d(dit_grid.float(), (32, 32)).flatten(2).transpose(1, 2)
+    )
+    dit_hat = F.normalize(dit_tok, dim=-1)
+    pe_hat = F.normalize(pe[:, 1:, :].float(), dim=-1)
+    g_dit = torch.bmm(dit_hat, dit_hat.transpose(1, 2))
+    g_pe = torch.bmm(pe_hat, pe_hat.transpose(1, 2))
+    expected = F.mse_loss(g_dit, g_pe)
+    assert torch.equal(loss_default, expected)
+
+
+def test_dog_grad_flows_to_captured():
+    """The band-passed target is detached data, but grad still flows through the
+    DiT-side pooled tokens (into the LoRA blocks)."""
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64, requires_grad=True)
+    a = _make_adapter("relational")
+    a._dog = True
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    loss = a.extra_forwards(_ctx(), _primary(latents))["repa"]
+    loss.backward()
+    assert cap.grad is not None and torch.isfinite(cap.grad).all()
+    assert cap.grad.abs().sum() > 0
+
+
+def test_factory_stamps_dog_levers():
+    """Both factories stamp the DoG kwargs (default-off)."""
+    import torch.nn as nn
+
+    from networks.lora_anima.factory import create_network as lora_create
+    from networks.methods.easycontrol import create_network as ec_create
+
+    class _Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(8, 8, bias=False)
+
+    class _DiT(nn.Module):
+        model_channels = 8
+        patch_spatial = 2
+
+        def __init__(self):
+            super().__init__()
+            self.block = _Block()
+
+    lora_common = dict(vae=None, text_encoders=[], unet=_DiT())
+    net = lora_create(
+        1.0,
+        4,
+        4.0,
+        **lora_common,
+        use_repa="true",
+        repa_target_dog="true",
+        repa_dog_sigma1_div="16",
+    )
+    assert net._repa_target_dog is True
+    assert net._repa_dog_sigma1_div == pytest.approx(16.0)
+    assert net._repa_dog_sigma2_div == 0.0
+
+    net_default = lora_create(1.0, 4, 4.0, **lora_common, use_repa="true")
+    assert net_default._repa_target_dog is False
+
+    ec_common = dict(vae=None, text_encoders=[], unet=None)
+    ec = ec_create(1.0, 8, 8.0, **ec_common, use_repa="true", repa_target_dog="true")
+    assert ec._repa_target_dog is True
+    ec_default = ec_create(1.0, 8, 8.0, **ec_common, use_repa="true")
+    assert ec_default._repa_target_dog is False

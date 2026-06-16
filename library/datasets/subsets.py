@@ -235,7 +235,6 @@ class BaseSubset:
         num_repeats: int,
         sample_ratio: float,
         caption_separator: str,
-        keep_tokens: int,
         keep_tokens_separator: str,
         secondary_separator: Optional[str],
         enable_wildcard: bool,
@@ -271,7 +270,6 @@ class BaseSubset:
         self.path_pattern = path_pattern or "*"
         self.sample_ratio = sample_ratio
         self.caption_separator = caption_separator
-        self.keep_tokens = keep_tokens
         self.keep_tokens_separator = keep_tokens_separator
         self.secondary_separator = secondary_separator
         self.enable_wildcard = enable_wildcard
@@ -313,7 +311,6 @@ class DreamBoothSubset(BaseSubset):
         num_repeats,
         sample_ratio,
         caption_separator: str,
-        keep_tokens,
         keep_tokens_separator,
         secondary_separator,
         enable_wildcard,
@@ -349,7 +346,6 @@ class DreamBoothSubset(BaseSubset):
             num_repeats,
             sample_ratio,
             caption_separator,
-            keep_tokens,
             keep_tokens_separator,
             secondary_separator,
             enable_wildcard,

@@ -86,7 +86,7 @@ def _collate(batch):
     return list(paths), list(out_paths), torch.stack(tensors, dim=0)
 
 
-def cache_pe_features(
+def _encode_pe_subset(
     data_dir: Path,
     bundle: VisionEncoderBundle,
     *,
@@ -99,10 +99,8 @@ def cache_pe_features(
 ) -> PreprocessStats:
     """Encode every image under ``data_dir`` through ``bundle`` → sidecars.
 
-    Groups images by ``(W, H)`` (same encoder bucket → one batched forward),
-    pre-skips already-cached entries, and writes ``image_features`` per image.
-    The encoder is supplied loaded (``load_pe_encoder``) so model setup stays in
-    the caller. Returns counts; pass ``progress`` for a per-image bar.
+    This is the single-subset encoding body shared by the tree and non-tree
+    paths of :func:`cache_pe_features`.
     """
     image_files = walk_images(data_dir, recursive=recursive)
     stats = PreprocessStats(seen=len(image_files))
@@ -188,6 +186,71 @@ def cache_pe_features(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return stats
+
+
+def cache_pe_features(
+    data_dir: Path,
+    bundle: VisionEncoderBundle,
+    *,
+    cache_dir: Path | None = None,
+    recursive: bool = False,
+    tree: bool = False,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    save_dtype: torch.dtype = torch.bfloat16,
+    progress: ProgressFn | None = None,
+) -> PreprocessStats:
+    """Encode every image under ``data_dir`` through ``bundle`` → sidecars.
+
+    Groups images by ``(W, H)`` (same encoder bucket → one batched forward),
+    pre-skips already-cached entries, and writes ``image_features`` per image.
+    The encoder is supplied loaded (``load_pe_encoder``) so model setup stays in
+    the caller. Returns counts; pass ``progress`` for a per-image bar.
+
+    When ``tree`` is *True*, each immediate subdirectory of ``data_dir`` that
+    contains a ``.resized/`` folder is treated as an independent subset.
+    PE features are written to a sibling ``.lora/`` folder inside the same
+    subdirectory.  A root-level ``.resized/`` is also processed.
+    """
+    if tree:
+        bases: list[Path] = []
+        for d in sorted(data_dir.iterdir()):
+            if d.is_dir() and not d.name.startswith(".") and (d / ".resized").is_dir():
+                bases.append(d)
+
+        if (data_dir / ".resized").is_dir():
+            bases.append(data_dir)
+
+        total_stats = PreprocessStats()
+        for base in bases:
+            resized_dir = base / ".resized"
+            lora_dir = base / ".lora"
+            subset_stats = _encode_pe_subset(
+                resized_dir,
+                bundle,
+                cache_dir=lora_dir,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                save_dtype=save_dtype,
+                progress=progress,
+            )
+            total_stats.seen += subset_stats.seen
+            total_stats.written += subset_stats.written
+            total_stats.skipped += subset_stats.skipped
+            total_stats.failed += subset_stats.failed
+
+        return total_stats
+
+    return _encode_pe_subset(
+        data_dir,
+        bundle,
+        cache_dir=cache_dir,
+        recursive=recursive,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        save_dtype=save_dtype,
+        progress=progress,
+    )
 
 
 def _pool_pe(feats: torch.Tensor, *, drop_cls: bool = True) -> torch.Tensor:

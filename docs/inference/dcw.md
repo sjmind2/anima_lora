@@ -25,7 +25,7 @@ prev      += λ_i · diff_LL                            # DCW correction
 
 What differs is how `λ_i` is produced. In scalar mode, `λ_i = λ · sched(σ_i)`. In v4, `λ_i = base + bucket_corr + α_eff · μ_g[i] / Σ_tail(μ_g·S_pop)` with the controller observing the first `k=7` step's LL gap before firing.
 
-See `docs/proposal/dcw-learnable-calibrator-v4.md` for the full v4 derivation, gates, and fallback ladder.
+See the v4 calibrator proposal (no longer in-tree) for the full v4 derivation, gates, and fallback ladder.
 
 ## Quick start
 
@@ -44,10 +44,10 @@ python inference.py --dcw                                      \
     ...  # other inference args
 ```
 
-v4 mode (auto-resolves the most-recent `fusion_head.safetensors` under `post_image_dataset/dcw/` first, then `bench/dcw/results/`):
+Calibrator mode (auto-resolves the most-recent `fusion_head.safetensors` under `post_image_dataset/dcw/` first, then `bench/dcw/results/`):
 
 ```bash
-python inference.py --dcw_v4 auto --dcw_v4_disable_shrinkage   \
+python inference.py --dcw_calibrator auto   \
     ...
 ```
 
@@ -77,10 +77,10 @@ End artifact: `<run>/fusion_head.safetensors` — single file, ~285k params + pe
 | `--dcw_lambda` | scalar | `-0.015` | Negative on Anima — see findings. Tuned for `--dcw_band_mask LL`; use `-0.010` if you switch to `all`. |
 | `--dcw_schedule` | scalar | `one_minus_sigma` | One of `one_minus_sigma`, `sigma_i`, `const`, `none`. |
 | `--dcw_band_mask` | scalar | `LL` | Haar subband mask: `LL`, `HH`, `LH+HL+HH`, `all`. LL-only is strictly better than `all` on Anima — see §LL-only correction. |
-| `--dcw_v4` | v4 | unset | Path to `fusion_head.safetensors` (or directory containing one). When set, overrides scalar `--dcw_lambda` with per-step controller output. |
-| `--dcw_v4_warmup_k` | v4 | (from artifact) | Override the warmup-k baked into the artifact metadata. |
-| `--dcw_v4_disable_shrinkage` | v4 | off | Skip σ̂²-based shrinkage on `α̂`. **Recommended** while the prototype's σ̂² channel doesn't pass Gate B. |
-| `--dcw_v4_disable_backstop` | v4 | off | Skip the caption-length backstop. Currently a no-op (`tau_short` not yet shipped in the artifact). |
+| `--dcw_calibrator` | calibrator | unset | Path to `fusion_head.safetensors` (or directory containing one). When set, overrides scalar `--dcw_lambda` with per-step controller output. Legacy alias: `--dcw_v4`. |
+| `--dcw_calibrator_gain` | calibrator | `1.0` | Multiplier on the head's `α̂` (in λ-units). `2.0` doubles per-prompt magnitude, negative flips sign; per-step λ is clamped to `±0.05`. Legacy alias: `--dcw_v4_alpha_gain`. |
+
+The warmup-k (`k_warmup`) is read from the artifact metadata — there is no CLI override. The shipped controller is α̂-only (no σ̂²-shrinkage path, no caption-length backstop), so the prototype's `--dcw_v4_disable_*` toggles no longer exist.
 
 The final step (`σ_{i+1} == 0`) is always skipped in both modes — at that step `prev == x0_pred` exactly, so DCW would be a numerical no-op.
 
@@ -118,7 +118,7 @@ Trained on existing `bench/dcw/results/` data — 176 rows, 40 unique stems, 8-f
 | r(σ̂_p, std_s r) | ≥ 0.4 | −0.01 ✗ |
 | NLL improvement vs N(0, σ²_pop) | ≥ 15% | +5.7% ✗ |
 
-α̂ channels pass strongly; σ̂² channel doesn't (under-supervised at one-seed-per-prompt-mostly data). **Ships with `--dcw_v4_disable_shrinkage` by default** until `make dcw`'s 3-seed pool reruns the gate. If σ̂² still fails after, the controller stays shrinkage-off in production — α̂ alone with the clamp guard is gate-passing.
+α̂ channels pass strongly; σ̂² channel doesn't (under-supervised at one-seed-per-prompt-mostly data). The shipped controller is therefore **α̂-only** (no σ̂²-shrinkage path) until `make dcw`'s 3-seed pool reruns the gate. If σ̂² still fails after, the controller stays α̂-only in production — α̂ alone with the clamp guard is gate-passing.
 
 **Tail-formula correction.** The proposal pseudocode's `head_corr = α_eff · μ_g[i] / tail_norm` mixes gap-units (α_eff is the integrated tail gap residual, not λ) with λ-units. The controller actually uses the LSQ-projected form `Δλ_i = −α_eff · μ_g[i] / Σ_{tail}(μ_g · S_pop)`, which matches the proposal's intent of distributing correction proportional to μ_g while preserving units.
 
@@ -133,7 +133,7 @@ The bias direction is a **(CFG × aspect)** interaction, not a fixed property of
 | Setting | ∫ gap_LL | Direction | λ_scalar (LSQ) |
 |---|---:|---|---:|
 | CFG=1, no LoRA, no mod-guidance (`archive/dcw/results/20260503-1720`) | −406 | paper-opposite | −0.015 (shipped scalar) |
-| CFG=4, 1024² (`bench/dcw/results/20260504-1648`) | −188 | paper-opposite | +0.0046 |
+| CFG=4, 1024² | −188 | paper-opposite | +0.0046 |
 | CFG=4, 832×1248 HD portrait (`output/dcw/20260505-0130`) | +89 | paper-direction | +0.0059 |
 | CFG=4, 1248×832 inv-HD landscape (`output/dcw/20260505-0612`) | +205 | paper-direction | +0.0127 |
 
@@ -162,7 +162,7 @@ For v4 calibration, use `make dcw` instead — it produces the per-aspect bucket
 
 ## LL-only correction (2026-05-03 finding)
 
-`bench/dcw/results/20260503-2102-band-mask-eyeball/` ran a per-Haar-subband sweep on the same 4-image / 2-seed bench. Headline:
+A per-Haar-subband sweep (results since removed) ran on the same 4-image / 2-seed bench. Headline:
 
 | Config | late-half integrated \|gap\| | Δ vs baseline | per-band signed gap (LL / LH / HL / HH) |
 |---|---|---|---|
@@ -199,9 +199,8 @@ Closes 83% of the LL gap at the worst step (σ=0.04) and leaves headroom for per
 | File | Role |
 |---|---|
 | `networks/dcw.py` | `apply_dcw` (the apply site, shared by both modes) + `FusionHead` (shared by trainer + inference) + `haar_LL_norm` |
-| `library/inference/dcw_v4.py` | `OnlineFusionDCWController` — loads artifact, observes warmup, fires head at step `k`, emits per-step `λ_i` |
+| `library/inference/corrections/dcw_calibrator.py` | `OnlineFusionDCWController` — loads artifact, observes warmup, fires head at step `k`, emits per-step `λ_i` |
 | `library/inference/generation.py` | controller setup pre-loop + per-step apply at the DCW call site (non-tiled path) |
 | `scripts/dcw/measure_bias.py` | offline trajectory dump + S_pop sweep — produces `gaps_per_sample.npz` consumed by the trainer |
 | `scripts/dcw/train_fusion_head.py` | offline head training — produces `fusion_head.safetensors` |
 | `scripts/tasks/dcw.py` | `make dcw` / `make dcw-train` task wrappers |
-| `docs/proposal/dcw-learnable-calibrator-v4.md` | v4 derivation, gates, fallback ladder, evidence appendix |

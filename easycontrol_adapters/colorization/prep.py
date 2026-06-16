@@ -314,14 +314,23 @@ def stage_mangafy(
     text_mask_dilate: int,
     sd_match: list[str],
     sd_max_aspect: float,
+    only_stems: frozenset[str] | None = None,
     exclude_stems: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     images = walk_images(src, recursive=recursive)
-    if exclude_stems:
+    # Tag selection: keep only_stems (None = all), then drop exclude_stems.
+    if only_stems is not None or exclude_stems:
         pre = len(images)
-        images = [p for p in images if p.stem not in exclude_stems]
+        images = [
+            p
+            for p in images
+            if (only_stems is None or p.stem in only_stems)
+            and p.stem not in exclude_stems
+        ]
         if len(images) != pre:
-            print(f"Excluding {pre - len(images)} monochrome-tagged images")
+            print(
+                f"Tag filter: keeping {len(images)}/{pre} images for the colorize set"
+            )
     if limit:
         images = images[:limit]
     # Selective routing: primary engine isn't sd, but ``sd_match`` paths get SD anyway.
@@ -461,6 +470,7 @@ def stage_text(
     keep_copyright: bool = True,
     keep_comic: bool = False,
     caption_index: str | None = None,
+    staging: Path | None = None,
 ):
     """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
 
@@ -469,6 +479,11 @@ def stage_text(
     with the color-only caption filter. ``caption_src`` (the caption master) is
     nested identically to ``post_image_dataset/resized``, so the resulting TE
     paths key-match the colorize loader's resized-rooted lookup.
+
+    When ``staging`` is given (the synthesized cond tree), encoding is scoped to
+    the stems present there — the matched colorize subset the mangafy stage already
+    materialized — so the TE cache mirrors the cond cache instead of re-encoding
+    the whole master. ``None`` / absent / empty staging = encode every caption.
 
     With ``shuffle_variants > 0`` each cache holds v0 (the full color set) plus
     shuffled variants with ``tag_dropout_rate`` of the color tags dropped. The
@@ -572,9 +587,22 @@ def stage_text(
     else:
         caption_transform = filter_to_colors
 
+    # Subset selection: the staged cond tree IS the matched colorize set (mangafy
+    # already applied the only/exclude tag filter when it synthesized it), so
+    # restrict TE encoding to those stems rather than re-encoding the whole
+    # caption master. ``staging`` None (or absent/empty) = no filter — encode all.
     # Note: --limit applies to the mangafy/encode stages only; the text stage
-    # encodes the whole caption_src tree (cache_text_embeddings walks it itself
-    # and skips already-cached files, so re-runs are cheap).
+    # walks caption_src itself and skips already-cached files, so re-runs are cheap.
+    keep_stems: set[str] | None = None
+    if staging is not None and staging.is_dir():
+        keep_stems = {p.stem for p in walk_images(staging, recursive=recursive)}
+        if not keep_stems:
+            print(
+                f"Warning: staging tree {staging} is empty; encoding the whole "
+                "caption master (run the mangafy staging step first to scope this)."
+            )
+            keep_stems = None
+
     stats = cache_text_embeddings(
         caption_src,
         tokenize_strategy,
@@ -584,6 +612,7 @@ def stage_text(
         device=device,
         cache_dir=text_cache_dir,
         recursive=recursive,
+        keep_stems=keep_stems,
         batch_size=batch_size,
         caption_transform=caption_transform,
         caption_protect_fn=caption_protect_fn,
@@ -655,6 +684,25 @@ def main() -> None:
         "--overwrite", action="store_true", help="re-mangafy staged PNGs that exist"
     )
     parser.add_argument("--limit", type=int, default=None, help="cap #images (QA)")
+    parser.add_argument(
+        "--only_data_includes",
+        nargs="*",
+        default=[],
+        metavar="TAG",
+        help="restrict the colorize set to pages whose caption (in --caption_src) "
+        "carries one of these standalone tags (e.g. `genshin_impact`). Empty/omitted "
+        "= all pages eligible. Applied before --exclude_data_includes.",
+    )
+    parser.add_argument(
+        "--exclude_data_includes",
+        nargs="*",
+        default=[],
+        metavar="TAG",
+        help="drop any page whose caption (in --caption_src) carries one of these "
+        "standalone tags (e.g. `comic monochrome`). Net set = only_data_includes − "
+        "exclude_data_includes. Filtered pages get no condition synthesized, so the "
+        "train-time loader pairs them out automatically.",
+    )
     parser.add_argument(
         "--mask_dir",
         default="post_image_dataset/masks",
@@ -770,12 +818,22 @@ def main() -> None:
         else []
     )
 
-    # Drop pure-B&W pages from the colorize set — they have no color to learn and
-    # would teach "B&W in → B&W out". Stems are matched against the caption master
-    # (--caption_src); the train-time loader applies the same exclusion by stem.
-    from library.datasets.dreambooth import monochrome_stems
+    # Select which pages enter the colorize set, by caption tags (matched against the
+    # caption master, --caption_src): net set = only_data_includes − exclude_data_includes.
+    #   • --only_data_includes  — if given, restrict to pages carrying one of these
+    #     tags (empty/omitted = all pages eligible);
+    #   • --exclude_data_includes — then drop pages carrying one of these.
+    # A page filtered out here gets no cond latent, and the train-time loader pairs only
+    # against cached cond latents, so the selection carries through to training with no
+    # second tag scan.
+    from library.datasets.dreambooth import stems_with_any_tag
 
-    exclude_stems = monochrome_stems(args.caption_src)
+    only_stems = (
+        stems_with_any_tag(args.caption_src, args.only_data_includes)
+        if args.only_data_includes
+        else None
+    )
+    exclude_stems = stems_with_any_tag(args.caption_src, args.exclude_data_includes)
 
     if not args.skip_mangafy:
         sd_kwargs = dict(
@@ -798,6 +856,7 @@ def main() -> None:
             text_mask_dilate=args.text_mask_dilate,
             sd_match=sd_match,
             sd_max_aspect=args.sd_max_aspect,
+            only_stems=only_stems,
             exclude_stems=exclude_stems,
         )
         print(
@@ -839,6 +898,7 @@ def main() -> None:
             keep_copyright=args.text_keep_copyright,
             keep_comic=args.text_keep_comic,
             caption_index=args.caption_index,
+            staging=staging,
         )
         print(
             f"\nColor-only text caching complete: {tstats.written} cached, "

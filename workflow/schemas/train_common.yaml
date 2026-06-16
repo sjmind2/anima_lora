@@ -114,7 +114,7 @@ groups:
         required: false
         layer: common
         default: "sigmoid"
-        choices: ["sigmoid", "uniform", "sigmoid_shifted"]
+        choices: ["sigma", "uniform", "sigmoid", "shift", "flux_shift"]
         label: "时间步采样策略"
       - key: discrete_flow_shift
         type: float
@@ -284,12 +284,6 @@ groups:
         layer: common
         default: ".txt"
         label: "Caption 扩展名"
-      - key: keep_tokens
-        type: int
-        required: false
-        layer: common
-        default: 3
-        label: "保留 Token 数"
       - key: cache_llm_adapter_outputs
         type: bool
         required: false
@@ -388,3 +382,100 @@ groups:
         required: false
         layer: common
         label: "随机种子"
+
+  - name: repa
+    label: "REPA 表示对齐"
+    collapsed: true
+    fields:
+      - key: use_repa
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "启用 REPA"
+        help: "训练辅助损失：将 DiT 中间块特征对齐到 PE-Spatial 视觉 token。需要 {stem}_anima_pe_spatial.safetensors 缓存。不影响推理。"
+      - key: repa_mode
+        type: enum
+        required: false
+        layer: common
+        default: "relational"
+        choices: ["relational", "absolute"]
+        label: "REPA 模式"
+        help: "relational=Gram 矩阵对齐（默认）; absolute=余弦相似度+可训练 REPAHead"
+      - key: repa_weight
+        type: float
+        required: false
+        layer: common
+        default: 0.05
+        label: "REPA 权重"
+        help: "对齐损失权重 λ。0.05=轻度，0.5=激进"
+      - key: repa_layer
+        type: int
+        required: false
+        layer: common
+        default: 8
+        label: "REPA 抽取层"
+        help: "DiT block 抽取点 (0-27)。默认 8 = 中前层"
+      - key: repa_encoder
+        type: str
+        required: false
+        layer: common
+        default: "pe_spatial"
+        label: "REPA 编码器"
+        help: "对齐目标的视觉编码器"
+      - key: repa_lr_scale
+        type: float
+        required: false
+        layer: common
+        default: 1.0
+        label: "REPA Head LR 倍率"
+        help: "REPAHead 学习率倍率（仅 absolute 模式）"
+      - key: repa_anneal_steps
+        type: float
+        required: false
+        layer: common
+        default: 0.0
+        label: "REPA 退火步数"
+        help: "0=不退火; (0,1]=总步数比例; >1=绝对步数"
+      - key: repa_spatial_norm
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "REPA 空间归一化"
+        help: "iREPA 目标标准化（与 DoG 互斥）"
+      - key: repa_grad_heatmap
+        type: int
+        required: false
+        layer: common
+        default: 0
+        label: "REPA 梯度热图"
+        help: "诊断热图频率（步）。0=关闭"
+      - key: repa_target_dog
+        type: bool
+        required: false
+        layer: common
+        default: false
+        label: "REPA-DoG 带通"
+        help: "对 PE 目标施加高斯差分带通滤波，锐化中频结构"
+      - key: repa_dog_sigma1_div
+        type: float
+        required: false
+        layer: common
+        default: 16.0
+        label: "DoG σ₁ 除数"
+        help: "σ₁ = min(gh,gw)/div。越小=低通越宽。默认 16"
+      - key: repa_dog_sigma2_div
+        type: float
+        required: false
+        layer: common
+        default: 0.0
+        label: "DoG σ₂ 除数"
+        help: ">sigma1_div 激活真带通。0=仅低通。默认 0"
+      - key: repa_dog_norm_std
+        type: float
+        required: false
+        layer: common
+        default: 0.0
+        label: "DoG 归一化 std"
+        help: "0=经验 std; >0=固定常数"

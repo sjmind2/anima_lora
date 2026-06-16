@@ -11,6 +11,12 @@ groups:
         required: false
         default: true
         label: "共享缓存"
+      - key: pe_encoder
+        type: str
+        required: false
+        default: ""
+        label: "PE 视觉编码器缓存"
+        help: "启用 REPA 训练时必须设置。填入编码器名称（如 pe_spatial），预处理将额外缓存 {stem}_anima_{encoder}.safetensors。留空则跳过 PE 缓存。"
 
   - name: advanced
     label: "高级覆盖"

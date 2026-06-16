@@ -80,6 +80,7 @@ def main() -> None:
         batch_size_default=8,
         include_num_workers=True,
         num_workers_default=4,
+        include_tree=True,
     )
     add_device_args(
         parser,
@@ -195,6 +196,7 @@ def main() -> None:
         bundle,
         cache_dir=cache_dir,
         recursive=args.recursive,
+        tree=args.tree,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         save_dtype=save_dtype,

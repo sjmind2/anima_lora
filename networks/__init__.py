@@ -177,7 +177,12 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         "content_router_layer_norm",
         "content_router_init_std",
         "chimera_lambda_init",
-        # REPA v2 auxiliary alignment loss.
+        # Per-expert capability levers (frozen-Cayley chimera; distill away).
+        "chimera_expert_basis_mult",
+        "chimera_expert_diag",
+        # REPA v2 auxiliary alignment loss (docs/experimental/repa.md).
+        # Off by default; the factory builds the head (absolute mode only) and
+        # stashes the config on the network for REPAMethodAdapter + _repa_loss.
         "use_repa",
         "repa_mode",
         "repa_weight",
@@ -187,11 +192,20 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         "repa_anneal_steps",
         "repa_spatial_norm",
         "repa_grad_heatmap",
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md): a broader
+        # low-band strip than spatial_norm's DC removal. Off by default; when on
+        # it replaces the spatial_norm block in the relational target preprocess.
+        "repa_target_dog",  # false = off (no-op); true ⇒ DoG band-pass the target
+        "repa_dog_sigma1_div",  # σ₁ = min(gh,gw)/div (outer, broad low band removed)
+        "repa_dog_sigma2_div",  # 0 ⇒ σ₂ off (low-band strip only); >div1 ⇒ band-pass
+        "repa_dog_norm_std",  # 0 ⇒ empirical std (matches spatial_norm); >0 = fixed
         # --- LyCORIS variant selectors + per-variant knobs (fork) ---
         "network_type",
         "use_tucker",
         "decompose_both",
         "lokr_factor",
+        "use_scalar",          # LokrModule scalar knob (kwarg_flags)
+        "weight_decompose",    # LokrModule DoRA-style weight decompose (kwarg_flags)
         "full_matrix",
         "conv_dim",
         "conv_alpha",

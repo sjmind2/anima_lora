@@ -424,6 +424,30 @@ def _cmd_preprocess_subsets_tree(subsets, source_dir, dst, cache_dir, extra):
             ]
         )
 
+    # REPA PE caching (tree mode) — mirrors the VAE/TE --tree layout so PE
+    # sidecars land in each subset's ``.lora/`` alongside VAE/TE caches.
+    encoder = _repa_pe_encoder()
+    if encoder is not None:
+        print(
+            f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})",
+            file=sys.stderr,
+        )
+        pe_cmd = [
+            PY,
+            "scripts/preprocess/cache_pe_encoder.py",
+            "--dir",
+            dst,
+            "--cache_dir",
+            dst,
+            "--tree",
+            "--encoder",
+            encoder,
+        ]
+        if encoder == "pe":
+            pe_cmd.append("--centroid")
+        pe_cmd.extend(extra)
+        run(pe_cmd)
+
 
 def cmd_caption_index(extra):
     """Build the method-agnostic typed-tag caption index.
@@ -575,6 +599,26 @@ def cmd_preprocess_subsets(extra, subsets=None):
             te_cmd.append("--recursive")
         te_cmd.extend(extra)
         run(te_cmd)
+
+        # REPA PE caching (per-subset fallback)
+        encoder = _repa_pe_encoder()
+        if encoder is not None:
+            pe_cmd = [
+                PY,
+                "scripts/preprocess/cache_pe_encoder.py",
+                "--dir",
+                image_dir,
+                "--cache_dir",
+                cache_dir,
+                "--encoder",
+                encoder,
+            ]
+            if not is_root:
+                pe_cmd.append("--recursive")
+            if encoder == "pe":
+                pe_cmd.append("--centroid")
+            pe_cmd.extend(extra)
+            run(pe_cmd)
     print(
         f"  cmd_preprocess_subsets: all {len(subsets)} subset(s) processed",
         file=sys.stderr,
@@ -694,16 +738,10 @@ def cmd_preprocess(extra):
                 f"(soft-tokens contrastive training needs it)."
             )
 
-        # REPA PE auto-caching when use_repa=true in the config
-        encoder = _repa_pe_encoder()
-        if encoder is not None:
-            print(
-                f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})"
-            )
-            if encoder == "pe_spatial":
-                cmd_preprocess_pe_spatial([])
-            else:
-                cmd_preprocess_pe([])
+        # REPA PE caching is handled inside cmd_preprocess_subsets (both tree
+        # mode and per-subset fallback) so PE sidecars use the correct per-
+        # subset paths — the flat-path cmd_preprocess_pe{,_spatial} targets
+        # would look for post_image_dataset/resized which doesn't exist here.
 
         return
 

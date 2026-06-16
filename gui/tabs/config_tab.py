@@ -14,7 +14,7 @@ import html
 logger = logging.getLogger(__name__)
 
 import toml
-from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -73,10 +73,17 @@ from gui import (
     variant_path,
 )
 from gui import daemon as gui_daemon
+from gui._job_mixin import DaemonJobMixin
+from gui.theme import tok
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
-from gui.widgets import ImageViewerDialog
+from gui.widgets import (
+    ClickableLabel,  # noqa: F401 — re-exported; sibling tabs import it from here
+    DirtyTrackingMixin,
+    ImageViewerDialog,
+    make_field_label,
+)
 from gui.progress import (
     TQDM_RE,
     JsonlProgressReader,
@@ -146,22 +153,7 @@ class SplitButtonStyle(QProxyStyle):
             painter.restore()
 
 
-class ClickableLabel(QLabel):
-    """QLabel that emits `clicked` on left-click."""
-
-    clicked = Signal()
-
-    def __init__(self, text: str = ""):
-        super().__init__(text)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(ev)
-
-
-class ConfigTab(QWidget):
+class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
     def __init__(
         self, methods: list[str] | None = None, tb_panel=None, preprocess_tab=None
     ):
@@ -400,7 +392,7 @@ class ConfigTab(QWidget):
         self._explain.setOpenLinks(False)
         self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 13px; padding: 12px; background: #2b2b2b; color: #e0e0e0; }"
+            f"QTextBrowser {{ font-size: 14px; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
         # Identity of the gallery render currently showing (None = panel holds
@@ -427,9 +419,9 @@ class ConfigTab(QWidget):
         self._log_copy_btn.setToolTip(t("copy_log_tooltip"))
         self._log_copy_btn.setCursor(Qt.PointingHandCursor)
         self._log_copy_btn.setStyleSheet(
-            "QToolButton { background:#3a3a3a; color:#e0e0e0; border:1px solid #555;"
+            f"QToolButton {{ background:{tok('surface')}; color:{tok('text')}; border:1px solid {tok('border')};"
             " border-radius:4px; padding:2px 8px; font-size:11px; }"
-            "QToolButton:hover { background:#4a4a4a; }"
+            f"QToolButton:hover {{ background:{tok('surface_hover')}; }}"
         )
         self._log_copy_btn.clicked.connect(self._copy_log)
         self.log.installEventFilter(self)
@@ -545,15 +537,15 @@ class ConfigTab(QWidget):
         variant_label = f"gui-methods/{variant}.toml"
         origin_style = {
             "base": (
-                "color:#888; text-decoration: underline dotted;",
+                f"color:{tok('text_dim')}; text-decoration: underline dotted;",
                 "from base.toml",
             ),
             "preset": (
-                "color:#6aa4d8; text-decoration: underline dotted;",
+                f"color:{tok('link')}; text-decoration: underline dotted;",
                 f"from presets.toml[{self._IMPLICIT_PRESET}] (saves to {variant_label})",
             ),
             "method": (
-                "color:#f0f0f0; text-decoration: underline dotted;",
+                f"color:{tok('text')}; text-decoration: underline dotted;",
                 f"from {variant_label}",
             ),
         }
@@ -564,17 +556,17 @@ class ConfigTab(QWidget):
             for k in sorted(flds, key=lambda key: (_FIELD_ORDER.get(key, 100), key)):
                 w = _widget(flds[k], key=k)
                 self._w[k] = w
-                lbl = ClickableLabel(k)
-
                 help_text = field_help(k)
                 style, note = origin_style.get(
                     self._origin.get(k, "base"), origin_style["base"]
                 )
-                lbl.setStyleSheet(style)
                 notes = (note,)
-
-                lbl.clicked.connect(
-                    lambda _k=k, _h=help_text, _n=notes: self._show_explain(_k, _h, _n)
+                lbl = make_field_label(
+                    k,
+                    style=style,
+                    on_click=lambda _k=k, _h=help_text, _n=notes: self._show_explain(
+                        _k, _h, _n
+                    ),
                 )
 
                 if k == "source_image_dir":
@@ -822,57 +814,8 @@ class ConfigTab(QWidget):
         use_valid_w.toggled.connect(_on_use_valid)
         vsn_w.valueChanged.connect(_on_split_changed)
 
-    # ── Dirty tracking ──
-
-    def _connect_dirty_signal(self, w: QWidget) -> None:
-        """Wire each form widget's change signal to _mark_dirty so the Save
-        button reflects whether the form has drifted from the variant file."""
-        from PySide6.QtWidgets import (
-            QCheckBox,
-            QComboBox,
-            QLineEdit,
-            QPlainTextEdit,
-            QSpinBox,
-        )
-
-        from gui import _SamplePromptsWidget, _TargetResWidget
-
-        if isinstance(w, _TargetResWidget):
-            w.changed.connect(self._mark_dirty)
-        elif isinstance(w, _SamplePromptsWidget):
-            w.changed.connect(self._mark_dirty)
-        elif isinstance(w, QComboBox):
-            w.currentTextChanged.connect(self._mark_dirty)
-        elif isinstance(w, QCheckBox):
-            w.toggled.connect(self._mark_dirty)
-        elif isinstance(w, QSpinBox):
-            w.valueChanged.connect(self._mark_dirty)
-        elif isinstance(w, QLineEdit):
-            w.textChanged.connect(self._mark_dirty)
-        elif isinstance(w, QPlainTextEdit):
-            w.textChanged.connect(self._mark_dirty)
-
-    def _mark_dirty(self, *_):
-        if self._dirty:
-            return
-        self._dirty = True
-        self._update_save_button()
-
-    def _clear_dirty(self):
-        self._dirty = False
-        self._update_save_button()
-
-    def _update_save_button(self):
-        if not hasattr(self, "_save_btn"):
-            return
-        if self._dirty:
-            self._save_btn.setText(t("save") + " *")
-            self._save_btn.setStyleSheet(self._save_btn_dirty_style)
-            self._save_btn.setToolTip(t("save_dirty_tooltip"))
-        else:
-            self._save_btn.setText(t("save"))
-            self._save_btn.setStyleSheet(self._save_btn_idle_style)
-            self._save_btn.setToolTip("")
+    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty /
+    #    _update_save_button are inherited from DirtyTrackingMixin. ──
 
     # ── Subset scanning ──
 
@@ -1128,7 +1071,7 @@ class ConfigTab(QWidget):
             self._set_explain_html(guide)
             return
         self._set_explain_html(
-            f"<p style='color:#888; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
+            f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
         )
 
     def _set_explain_html(
@@ -1177,7 +1120,7 @@ class ConfigTab(QWidget):
         if not imgs:
             self._set_explain_html(
                 f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t(empty_key))}</p>",
+                f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t(empty_key))}</p>",
                 gallery_sig=sig,
             )
             return
@@ -1188,7 +1131,7 @@ class ConfigTab(QWidget):
             parts.append(
                 f"<p style='margin:0 0 10px 0;'>"
                 f"<a href='{magnify}'><img src='{url}' style='max-width:100%;'/></a><br/>"
-                f"<span style='color:#aaa; font-size:11px;'>{html.escape(p.name)}</span> "
+                f"<span style='color:{tok('text_dim')}; font-size:11px;'>{html.escape(p.name)}</span> "
                 f"<a href='{magnify}' style='text-decoration:none; font-size:12px;'>🔍</a>"
                 f"</p>"
             )
@@ -1248,7 +1191,9 @@ class ConfigTab(QWidget):
         with an empty placeholder); ``announce=True`` always renders, including
         the empty message, and is used when a training job finishes."""
         sample_dir = getattr(self, "_sample_dir", None) or self._resolve_sample_dir()
-        imgs = self._newest_images(sample_dir, since=getattr(self, "_sample_floor", None))
+        imgs = self._newest_images(
+            sample_dir, since=getattr(self, "_sample_floor", None)
+        )
         if not imgs and not announce:
             return
         self._explain_mode = "sample"
@@ -1264,14 +1209,14 @@ class ConfigTab(QWidget):
             f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
         ]
         if help_text:
-            parts.append(f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>")
+            parts.append(f"<p style='font-size:15px; line-height:1.6;'>{help_text}</p>")
         else:
             parts.append(
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
+                f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
             )
         for note in notes:
             parts.append(
-                f"<p style='color:#aaa; font-style:italic; margin-top:12px;'>• {html.escape(note)}</p>"
+                f"<p style='color:{tok('text_dim')}; font-style:italic; margin-top:12px;'>• {html.escape(note)}</p>"
             )
         self._set_explain_html("".join(parts))
 
@@ -1778,29 +1723,23 @@ class ConfigTab(QWidget):
         # The spec also tags this command job as *this tab's* preprocess, so
         # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
         chain_train = self._chain_train_spec(variant) if chain_after else None
-        try:
-            snapshot = self._queue_config_snapshot(variant)
-            resp = gui_daemon.submit_command(
+
+        def _on_fail():
+            self._chain_train_after_preprocess = False
+            self._restore_idle_ui()
+
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
                 extra_env=self._preprocess_env(variant),
                 chain_train=chain_train,
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant),
                 start=True,  # main Train auto-chain: run now
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._chain_train_after_preprocess = False
-            self._restore_idle_ui()
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+            ),
+            on_fail=_on_fail,
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            self._chain_train_after_preprocess = False
-            self._restore_idle_ui()
             return
 
         self._log(t("daemon_queued", job_id=job_id))
@@ -1891,24 +1830,16 @@ class ConfigTab(QWidget):
         self._log(t("queue_submitting", variant=variant) + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_training(
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_training(
                 method=variant,
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=False,  # queue dropdown: add to queue, don't start now
             )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
             return
 
         self._log(t("queue_added_train", variant=variant, job_id=job_id))
@@ -1943,30 +1874,20 @@ class ConfigTab(QWidget):
         self._log(t(submit_key, variant=variant) + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_command(
+        queued_key = (
+            "queue_added_preprocess" if train_after else "queue_added_preprocess_only"
+        )
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
                 extra_env=self._preprocess_env(variant),
                 chain_train=self._chain_train_spec(variant) if train_after else None,
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=False,  # queue dropdown: add to queue, don't start now
             )
-            queued_key = (
-                "queue_added_preprocess"
-                if train_after
-                else "queue_added_preprocess_only"
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
             return
 
         self._log(t(queued_key, variant=variant, job_id=job_id))
@@ -2007,26 +1928,17 @@ class ConfigTab(QWidget):
         self._log(t("daemon_submitting") + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_training(
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_training(
                 method=variant,
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=True,  # main Train button: run now
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_idle_ui()
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+            ),
+            on_fail=self._restore_idle_ui,
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            self._restore_idle_ui()
             return
 
         self._log(t("daemon_queued", job_id=job_id))

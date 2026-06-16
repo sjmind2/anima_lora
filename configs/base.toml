@@ -87,7 +87,21 @@ use_cmmd = false
 channel_scaling_alpha = 0.5
 gradient_accumulation_steps=1
 
+# REPA — Representation Alignment (training-only auxiliary loss)
+# All defaults keep REPA OFF; set use_repa = true to activate.
 use_repa = false
+repa_mode = "relational"
+repa_weight = 0.05
+repa_layer = 8
+repa_encoder = "pe_spatial"
+repa_lr_scale = 1.0
+repa_anneal_steps = 0.0
+repa_spatial_norm = false
+repa_grad_heatmap = 0
+repa_target_dog = false
+repa_dog_sigma1_div = 16.0
+repa_dog_sigma2_div = 0.0
+repa_dog_norm_std = 0.0
 
 [general]
 [[datasets]]

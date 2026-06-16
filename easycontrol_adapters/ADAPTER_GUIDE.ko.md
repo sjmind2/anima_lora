@@ -34,8 +34,8 @@ colorize의 방식 — 재사용할 수 있는 아이디어입니다: **실제 �
 | # | 항목 | colorize 버전 | 역할 |
 |---|---------|-------------------|--------------|
 | 1 | `easycontrol_adapters/<task>/` 프로젝트 | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | 레퍼런스 이미지를 만들고 캐시 (선택적으로 짧은 텍스트 캐시도) |
-| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | 각 타깃을 레퍼런스와 **cond_cache_dir**로 짝짓는 데이터셋 |
-| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | config — 데이터셋을 가리키고 LR / epochs / `network_args` 설정 |
+| 2 | `configs/datasets/<task>.toml` | `configs/easycontrol/colorize.toml` | 각 타깃을 레퍼런스와 **cond_cache_dir**로 짝짓는 데이터셋 |
+| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/easycontrol/colorize.toml` | config — 데이터셋을 가리키고 LR / epochs / `network_args` 설정 |
 | 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + 분기 | `EASYADAPTER=<task>`가 `make easycontrol*` 명령에서 작동하게 함 |
 
 순서대로 살펴봅니다. 어느 것도 `networks/`를 건드리지 않습니다.
@@ -106,7 +106,7 @@ DiT는 Anima의 **원본 형태 버킷팅**으로 동작합니다(두 개의 토
 
 이 파일이 레퍼런스를 타깃과 다르게 만듭니다. 평범한 데이터셋(`[general]` + `[[datasets]]` + `[[datasets.subsets]]`)에 **추가 노브 하나**를 더한 것입니다: `cond_cache_dir` (그리고 선택적으로 `text_cache_dir`).
 
-colorize(`configs/datasets/colorize.toml`), 주석 포함:
+colorize(`configs/easycontrol/colorize.toml`), 주석 포함:
 
 ```toml
 [general]
@@ -140,12 +140,12 @@ colorize가 타깃 레이턴트와 텍스트에 **공유** `post_image_dataset/l
 
 ## 5. 항목 3 — 메서드 config (`configs/methods/<task>.toml`)
 
-`configs/methods/easycontrol.toml`의 거의 복사본입니다. 유일한 구조적 변경은 자신의 데이터셋을 가리키는 `dataset_config`이며, 나머지는 하이퍼파라미터입니다.
+`configs/easycontrol/easycontrol.toml`의 거의 복사본입니다. 유일한 구조적 변경은 자신의 데이터셋을 가리키는 `dataset_config`이며, 나머지는 하이퍼파라미터입니다.
 
-colorize(`configs/methods/colorize.toml`), 중요한 라인들:
+colorize(`configs/easycontrol/colorize.toml`), 중요한 라인들:
 
 ```toml
-dataset_config = "configs/datasets/colorize.toml"   # ← your dataset from §4
+dataset_config = "configs/easycontrol/colorize.toml"   # ← your dataset from §4
 
 network_module = "networks.methods.easycontrol"     # SHARED — same network as plain EasyControl
 
@@ -180,7 +180,7 @@ unsloth_offload_checkpointing = true
 - **`easycontrol_drop_p`** — image-CFG를 위한 레퍼런스 드롭아웃 빈도. colorize는 `0`을 사용합니다(항상 레퍼런스를 원합니다); 기본값은 `0.1`입니다.
 - **`output_name`** — 고유해야 합니다; 인퍼런스 단계가 이 이름으로 최신 체크포인트를 찾습니다(§6).
 
-`configs/gui-methods/<task>.toml`도 추가할 수 있습니다 — `[variant]` 블록(`family = "easycontrol"`, `label`, `description`, `order`)을 가진 독립형 버전(토글 블록 없음)으로, GUI의 EasyControl 드롭다운에 나타납니다. `configs/gui-methods/colorize.toml`을 참조하세요. CLI에서만 실행한다면 건너뛰세요.
+`configs/gui-methods/<task>.toml`도 추가할 수 있습니다 — `[variant]` 블록(`family = "easycontrol"`, `label`, `description`, `order`)을 가진 독립형 버전(토글 블록 없음)으로, GUI의 EasyControl 드롭다운에 나타납니다. `configs/gui-methods/easycontrol.toml`을 참조하세요. CLI에서만 실행한다면 건너뛰세요.
 
 ---
 

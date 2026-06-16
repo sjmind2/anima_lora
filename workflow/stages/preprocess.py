@@ -188,6 +188,22 @@ class PreprocessExecutor(StageBase):
         ]
         return cmd
 
+    def _build_pe_cmd(self) -> list[str]:
+        dst = str(self.stage_dir / "post_image_dataset")
+        encoder = self.config.get("pe_encoder", "pe_spatial")
+        cmd = [
+            sys.executable,
+            str(self._SCRIPTS_DIR / "cache_pe_encoder.py"),
+            "--dir",
+            dst,
+            "--tree",
+            "--encoder",
+            encoder,
+            "--cache_dir",
+            dst,
+        ]
+        return cmd
+
     def discover_subsets(self) -> list[SubsetInfo]:
         post_dir = self.stage_dir / "post_image_dataset"
         if not post_dir.exists():
@@ -251,11 +267,17 @@ class PreprocessExecutor(StageBase):
                 )
 
             # Run preprocessing pipeline
-            for step_name, cmd_builder in [
+            pipeline_steps = [
                 ("resize", self._build_resize_cmd),
                 ("vae", self._build_vae_cmd),
                 ("te", self._build_te_cmd),
-            ]:
+            ]
+            # PE-Spatial cache: only when pe_encoder is set (train stage
+            # enabled REPA and the workflow config propagated the encoder name).
+            if self.config.get("pe_encoder"):
+                pipeline_steps.append(("pe", self._build_pe_cmd))
+
+            for step_name, cmd_builder in pipeline_steps:
                 cmd = cmd_builder()
                 if on_stdout:
                     on_stdout(self.stage_id, f"[COMMAND:{step_name}] " + " ".join(cmd))

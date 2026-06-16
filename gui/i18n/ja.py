@@ -316,13 +316,37 @@ STRINGS: dict[str, str] = {
     "dataset_sort_asc_tooltip": "A→Z 順 (クリックで逆順)",
     "dataset_sort_desc_tooltip": "Z→A 順 (クリックで逆順)",
     "dataset_mask_overlay": "マスクオーバーレイを表示",
-    "dataset_view_list_tooltip": "フラットリスト表示 (クリックでツリー表示に切り替え)",
-    "dataset_view_tree_tooltip": "フォルダーツリー表示 (クリックでリスト表示に切り替え)",
+    "dataset_delete": "削除",
+    "dataset_delete_tooltip": "Delete キーで印を付けた（赤色の）画像を、キャプションファイルと一緒にゴミ箱へ移動します。",
+    "dataset_delete_clear": "キャンセル",
+    "dataset_delete_clear_tooltip": "すべての削除マークを解除します (Esc キーは現在の画像のみ解除)。",
+    "dataset_delete_confirm_title": "画像を削除",
+    "dataset_delete_confirm_body": "{n} 枚の画像とキャプションファイルをゴミ箱へ移動しますか？",
+    "dataset_delete_failed": "一部の画像を削除できませんでした:\n{err}",
+    "dataset_group_label": "グループ {n} — {size} 枚",
+    "dataset_group_rebuild": "グループ化",
+    "dataset_group_rebuild_tooltip": "PE-Spatial の視覚的類似度で画像をグループ化 (作者ごと). ジョブキューで実行されます.",
+    "dataset_group_queued": "グループ化をキューに追加しました (ジョブ {job_id}). 完了後にこのディレクトリを再読み込みするとグループが表示されます.",
     "n_images_filtered": "{shown} / {total} 枚の画像",
     "caption": "キャプション:",
     "no_caption": "(キャプションなし)",
     "caption_save": "保存",
     "caption_revert": "元に戻す",
+    "caption_autotag": "自動タグ付け",
+    "caption_autotag_tooltip": (
+        "Anima Tagger をこの画像に実行し、予測されたタグをキャプションに追加します。"
+        "モデルは初回使用時に自動でダウンロードされます。結果を確認してから保存すると "
+        ".txt に書き込まれます。"
+    ),
+    "caption_autotag_running": "自動タグ付け中…",
+    "caption_autotag_loading": "タガーを読み込み中…",
+    "caption_autotag_ready": "タガー読み込み済み · 待機中",
+    "caption_autotag_busy": (
+        "GPU が別のジョブ（学習 / 前処理 / グルーピング）で使用中です。"
+        "完了後にもう一度自動タグ付けしてください。"
+    ),
+    "caption_autotag_error": "自動タグ付けに失敗しました: {err}",
+    "caption_autotag_empty": "タガーはこの画像のタグを返しませんでした。",
     "caption_versions": "履歴…",
     "caption_dirty_marker": " *",
     "caption_diff_stats": "(+{add} / −{rem})",
@@ -351,8 +375,27 @@ STRINGS: dict[str, str] = {
     "language": "言語:",
     # Settings dialog
     "settings_btn": "⚙ 設定",
-    "settings_btn_tooltip": "アプリ設定 — 言語、MCP サーバー登録",
+    "settings_btn_tooltip": "アプリ設定 — 言語、環境設定、MCP サーバー登録",
     "settings_title": "設定",
+    "settings_prefs_header": "環境設定",
+    "settings_autotag_confidence": "自動タグの信頼度:",
+    "settings_autotag_confidence_tooltip": (
+        "タガーのタグ別しきい値に追加で適用する確率の下限（0–1）です。"
+        "高いほど確信度の高いタグだけが少数残ります。既定値 0.50。"
+    ),
+    "settings_theme": "テーマ:",
+    "settings_theme_tooltip": (
+        "インターフェース全体のカラーテーマです。即時に反映され、設定画面を閉じると"
+        "ウィンドウが再描画されて完全に適用されます。"
+    ),
+    "settings_font_size": "フォントサイズ:",
+    "settings_font_size_tooltip": (
+        "インターフェースフォントのポイントサイズです。即時に反映され、設定画面を"
+        "閉じるとウィンドウが再描画され各パネルが再配置されます。既定値 10。"
+    ),
+    "settings_theme_dark": "ダーク",
+    "settings_theme_light": "ライト",
+    "settings_theme_sepia": "セピア",
     "settings_mcp_header": "MCP サーバー（エージェント連携）",
     "settings_mcp_desc": "ローカル学習デーモンを MCP クライアント（Claude Code、Claude Desktop "
     "など）に公開します。以下のコマンドをターミナルで実行すると Claude Code に登録されます:",
@@ -386,6 +429,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "新しいリリース {v} があります — クリックしてリリースノートを確認",
     "report_issue": "問題を報告",
     "report_issue_tooltip": "ブラウザで GitHub Issue トラッカーを開きます",
+    "visit_github": "GitHub ページを開く",
+    "open_in_system_viewer": "システムビューアで開く",
     # Models dialog
     "models_title": "モデルのダウンロード",
     "models_intro": "以下からモデルグループを選択するか、「すべてダウンロード」で標準セット "

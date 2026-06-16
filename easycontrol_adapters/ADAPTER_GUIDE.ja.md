@@ -34,8 +34,8 @@ colorize のやり方 — 再利用できるアイデアです: **実際の白�
 | # | もの | colorize バージョン | 役割 |
 |---|---------|-------------------|--------------|
 | 1 | `easycontrol_adapters/<task>/` プロジェクト | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | 参照画像を作ってキャッシュする (任意で短いテキストキャッシュも) |
-| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | 各ターゲットを参照と **cond_cache_dir** でペアにするデータセット |
-| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | config — データセットを指し、LR / epochs / `network_args` を設定 |
+| 2 | `configs/datasets/<task>.toml` | `configs/easycontrol/colorize.toml` | 各ターゲットを参照と **cond_cache_dir** でペアにするデータセット |
+| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/easycontrol/colorize.toml` | config — データセットを指し、LR / epochs / `network_args` を設定 |
 | 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + 分岐 | `EASYADAPTER=<task>` を `make easycontrol*` コマンドで動くようにする |
 
 順番に見ていきます。どれも `networks/` を触りません。
@@ -106,7 +106,7 @@ DiT は Anima の **ネイティブ形状バケッティング** (二つのト�
 
 このファイルが参照をターゲットと別のものにします。通常のデータセット (`[general]` + `[[datasets]]` + `[[datasets.subsets]]`) に**追加のノブが一つ**付いたものです: `cond_cache_dir` (と任意で `text_cache_dir`)。
 
-colorize (`configs/datasets/colorize.toml`)、コメント付き:
+colorize (`configs/easycontrol/colorize.toml`)、コメント付き:
 
 ```toml
 [general]
@@ -140,12 +140,12 @@ colorize がターゲット latent とテキストに**共有の** `post_image_d
 
 ## 5. もの 3 — メソッド config (`configs/methods/<task>.toml`)
 
-`configs/methods/easycontrol.toml` のほぼコピーです。唯一の構造的な変更は自分のデータセットを指す `dataset_config` だけで、残りはハイパーパラメータです。
+`configs/easycontrol/easycontrol.toml` のほぼコピーです。唯一の構造的な変更は自分のデータセットを指す `dataset_config` だけで、残りはハイパーパラメータです。
 
-colorize (`configs/methods/colorize.toml`)、重要な行:
+colorize (`configs/easycontrol/colorize.toml`)、重要な行:
 
 ```toml
-dataset_config = "configs/datasets/colorize.toml"   # ← your dataset from §4
+dataset_config = "configs/easycontrol/colorize.toml"   # ← your dataset from §4
 
 network_module = "networks.methods.easycontrol"     # SHARED — same network as plain EasyControl
 
@@ -180,7 +180,7 @@ unsloth_offload_checkpointing = true
 - **`easycontrol_drop_p`** — image-CFG のために参照をどれくらいの頻度でドロップするか。colorize は `0` を使います (常に参照が欲しい); デフォルトは `0.1` です。
 - **`output_name`** — 一意でなければなりません; 推論ステップがこの名前で最新のチェックポイントを探します (§6)。
 
-任意で `configs/gui-methods/<task>.toml` も追加できます — `[variant]` ブロック (`family = "easycontrol"`、`label`、`description`、`order`) を持つ独立したバージョン (トグルブロックなし) で、GUI の EasyControl ドロップダウンに表示されます。`configs/gui-methods/colorize.toml` を参照してください。CLI からのみ実行するならスキップしてください。
+任意で `configs/gui-methods/<task>.toml` も追加できます — `[variant]` ブロック (`family = "easycontrol"`、`label`、`description`、`order`) を持つ独立したバージョン (トグルブロックなし) で、GUI の EasyControl ドロップダウンに表示されます。`configs/gui-methods/easycontrol.toml` を参照してください。CLI からのみ実行するならスキップしてください。
 
 ---
 

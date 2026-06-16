@@ -20,19 +20,15 @@ double as the form's field tooltips.
 from __future__ import annotations
 
 import html
-import re
 
 import tomlkit
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -49,11 +45,13 @@ from gui import ROOT, CONFIGS_DIR, LazyTabMixin, _read, _widget
 from gui import daemon as gui_daemon
 from gui.explanations import method_overview
 from gui.i18n import t
+from gui._job_mixin import DaemonJobMixin
 from gui.progress import TqdmProgressTracker, make_progress_bar
-from gui.tabs.config_tab import ClickableLabel
+from gui.theme import tok
+from gui.widgets import DirtyTrackingMixin, make_field_label
 
 
-class _DistillConfigTab(LazyTabMixin, QWidget):
+class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget):
     """Structured editor for a bespoke sectioned distill config.
 
     Subclasses set the config file, the ``tasks.py`` train target, and a label.
@@ -87,7 +85,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         title.setStyleSheet("font-weight:bold;font-size:14px;")
         top.addWidget(title)
         path_lbl = QLabel(self.CONFIG_PATH)
-        path_lbl.setStyleSheet("color:#888;")
+        path_lbl.setStyleSheet(f"color:{tok('text_dim')};")
         top.addWidget(path_lbl)
         top.addStretch()
 
@@ -142,8 +140,8 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 13px; padding: 12px; "
-            "background: #2b2b2b; color: #e0e0e0; }"
+            "QTextBrowser { font-size: 14px; padding: 12px; "
+            f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(300)
         hsplit.addWidget(self._explain)
@@ -162,13 +160,9 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         self._show_explain_placeholder()
 
         # ── Daemon job observation (command job → no progress.jsonl, tqdm
-        # parsing drives the bar). Mirrors ConfigTab's poll-driven approach. ──
-        self._job_id: str | None = None
-        self._stdout_buf = ""
-        self._stdout_tailer = gui_daemon.FileTailer()
-        self._job_timer = QTimer(self)
-        self._job_timer.setInterval(400)
-        self._job_timer.timeout.connect(self._poll_job)
+        # parsing drives the bar). _poll_job / _drain_job_stdout come from
+        # DaemonJobMixin; _emit_log_line below routes lines to this tab's log. ──
+        self._init_job_observer()
 
     def _lazy_init(self) -> None:
         self._load_and_build()
@@ -207,7 +201,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
 
         self._fl.addStretch()
         for _s, _k, w, _o in self._fields:
-            self._connect_dirty(w)
+            self._connect_dirty_signal(w)
         self._clear_dirty()
         self._show_explain_placeholder()
 
@@ -247,12 +241,14 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             parts = [" ".join(pending).strip(), self._comment_text(item)]
             tip = "  ".join(p for p in parts if p)
             pending = []
-            lbl = ClickableLabel(name)
-            lbl.setStyleSheet("text-decoration: underline dotted; color:#ddd;")
             if tip:
-                lbl.setToolTip(tip)
                 w.setToolTip(tip)
-            lbl.clicked.connect(lambda _n=name, _t=tip: self._show_explain(_n, _t))
+            lbl = make_field_label(
+                name,
+                style="text-decoration: underline dotted; color:#ddd;",
+                tooltip=tip or None,
+                on_click=lambda _n=name, _t=tip: self._show_explain(_n, _t),
+            )
             form.addRow(lbl, w)
             self._fields.append((section, name, w, orig))
             added += 1
@@ -303,7 +299,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             paras.append(" ".join(cur))
         if paras:
             body = "".join(
-                f"<p style='font-size:13px; line-height:1.6;'>{html.escape(p)}</p>"
+                f"<p style='font-size:14px; line-height:1.6;'>{html.escape(p)}</p>"
                 for p in paras
             )
         else:
@@ -321,7 +317,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         ]
         if help_text:
             parts.append(
-                f"<p style='font-size:14px; line-height:1.6;'>"
+                f"<p style='font-size:15px; line-height:1.6;'>"
                 f"{html.escape(help_text)}</p>"
             )
         else:
@@ -331,29 +327,8 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             )
         self._explain.setHtml("".join(parts))
 
-    def _connect_dirty(self, w: QWidget) -> None:
-        if isinstance(w, QComboBox):
-            w.currentTextChanged.connect(self._mark_dirty)
-        elif isinstance(w, QCheckBox):
-            w.toggled.connect(self._mark_dirty)
-        elif isinstance(w, QSpinBox):
-            w.valueChanged.connect(self._mark_dirty)
-        elif isinstance(w, QLineEdit):
-            w.textChanged.connect(self._mark_dirty)
-
-    # ── Dirty tracking ──
-
-    def _mark_dirty(self, *_):
-        if self._dirty:
-            return
-        self._dirty = True
-        self._save_btn.setText(t("save") + " *")
-        self._save_btn.setStyleSheet(self._save_btn_dirty_style)
-
-    def _clear_dirty(self):
-        self._dirty = False
-        self._save_btn.setText(t("save"))
-        self._save_btn.setStyleSheet(self._save_btn_idle_style)
+    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty /
+    #    _update_save_button are inherited from DirtyTrackingMixin. ──
 
     # ── Save ──
 
@@ -396,18 +371,11 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         self._progress_tracker.reset()
         self._progress_tracker.mark_starting(t("starting"))
         self._log(t("daemon_submitting") + "\n")
-        try:
-            resp = gui_daemon.submit_command(label=label, argv=argv)
-        except Exception as e:  # noqa: BLE001 — daemon down / submit failed
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_idle()
-            return
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(label=label, argv=argv),
+            on_fail=self._restore_idle,
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            self._restore_idle()
             return
         self._log(t("daemon_queued", job_id=job_id))
         self._attach(job_id, replay=False)
@@ -434,38 +402,17 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         self._attach(job_id, replay=True)
 
     def _attach(self, job_id: str, *, replay: bool) -> None:
-        self._job_id = job_id
-        self._stdout_buf = ""
-        self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
-        if not replay:
-            self._stdout_tailer.read_new()  # discard backlog from a fresh launch
         self._set_busy()
         self.stop_btn.setEnabled(True)
-        self._job_timer.start()
+        self._watch_job(job_id, replay_log=replay)
 
-    def _poll_job(self) -> None:
-        if not self._job_id:
-            return
-        self._drain_stdout()
-        state = gui_daemon.read_job_state(self._job_id)
-        if gui_daemon.is_terminal(state):
-            self._on_job_finished(state)
-
-    def _drain_stdout(self) -> None:
-        chunk = self._stdout_tailer.read_new()
-        if not chunk:
-            return
-        parts = re.split(r"[\r\n]", self._stdout_buf + chunk)
-        self._stdout_buf = parts[-1]  # incomplete trailing fragment
-        for line in parts[:-1]:
-            if self._progress_tracker.feed(line):
-                continue
-            if line:
-                self._log(line + "\n")
+    def _emit_log_line(self, line: str) -> None:
+        # This tab's log sink is _log (insertPlainText, no auto-newline).
+        self._log(line + "\n")
 
     def _on_job_finished(self, state: str | None) -> None:
         self._job_timer.stop()
-        self._drain_stdout()
+        self._drain_job_stdout()
         if self._stdout_buf:
             self._log(self._stdout_buf + "\n")
         self._stdout_buf = ""
@@ -477,11 +424,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
         self._restore_idle()
 
     def _stop(self):
-        if self._job_id:
-            try:
-                gui_daemon.stop_job(self._job_id)
-            except Exception as e:  # noqa: BLE001
-                self._log(f"stop failed: {e}\n")
+        self._stop_job()
 
     def cleanup_subprocess(self):
         """App-shutdown hook. Stops observing but leaves the daemon job alive —

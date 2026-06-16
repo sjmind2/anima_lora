@@ -120,6 +120,15 @@ Cayley keeps `colspace(ΔW) ⊆ top-2r(W₀)` for the whole run — the "chimera
 
 `ΔW=0` at init is unaffected — it comes from the centered uniform gate (`π − 1/K`), not the basis, so `λ_init > 0` is fine. Save distills with `R = I` to the **identical** `*_chimera.safetensors` free-form layout (the save discriminator keys on `.Q_basis_c`, covering both parameterizations), so inference / loading / merge / ComfyUI need no OrthoInit awareness. Implemented as a flag-branch inside `ChimeraHydraLoRAModule` (forward, `__init__`, `distill_save_state_dict`); threaded `resolver → chimera_hydra spec → cfg.use_ortho_init → network.py`. Tests: `tests/test_lora_dtype_policy.py::test_chimera_ortho_init_*`.
 
+### Per-expert capability levers (frozen-Cayley path)
+
+OrthoInit fixes "feels weak" by freeing the bases — but free bases let experts **drift into the same subspace** under the shared denoise loss ("averaged network", observed collapsing ~4k steps). These two knobs deepen each expert *while keeping the frozen-disjoint cage*, so cross-expert orthogonality stays structurally invariant and experts cannot collapse together. Both require `use_ortho_init=false` and **distill into the standard `(K, out, r)` up-stack** — inference / on-disk layout unchanged.
+
+- **`chimera_expert_basis_mult` (m ≥ 1)** — each expert gets an over-complete `(out, m·r)` frozen pool carved from a **disjoint** U-slice plus an `m·r` Cayley rotation; the forward selects the first `r` columns of the rotated pool, a Stiefel(m·r, r) point. Unlike the canonical case (where the `r×r` rotation is a no-op on the span), the rotation now genuinely **moves the expert's r-dim colspace within its private m·r pool** — the subspace itself trains, but only inside the disjoint slice. Per-layer auto-downgrade to `M=r` when `(K_c+K_f)·m·r` overflows a Linear's width (logged). `m=1` reproduces the canonical r-slice bit-for-bit. The A's solve at size `r`, the B-pools at size `M`, in two batched Cayley calls (one when `M=r`).
+- **`chimera_expert_diag`** — a per-expert `(K, r)` trainable diagonal σ (init 1) folded into the up-projection: the **learnable singular spectrum** the orthogonal-only frozen path lacks (its intrinsic singular values are pinned to 1). `ΔW=0` at init still holds via the centered gate regardless of σ.
+
+`bench/chimera_expert_capacity/run_bench.py` fits an off-r-slice target: subspace freedom (`m=2`) is the dominant lever (~×700 reach vs the r-slice baseline), the diagonal a minor ~×1.15, with cross-expert column cosine ≈ 0 throughout (no collapse). Invariants: `tests/test_chimera_expert_capacity.py` (ΔW=0 at init, distill round-trip faithful, cross-expert orthogonality preserved, default path unchanged).
+
 ## T-LoRA per-half composition
 
 `use_timestep_mask = true` applies the rank mask `mask_t(σ)` to the **content half only**. The freq half keeps full rank at every t.
@@ -158,7 +167,7 @@ ChimeraHydra is a fourth dispatch cell on top of the shared-A row, opt-in via `u
 | `networks/lora_save.py` | `_convert_chimera_dual_a_to_hydra` distills both pools' Cayley layout to free-form (`lora_down_{c,f}.weight` + `lora_up_{c,f}_weight`); `_build_chimera_moe_state_dict` expands to per-expert `lora_ups_{c,f}.{i}.weight` + per-pool q/k/v defuse + writes `*_chimera.safetensors`. Top-level `freq_router.*` passes through both steps. |
 | `networks/__init__.py` | `NETWORK_REGISTRY["chimera_hydra"]` with `save_variant="chimera_hydra_moe"`. `_post_init_hydra` stamps `_use_chimera_hydra` + per-pool balance weights on the network. |
 | `library/inference/models.py` | `_is_chimera_moe(path)` peeks `ss_use_chimera_hydra` from safetensors metadata. Chimera files take the existing Hydra-mode dynamic-hook branch but skip the `lora_unet_*` filter (so top-level `freq_router.*` survives) and pass `file=path` to `create_network_from_weights`. |
-| `library/training/router_conditioning.py` | Routes `set_sigma` → `set_fei` once per step. Chimera force-enables `use_fei_router` so the FEI/σ pipeline fires every step regardless of `cfg.router_source`. |
+| `library/training/forward/router_conditioning.py` | Routes `set_sigma` → `set_fei` once per step. Chimera force-enables `use_fei_router` so the FEI/σ pipeline fires every step regardless of `cfg.router_source`. |
 | `configs/methods/chimera.toml` | Method config driving `make exp-chimera`. |
 | `configs/gui-methods/chimera_hydra.toml` | Self-contained variant config driving `make lora-gui GUI_PRESETS=chimera_hydra`. |
 | `scripts/experimental_tasks/training.py::cmd_chimera` | `exp-chimera` shim. |
@@ -287,7 +296,7 @@ ss_router_source               = "input"
 | T-LoRA | ✅ | Built-in (per-half asymmetric masking — content rank-modulated, freq full-rank). |
 | OrthoLoRA | ✅ | `use_ortho=true` is the chimera default. |
 | DCW (scalar / v4) | ✅ orthogonal | Sampler-level correction; composes with anything upstream of the Euler step. |
-| ComfyUI | ❌ | The 2-A on-disk layout (`lora_ups_c.{i}` + `lora_ups_f.{j}` + dual `lora_down_{c,f}` per Linear) is NOT what the `comfyui-hydralora` node currently understands (it expects the legacy 1-A Hydra-MoE shape). Existing tests under `tests/test_chimera_node_loader.py` exercise the legacy synthetic layout, not the new emitter. ComfyUI loader needs ~150 lines of new code to read the 2-A keys + broadcast `π_f` per step. |
+| ComfyUI | ❌ | The 2-A on-disk layout (`lora_ups_c.{i}` + `lora_ups_f.{j}` + dual `lora_down_{c,f}` per Linear) is NOT what the `comfyui-hydralora` node currently understands (it expects the legacy 1-A Hydra-MoE shape). The legacy chimera node-loader tests (removed with the extracted node) exercised the legacy synthetic layout, not the new emitter. ComfyUI loader needs ~150 lines of new code to read the 2-A keys + broadcast `π_f` per step. |
 | Static merge into DiT | ❌ | `scripts/merge_to_dit.py` refuses MoE methods by default (router is sample-dependent). `--allow-partial` would drop the chimera portion entirely. |
 | FeRA / hydra-moe loaded simultaneously | ❌ | One router scheme per checkpoint; `models.py` refuses two MoE files in one `--lora_weight` list. |
 
@@ -343,14 +352,14 @@ ChimeraHydra's bet: dual-A + structurally-enforced router-input separation makes
 - [`configs/methods/chimera.toml`](../../configs/methods/chimera.toml) — canonical method config (`make exp-chimera`).
 - [`configs/gui-methods/chimera_hydra.toml`](../../configs/gui-methods/chimera_hydra.toml) — GUI-friendly variant config.
 - [`scripts/experimental_tasks/training.py`](../../scripts/experimental_tasks/training.py) — `cmd_chimera` shim.
-- [`docs/proposal/chimera_hydra.md`](../proposal/chimera_hydra.md) — design rationale, bench plan, decision tree, risks.
+- [`_archive/proposals/chimera_hydra.md`](../proposal/chimera_hydra.md) — design rationale, bench plan, decision tree, risks.
 
 ## Status
 
 **Experimental.** Dual-A code lands and round-trip is verified (max abs diff ~9e-3 from bf16 vs fp32 precision in train/inference paths; structural orthogonality confirmed at 6e-4 / 8e-4 on both sides). No bench results yet. Existing 1-A chimera checkpoints **do not load** — retrain to produce the dual-A format.
 
-ComfyUI mirror needs ~150 lines of new node-side code to handle the 2-A on-disk layout + broadcast `π_f` per step. The synthetic-data tests under `tests/test_chimera_node_loader.py` cover the legacy 1-A loader path and need a parallel 2-A test set when the node is updated.
+ComfyUI mirror needs ~150 lines of new node-side code to handle the 2-A on-disk layout + broadcast `π_f` per step. The synthetic-data node-loader tests (since removed) covered the legacy 1-A loader path and need a parallel 2-A test set when the node is updated.
 
 The proposal's bench plan (cells A / B / C / C+T / C-split / C-fei) plus a new dual-A vs single-A A/B is the prerequisite before promoting chimera to a default LoRA-family variant.
 
-See [`docs/proposal/chimera_hydra.md`](../proposal/chimera_hydra.md) §"Decision tree" for the ship/archive criteria after bench results land.
+See [`_archive/proposals/chimera_hydra.md`](../proposal/chimera_hydra.md) §"Decision tree" for the ship/archive criteria after bench results land.

@@ -333,11 +333,23 @@ def create_network(
         network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
         network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
         network._repa_grad_heatmap = float(kwargs.get("repa_grad_heatmap", 0) or 0)
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md): off by
+        # default; when on it replaces the spatial_norm block in the relational
+        # target preprocess. Pure target-side, no head — mirrors the LoRA factory.
+        network._repa_target_dog = _as_bool(kwargs.get("repa_target_dog"))
+        network._repa_dog_sigma1_div = float(
+            kwargs.get("repa_dog_sigma1_div", 16.0) or 16.0
+        )
+        network._repa_dog_sigma2_div = float(
+            kwargs.get("repa_dog_sigma2_div", 0.0) or 0.0
+        )
+        network._repa_dog_norm_std = float(kwargs.get("repa_dog_norm_std", 0.0) or 0.0)
         logger.info(
             f"EasyControl REPA[{repa_mode}]: weight={network._repa_weight}, "
             f"layer={network._repa_layer}, encoder={network._repa_encoder}, "
             f"anneal_steps={network._repa_anneal_steps:g}, "
-            f"spatial_norm={network._repa_spatial_norm}"
+            f"spatial_norm={network._repa_spatial_norm}, "
+            f"target_dog={network._repa_target_dog}"
         )
     else:
         network._repa_weight = 0.0
@@ -1067,6 +1079,9 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_cond_res_scale": str(self.cond_res_scale),
             "ss_channel_scaling_alpha": str(self.channel_scaling_alpha),
         }
+
+    def state_dict_for_save(self, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+        return {k: v.detach().cpu().to(dtype) for k, v in self.state_dict().items()}
 
     def load_weights(self, file):
         if os.path.splitext(file)[1] == ".safetensors":

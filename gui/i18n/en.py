@@ -360,13 +360,37 @@ STRINGS: dict[str, str] = {
     "dataset_sort_asc_tooltip": "Sort A→Z (click to reverse)",
     "dataset_sort_desc_tooltip": "Sort Z→A (click to reverse)",
     "dataset_mask_overlay": "Show mask overlay",
-    "dataset_view_list_tooltip": "Flat list view (click to switch to tree view)",
-    "dataset_view_tree_tooltip": "Folder tree view (click to switch to list view)",
+    "dataset_delete": "Delete",
+    "dataset_delete_tooltip": "Move the images marked with the Delete key (shown in red) to the trash, along with their caption files.",
+    "dataset_delete_clear": "Cancel",
+    "dataset_delete_clear_tooltip": "Clear all deletion marks (Esc un-marks just the current image).",
+    "dataset_delete_confirm_title": "Delete images",
+    "dataset_delete_confirm_body": "Move {n} image(s) and their caption files to the trash?",
+    "dataset_delete_failed": "Some images could not be deleted:\n{err}",
+    "dataset_group_label": "Group {n} — {size} imgs",
+    "dataset_group_rebuild": "Group",
+    "dataset_group_rebuild_tooltip": "Group images by PE-Spatial visual similarity (per-artist). Runs in the job queue.",
+    "dataset_group_queued": "Grouping queued (job {job_id}). Reload this directory when it finishes to see the groups.",
     "n_images_filtered": "{shown} / {total} images",
     "caption": "Caption:",
     "no_caption": "(no caption)",
     "caption_save": "Save",
     "caption_revert": "Revert",
+    "caption_autotag": "Autotag",
+    "caption_autotag_tooltip": (
+        "Run the Anima Tagger on this image and append its predicted tags to "
+        "the caption. The model is downloaded automatically on first use; "
+        "review the result, then Save to write the .txt."
+    ),
+    "caption_autotag_running": "Autotagging…",
+    "caption_autotag_loading": "Loading tagger…",
+    "caption_autotag_ready": "Tagger loaded · ready",
+    "caption_autotag_busy": (
+        "The GPU is busy with another job (training / preprocessing / "
+        "grouping). Try autotagging again once it finishes."
+    ),
+    "caption_autotag_error": "Autotag failed: {err}",
+    "caption_autotag_empty": "The tagger returned no tags for this image.",
     "caption_versions": "Versions…",
     "caption_dirty_marker": " *",
     "caption_diff_stats": "(+{add} / −{rem})",
@@ -396,8 +420,27 @@ STRINGS: dict[str, str] = {
     "language": "Language:",
     # Settings dialog
     "settings_btn": "⚙ Settings",
-    "settings_btn_tooltip": "Application settings — language, MCP server registration",
+    "settings_btn_tooltip": "Application settings — language, preferences, MCP server registration",
     "settings_title": "Settings",
+    "settings_prefs_header": "Preferences",
+    "settings_autotag_confidence": "Autotag confidence:",
+    "settings_autotag_confidence_tooltip": (
+        "Extra probability floor (0–1) applied on top of the tagger's per-tag "
+        "thresholds. Higher = fewer, more confident tags. Default 0.50."
+    ),
+    "settings_theme": "Theme:",
+    "settings_theme_tooltip": (
+        "Overall color theme for the interface. Applies immediately; the window "
+        "rebuilds when you close Settings to fully repaint."
+    ),
+    "settings_theme_dark": "Dark",
+    "settings_theme_light": "Light",
+    "settings_theme_sepia": "Sepia",
+    "settings_font_size": "Font size:",
+    "settings_font_size_tooltip": (
+        "Point size of the interface font. Applies immediately; the window "
+        "rebuilds when you close Settings so every panel relayouts. Default 10."
+    ),
     "settings_mcp_header": "MCP server (agent access)",
     "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
     "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",
@@ -431,6 +474,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "New release {v} available — click to view release notes",
     "report_issue": "Report Issue",
     "report_issue_tooltip": "Open the GitHub issue tracker in your browser",
+    "visit_github": "Visit GitHub page",
+    "open_in_system_viewer": "Open in system viewer",
     # Models dialog
     "models_title": "Download Models",
     "models_intro": "Pick a model group below or use 'Download all' for the standard set "

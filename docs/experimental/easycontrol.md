@@ -9,6 +9,20 @@ target self-attention attends to a key set extended with the cond stream's
 keys/values, and `b_cond` controls how much softmax mass the cond positions
 can claim.
 
+![EasyControl two-stream shared attention](assets/easycontrol_attention.png)
+
+Structurally this is the same shape as a unified multimodal transformer that
+shares one attention between a **clean** subsequence and a **noisy** one under a
+block-structured mask: the cond stream plays the clean/authoritative role
+(attends only to itself, never reads the noisy target — which is exactly why it
+is deterministic across timesteps and KV-cacheable at inference), and the target
+stream full-attends over `[K_t; K_c]`. Two differences from the canonical
+picture: the cond block is **full/bidirectional** (a clean image), not causal
+triangular; and the hard attend/mask boundary on the target→cond columns is
+replaced by a learnable scalar `b_cond` gate (init −10 → step-0 equivalence,
+then learned upward). Regenerate the figure with
+`uv run python docs/experimental/assets/easycontrol_attention.py`.
+
 ## Architecture
 
 **Training** runs a **two-stream block forward** — target and cond inside each
@@ -88,7 +102,7 @@ Concrete details:
 
 ## Step-0 baseline equivalence
 
-The bench at `bench/easycontrol/step0_equivalence.py` settles which
+A step-0 equivalence bench (since removed) settled which
 init makes the extended self-attention match the no-cond baseline at step 0:
 
 | Strategy                             | rel_l2 max | mean α  | Verdict     |
@@ -106,9 +120,9 @@ the softmax — `b_cond` initialized to −10 makes cond contribute ~e⁻¹⁰ �
 of the total softmax mass, and is freely learnable.
 
 `b_cond` is a per-block scalar `nn.Parameter`. Init −10 is set via
-`network_args = ["b_cond_init=-10.0", ...]` in `configs/methods/easycontrol.toml`.
+`network_args = ["b_cond_init=-10.0", ...]` in `configs/easycontrol/easycontrol.toml`.
 
-The same script's **Section B** (`--skip_sweep`) verifies the equivalence
+The same (since-removed) bench's **Section B** verifies the equivalence
 holds under the live two-stream layout — separate cond Q/K/V, cond's own
 RoPE at smaller S_c, cond's own self-attention. Result: rel_l2_max = 2.6e-5
 in fp32 / 8.0e-4 in bf16, α ≈ 1.0 — same EXACT verdict.
@@ -194,8 +208,8 @@ inference-side change.
 **Equivalence.** At `cond_res_scale = 1.0` the downscale block is skipped and
 the cond RoPE is the native-position table — bit-exact to the pre-PAI path, so
 existing checkpoints are unaffected. The `b_cond` step-0 baseline equivalence is
-undisturbed (PAI only moves cond positions, not the gate). Verified by
-`bench/easycontrol/pai_equivalence.py`.
+undisturbed (PAI only moves cond positions, not the gate). Verified by a
+PAI-equivalence bench (since removed).
 
 ## Variants
 
@@ -207,7 +221,7 @@ projects live under `easycontrol_adapters/`.
 
 | Variant      | `EASYADAPTER` | Condition                                   | Config                                | Project                              |
 | ------------ | ------------- | ------------------------------------------- | ------------------------------------- | ------------------------------------ |
-| **default**  | *(unset)*     | the reference image itself (cond == target) | `configs/methods/easycontrol.toml`    | —                                    |
+| **default**  | *(unset)*     | the reference image itself (cond == target) | `configs/easycontrol/easycontrol.toml`    | —                                    |
 | **colorize** | `colorize`    | synthetic mangafied B&W (XDoG + screentone) | `configs/easycontrol/colorize.toml`†  | `easycontrol_adapters/colorization/` |
 
 † colorize is a self-contained **descriptor** (top-level `name` + `[staging]` /
@@ -267,7 +281,9 @@ CFG dropout for image conditioning (independent of text):
   Patched `Block.forward` then falls through to the original baseline DiT
   behavior. Lets inference do image-CFG independently of text-CFG.
 
-REPA auxiliary loss (optional, `network_args = ["use_repa=true", ...]`):
+REPA auxiliary loss (optional, `network_args = ["use_repa=true", ...]`) —
+**validated and shipped as the default for cond ≠ target tasks** (sanitize /
+near-twins, colorize):
 - Relational (Gram) alignment of mid-block target-stream hiddens to cached
   PE-Spatial patch tokens of the clean target image — same machinery as the
   LoRA family's REPA v2 (`library/training/repa.py`; knobs `repa_weight` /
@@ -275,24 +291,25 @@ REPA auxiliary loss (optional, `network_args = ["use_repa=true", ...]`):
   frozen, the alignment gradient reaches the cond LoRA solely through the
   extended self-attention in blocks ≤ `repa_layer`, so the term acts as a
   *conditioning-utilization* pressure: the only way to satisfy it is to pull
-  clean spatial structure from the reference. First wired for the sanitize
-  (near_twins) task, where the structural-consistency signal lands exactly on
-  the edit region (see `configs/easycontrol/near_twins.toml`); for ref==target
-  subject control it would instead reward layout copying — use with care.
-  Needs `{stem}_anima_pe_spatial.safetensors` sidecars next to the TE caches
-  (near_twins: `[preprocess] pe_encoder = "pe_spatial"` → re-run
-  `make easycontrol-preprocess EASYADAPTER=near_twin`). On cond-dropped steps
-  the term has no trainable path (frozen target stream) — keep `drop_p` low or
-  zero when using it.
+  clean spatial structure from the reference. Wired for sanitize (near_twins),
+  where the structural-consistency signal lands exactly on the edit region
+  (see `configs/easycontrol/near_twins.toml`), and for colorize (region
+  coherence pulled from the manga cond, see `configs/easycontrol/colorize.toml`).
+  For ref==target subject control it would instead reward layout copying — use
+  with care. Needs `{stem}_anima_pe_spatial.safetensors` sidecars (near_twins:
+  `[preprocess] pe_encoder = "pe_spatial"` → re-run
+  `make easycontrol-preprocess EASYADAPTER=near_twin`); the loader walks a
+  fallback chain (`_repa_pe_sidecar_candidates`) so the colorize
+  `text_cache_dir` redirect still finds the sidecars in the shared latent cache.
+  On cond-dropped steps the term has no trainable path (frozen target stream) —
+  keep `drop_p` low or zero when using it.
 - **Launch sanity (load-bearing)**: confirm `repa/align_loss` appears in the
   progress jsonl from the first logged step, alongside `repa/active = 1.0`.
-  Runs before the 2026-06-12 train.py dispatch fix trained as silent
-  baselines (the adapter `extra_forwards` dispatch only ran on the
-  cached-crossattn branch, which EasyControl doesn't use) — the
-  `anima_easycontrol_sanitize_repa{,_normed}` checkpoints are
-  baseline-equivalent. `active=1.0` *without* `align_loss` is exactly that
-  failure signature. Operating-point plan:
-  `docs/proposal/easycontrol_repa_operating_point.md`.
+  `active=1.0` *without* `align_loss` is the silent-baseline failure signature
+  (the pre-2026-06-12 dispatch bug, since fixed — the aux-loss `extra_forwards`
+  dispatch ran only on the cached-crossattn branch, which EasyControl's
+  in-model text path doesn't use). The operating-point validation is closed;
+  the archived roadmap is `_archive/proposals/easycontrol_repa_operating_point.md`.
 
 ### Inference
 
@@ -312,7 +329,7 @@ Optional `EC_SCALE=0.8` to override the saved scale at test time.
 
 ## Memory envelope
 
-Measured peak GPU memory in the smoke bench (`bench/easycontrol/two_stream_smoke.py`,
+Measured peak GPU memory in the smoke bench (since removed;
 gradient checkpointing on, target latent 64×64, batch 1, bf16):
 
 | Configuration                            | Peak GPU memory |
@@ -433,7 +450,7 @@ cond_scale)` change; subsequent KSampler steps use the cache automatically.
    joint-softmax backward is implemented manually because FA2's stock
    backward drops the upstream gradient on `softmax_lse`. Verified against
    masked-SDPA reference within fp32 ulp on forward and all gradients
-   (`bench/easycontrol/step1p5_lse_equivalence.py`). Falls back to
+   (via an LSE-equivalence bench, since removed). Falls back to
    masked-SDPA when flash-attn is unavailable.
 
 ## History
@@ -458,12 +475,8 @@ training (vs Phase 1.5's >16 GiB OOM at the same bucket).
 | Path                                            | Purpose                                                |
 | ----------------------------------------------- | ------------------------------------------------------ |
 | `networks/methods/easycontrol.py`                 | `EasyControlNetwork` + patched `Block.forward` closure |
-| `configs/methods/easycontrol.toml`              | Method config (default ref==target)                    |
+| `configs/easycontrol/easycontrol.toml`              | Method config (default ref==target)                    |
 | `configs/gui-methods/easycontrol.toml`          | GUI-friendly self-contained variant                    |
 | `configs/easycontrol/colorize.toml`             | Colorize **descriptor** — `name` + `[staging]`/`[preprocess]`/`[training]` tables + blueprint + `[variant]` GUI metadata (the single source of truth; folds onto the base easycontrol method) |
 | `configs/easycontrol/near_twins.toml`           | Near-twins descriptor (same shape; text-removal control task)          |
 | `easycontrol_adapters/colorization/`            | Colorize project — mangafy + `prep.py` + color-caption filter + README |
-| `bench/easycontrol/step0_equivalence.py` | `b_cond=-10` init recipe + two-stream verification     |
-| `bench/easycontrol/pai_equivalence.py`   | PAI: scale-1.0 bit-exactness + integer-ratio grid alignment |
-| `bench/easycontrol/step1p5_lse_equivalence.py` | LSE-decomposed Function vs masked-SDPA reference |
-| `bench/easycontrol/two_stream_smoke.py`  | End-to-end forward+backward smoke + peak memory        |

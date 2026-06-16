@@ -73,6 +73,7 @@ rides the step metrics. Decision rule per the Phase-1 proposal: ~uniform
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Optional
 
@@ -174,6 +175,76 @@ def relational_gram_loss(
     return F.mse_loss(g_dit, g_pe)
 
 
+def _safe_blur(grid: torch.Tensor, sigma: float, gh: int, gw: int) -> torch.Tensor:
+    """``gaussian_blur_2d`` guarded against a kernel wider than the grid.
+
+    ``gaussian_blur_2d`` reflect-pads by ``ceil(3σ)``; reflect padding needs
+    ``pad ≤ min_dim − 1``. On the coarse PE grid (~28–46 patches/side) the
+    REPA-DoG divisors (≥16) never trigger this, but clamp σ defensively so an
+    aggressive small divisor degrades to the widest valid blur instead of
+    crashing — same guard as the Phase-0 probe (``bench/repa/probe_dog_target.py``).
+    """
+    from library.runtime.fei import gaussian_blur_2d
+
+    if sigma <= 0:
+        return grid
+    max_pad = min(gh, gw) - 1
+    if math.ceil(3.0 * sigma) > max_pad:
+        sigma = max(1e-3, (max_pad - 0.01) / 3.0)
+    return gaussian_blur_2d(grid, sigma)
+
+
+def dog_standardize(
+    pe: torch.Tensor,
+    gh: int,
+    gw: int,
+    sigma1_div: float,
+    sigma2_div: float = 0.0,
+    norm_std: float = 0.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Difference-of-Gaussians band-pass of the target tokens (REPA-DoG).
+
+    Generalizes ``spatial_norm``'s DC removal to a broader low-band strip
+    (arXiv:2603.14645v1 §3.5, ``docs/proposal/repa_dog_target.md``). Phase 0
+    (``bench/repa/probe_dog_target.py``) found this lifts target
+    discriminability on all 3 content axes (best ``σ₁ = min/16``). ``pe`` is
+    ``(B, N, d)`` with ``N == gh*gw`` (CLS already dropped); reshaped to the
+    ``(gh, gw)`` grid in row-major order, band-passed, standardized, and
+    flattened back for the per-token L2-norm + Gram match — so it slots in
+    **instead of** ``relational_gram_loss``'s ``spatial_norm`` block.
+
+    Filter ``H(Z)`` on the per-channel feature map ``Z`` ``(B, d, gh, gw)``:
+
+    * ``sigma2_div <= 0``  → ``Z − LP(Z, σ₁)``            high-pass (the +1a corner)
+    * ``sigma2_div > 0``   → ``LP(Z, σ₂) − LP(Z, σ₁)``    band-pass (+1b)
+
+    with ``σ₁ = min(gh,gw)/sigma1_div`` (outer, the broad low band removed) and
+    ``σ₂ = min(gh,gw)/sigma2_div`` (inner, tighter ⇒ ``sigma2_div > sigma1_div`` ⇒
+    ``σ₂ < σ₁``, rolling off the very-high tail). At ``σ₁→0`` this reduces to the
+    shipped DC removal, so ``spatial_norm`` is its degenerate special case.
+
+    ``norm_std`` is the paper's std-normalization confound (Table 6): ``0``
+    (default) divides by the empirical per-channel spatial std — *identical to
+    the shipped ``spatial_norm`` std*, so an A/B attributes the delta to the
+    band-pass alone. ``> 0`` divides by that fixed constant instead (the paper's
+    ``normalization_std`` regime), for an optional follow-up ablation.
+    """
+    b, n, d = pe.shape
+    grid = pe.transpose(1, 2).reshape(b, d, gh, gw)  # row-major (B, d, gh, gw)
+    s1 = float(min(gh, gw)) / float(sigma1_div)
+    if sigma2_div > 0:
+        s2 = float(min(gh, gw)) / float(sigma2_div)
+        h = _safe_blur(grid, s2, gh, gw) - _safe_blur(grid, s1, gh, gw)
+    else:
+        h = grid - _safe_blur(grid, s1, gh, gw)
+    denom = (
+        (h.std(dim=(2, 3), keepdim=True) + eps) if norm_std <= 0 else float(norm_std)
+    )
+    h = h / denom
+    return h.reshape(b, d, n).transpose(1, 2)  # back to (B, N, d)
+
+
 def relational_align_loss(
     captured: torch.Tensor,
     pe: torch.Tensor,
@@ -182,6 +253,10 @@ def relational_align_loss(
     spec,
     *,
     spatial_norm: bool = False,
+    dog: bool = False,
+    dog_sigma1_div: float = 16.0,
+    dog_sigma2_div: float = 0.0,
+    dog_norm_std: float = 0.0,
 ) -> torch.Tensor:
     """One-shot relational alignment: CLS-drop → grid-match → pool → Gram MSE.
 
@@ -190,12 +265,19 @@ def relational_align_loss(
     carries one. This is the probe entry point (``bench/turbo_repa/``); the
     training adapter composes the same pieces itself because it also needs the
     pooled tokens (absolute arm head, grad-heatmap probe).
+
+    ``dog`` applies the REPA-DoG band-pass (:func:`dog_standardize`) to the
+    target **instead of** ``spatial_norm`` (the two are the same family — DoG at
+    ``σ₁→0`` is DC removal — so they're mutually exclusive; ``dog`` wins).
     """
     n_pe = pe.shape[1] - (1 if spec.use_cls else 0)
     gh, gw = resolve_pe_grid(spec, n_pe, latent_hw[0], latent_hw[1])
     if spec.use_cls:
         pe = pe[:, 1:, :]
     dit_tok = pool_dit_tokens_to_grid(captured, latent_hw, patch, gh, gw)
+    if dog:
+        pe = dog_standardize(pe, gh, gw, dog_sigma1_div, dog_sigma2_div, dog_norm_std)
+        return relational_gram_loss(dit_tok, pe, spatial_norm=False)
     return relational_gram_loss(dit_tok, pe, spatial_norm=spatial_norm)
 
 
@@ -245,6 +327,13 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = None
         self._anneal_steps = 0.0
         self._spatial_norm = False
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md): a broader
+        # low-band strip than spatial_norm's DC removal. Off (dog False) ⇒ inert
+        # — when on it replaces the spatial_norm block in the relational loss.
+        self._dog = False
+        self._dog_sigma1_div = 16.0
+        self._dog_sigma2_div = 0.0
+        self._dog_norm_std = 0.0
         # Optimizer-step clock: train micro-batches seen, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
@@ -284,6 +373,21 @@ class REPAMethodAdapter(MethodAdapter):
         encoder = str(getattr(net, "_repa_encoder", "pe_spatial"))
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
+
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md). Replaces
+        # the spatial_norm DC-removal block in the relational loss when on
+        # (relational mode only — it preprocesses the target, no head needed).
+        self._dog = bool(getattr(net, "_repa_target_dog", False))
+        self._dog_sigma1_div = float(getattr(net, "_repa_dog_sigma1_div", 16.0) or 16.0)
+        self._dog_sigma2_div = float(getattr(net, "_repa_dog_sigma2_div", 0.0) or 0.0)
+        self._dog_norm_std = float(getattr(net, "_repa_dog_norm_std", 0.0) or 0.0)
+        if self._dog and self._mode != "relational":
+            logger.warning(
+                "REPA: repa_target_dog is a relational target-preprocessing "
+                "lever; ignored in %s mode.",
+                self._mode,
+            )
+            self._dog = False
 
         if self._mode == "absolute" and getattr(net, "repa_head", None) is None:
             raise ValueError(
@@ -326,8 +430,9 @@ class REPAMethodAdapter(MethodAdapter):
             f"REPA[{self._mode}]: hook on block {self._layer}/{len(blocks)}, "
             f"encoder={encoder} grid≤{self._spec.t_max_patches}tok, "
             f"weight={weight}{anneal_desc}"
-            f"{', spatial_norm' if self._spatial_norm else ''}"
+            f"{', spatial_norm' if self._spatial_norm and not self._dog else ''}"
             f"{f', grad_heatmap/{self._grad_heatmap_every}' if self._grad_heatmap_every else ''}"
+            f"{f', dog(σ1=min/{self._dog_sigma1_div:g}, σ2={"off" if self._dog_sigma2_div <= 0 else f"min/{self._dog_sigma2_div:g}"}, norm_std={"empirical" if self._dog_norm_std <= 0 else self._dog_norm_std})' if self._dog else ''}"
             f"{head_desc}"
         )
 
@@ -429,7 +534,22 @@ class REPAMethodAdapter(MethodAdapter):
             cos = F.cosine_similarity(proj, pe, dim=-1)  # (B, N)
             loss = (1.0 - cos).mean()
         else:
-            loss = relational_gram_loss(dit_tok, pe, spatial_norm=self._spatial_norm)
+            if self._dog:
+                # REPA-DoG: band-pass the target instead of spatial_norm's DC
+                # removal (mutually exclusive — DoG at σ₁→0 *is* DC removal).
+                pe_t = dog_standardize(
+                    pe,
+                    gh,
+                    gw,
+                    self._dog_sigma1_div,
+                    self._dog_sigma2_div,
+                    self._dog_norm_std,
+                )
+                loss = relational_gram_loss(dit_tok, pe_t, spatial_norm=False)
+            else:
+                loss = relational_gram_loss(
+                    dit_tok, pe, spatial_norm=self._spatial_norm
+                )
 
             if self._grad_heatmap_every > 0:
                 if self._heat_runs % self._grad_heatmap_every == 0:

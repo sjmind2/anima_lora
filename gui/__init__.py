@@ -30,11 +30,16 @@ from gui._paths import (
     CONFIGS_DIR,
     CUSTOM_DIR,
     CUSTOM_VARIANTS_DIR,
+    DEFAULT_AUTOTAG_CONFIDENCE,
+    DEFAULT_THEME_COLOR,
     GUI_METHODS_DIR,
+    GUI_SETTINGS_FILE,
     IMAGE_EXTS,
     METHODS_DIR,
     PRESETS_FILE,
     ROOT,
+    get_setting,
+    set_setting,
 )
 from gui.config_io import (
     _BASIC,
@@ -83,6 +88,8 @@ from gui.validation import (
     apply_validation_choice,
 )
 from gui.widgets import (
+    ClickableLabel,
+    DirtyTrackingMixin,
     LazyTabMixin,
     ScaledImageLabel,
     _SamplePromptsWidget,
@@ -90,6 +97,7 @@ from gui.widgets import (
     _read,
     _TargetResWidget,
     _widget,
+    make_field_label,
 )
 
 # Cache-file suffixes written by the preprocess scripts. Kept in sync with
@@ -323,6 +331,13 @@ __all__ = [
     "PRESETS_FILE",
     "CUSTOM_DIR",
     "CUSTOM_VARIANTS_DIR",
+    "GUI_SETTINGS_FILE",
+    "DEFAULT_AUTOTAG_CONFIDENCE",
+    "DEFAULT_THEME_COLOR",
+    "get_setting",
+    "set_setting",
+    "ClickableLabel",
+    "DirtyTrackingMixin",
     "LazyTabMixin",
     "ScaledImageLabel",
     "_SamplePromptsWidget",
@@ -330,6 +345,7 @@ __all__ = [
     "_no_wheel",
     "_read",
     "_widget",
+    "make_field_label",
     "_load",
     "_load_base",
     "_save",
